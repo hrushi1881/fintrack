@@ -21,6 +21,9 @@ interface Transaction {
   location?: string;
   reference_number?: string;
   tags?: string[];
+  created_at?: string;
+  balance_before?: number;
+  balance_after?: number;
   account?: {
     name: string;
     color: string;
@@ -51,7 +54,7 @@ export default function TransactionDetailScreen() {
 
   const fetchTransactionDetails = async () => {
     try {
-      // Fetch the main transaction
+      // Fetch the main transaction (including created_at, balance_before, balance_after)
       const { data: transactionData, error: transactionError } = await supabase
         .from('transactions')
         .select(`
@@ -67,6 +70,11 @@ export default function TransactionDetailScreen() {
         console.error('Error fetching transaction:', transactionError);
         Alert.alert('Error', 'Failed to load transaction details');
         return;
+      }
+
+      // Ensure created_at exists
+      if (transactionData && !transactionData.created_at) {
+        transactionData.created_at = transactionData.date;
       }
 
       setTransaction(transactionData);
@@ -114,30 +122,135 @@ export default function TransactionDetailScreen() {
 
   const calculateBalanceImpact = async (transaction: Transaction) => {
     try {
-      // Get current account balance
+      // Use stored balance_before and balance_after if available (for new transactions)
+      if (transaction.balance_before !== null && transaction.balance_before !== undefined &&
+          transaction.balance_after !== null && transaction.balance_after !== undefined) {
+        setBeforeBalance(Number(transaction.balance_before));
+        setAfterBalance(Number(transaction.balance_after));
+        console.log('Using stored balance values:', {
+          balance_before: transaction.balance_before,
+          balance_after: transaction.balance_after,
+        });
+        return;
+      }
+
+      // Fallback: For old transactions without stored balances, calculate from history
+      // Get all transactions for this account, ordered chronologically
+      const { data: allTransactions, error: transactionsError } = await supabase
+        .from('transactions')
+        .select('id, amount, date, created_at, balance_before, balance_after')
+        .eq('account_id', transaction.account_id)
+        .order('date', { ascending: true })
+        .order('created_at', { ascending: true });
+
+      if (transactionsError) throw transactionsError;
+
+      // Get account's current balance
       const { data: accountData, error: accountError } = await supabase
         .from('accounts')
-        .select('balance')
+        .select('balance, created_at')
         .eq('id', transaction.account_id)
         .single();
 
       if (accountError) throw accountError;
 
-      const currentBalance = accountData.balance;
+      const currentBalance = Number(accountData.balance) || 0;
+
+      // Calculate initial balance: current balance minus all transaction amounts
+      // Transaction amounts are already signed (negative for expenses, positive for income)
+      const sumOfAllTransactions = (allTransactions || []).reduce(
+        (sum, t) => sum + (Number(t.amount) || 0),
+        0
+      );
+      const initialBalance = currentBalance - sumOfAllTransactions;
+
+      // Now calculate running balance up to and including this transaction
+      const transactionDate = transaction.date;
+      const transactionCreatedAt = transaction.created_at || transaction.date;
       
-      // Calculate before balance by reversing the transaction
-      let beforeBalance: number;
-      if (transaction.type === 'income') {
-        beforeBalance = currentBalance - transaction.amount;
-      } else if (transaction.type === 'expense') {
-        beforeBalance = currentBalance + transaction.amount;
-      } else {
-        // For transfers, we need to check both accounts
-        beforeBalance = currentBalance + transaction.amount;
+      let runningBalance = initialBalance;
+      let beforeBalance = initialBalance;
+      let afterBalance = initialBalance;
+      let foundTransaction = false;
+
+      // Calculate running balance chronologically
+      for (const txn of allTransactions || []) {
+        const txnDate = txn.date;
+        const txnCreatedAt = txn.created_at || txn.date;
+        
+        // Check if we've reached our target transaction
+        const isTargetTransaction = txn.id === transaction.id;
+        
+        if (isTargetTransaction) {
+          // Use stored balance if available, otherwise calculate
+          if (txn.balance_before !== null && txn.balance_before !== undefined &&
+              txn.balance_after !== null && txn.balance_after !== undefined) {
+            beforeBalance = Number(txn.balance_before);
+            afterBalance = Number(txn.balance_after);
+          } else {
+            // This is our transaction - balance before it
+            beforeBalance = runningBalance;
+            // Apply transaction to get balance after
+            afterBalance = runningBalance + Number(txn.amount);
+          }
+          foundTransaction = true;
+          break;
+        } else {
+          // Check if this transaction is before our target
+          const isBefore = 
+            txnDate < transactionDate || 
+            (txnDate === transactionDate && txnCreatedAt < transactionCreatedAt);
+          
+          if (isBefore) {
+            // Use stored balance_after if available, otherwise calculate
+            if (txn.balance_after !== null && txn.balance_after !== undefined) {
+              runningBalance = Number(txn.balance_after);
+            } else {
+              // This transaction happened before our target - include it in running balance
+              runningBalance = runningBalance + Number(txn.amount);
+            }
+          } else {
+            // This transaction happened after our target - we've passed it
+            break;
+          }
+        }
+      }
+
+      // If we didn't find the transaction in the list (shouldn't happen), use fallback
+      if (!foundTransaction) {
+        // Fallback: calculate from current balance and transactions after
+        const transactionsAfter = (allTransactions || []).filter(t => {
+          if (t.id === transaction.id) return false;
+          const txnDate = t.date;
+          const txnCreatedAt = t.created_at || t.date;
+          return (
+            txnDate > transactionDate ||
+            (txnDate === transactionDate && txnCreatedAt > transactionCreatedAt)
+          );
+        });
+
+        const sumAfter = transactionsAfter.reduce(
+          (sum, t) => sum + (Number(t.amount) || 0),
+          0
+        );
+        
+        afterBalance = currentBalance - sumAfter;
+        beforeBalance = afterBalance - Number(transaction.amount);
       }
 
       setBeforeBalance(beforeBalance);
-      setAfterBalance(currentBalance);
+      setAfterBalance(afterBalance);
+
+      console.log('Balance Impact Calculation (fallback):', {
+        transactionId: transaction.id,
+        transactionAmount: transaction.amount,
+        transactionType: transaction.type,
+        transactionDate: transaction.date,
+        beforeBalance,
+        afterBalance,
+        currentBalance,
+        foundInSequence: foundTransaction,
+      });
 
     } catch (error) {
       console.error('Error calculating balance impact:', error);

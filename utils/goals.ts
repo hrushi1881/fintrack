@@ -162,75 +162,36 @@ export async function addContributionToGoal(contributionData: AddContributionDat
     throw new Error(`Failed to find Goal Savings category: ${categoryError.message}`);
   }
 
-  // Start a transaction
-  const { data: transaction, error: transactionError } = await supabase
-    .from('transactions')
-    .insert({
-      user_id: goal.user_id,
-      account_id: source_account_id,
-      amount: amount,
-      currency: goal.currency,
-      type: 'transfer',
-      description: description || `Contribution to ${goal.title}`,
-      date: new Date().toISOString(),
-      category_id: goalCategory.id,
-      metadata: {
-        goal_id: goal_id,
-        contribution_type: 'manual',
-        goal_title: goal.title,
-        destination_account_id: goalsAccount.id,
-      },
-    })
-    .select()
-    .single();
-
-  if (transactionError) {
-    throw new Error(`Failed to create transaction: ${transactionError.message}`);
+  // Spend from source account (personal bucket)
+  const { data: spendResult, error: spendError } = await supabase.rpc('spend_from_account_bucket', {
+    p_user_id: goal.user_id,
+    p_account_id: source_account_id,
+    p_bucket: { type: 'personal', id: null },
+    p_amount: amount,
+    p_category: goalCategory.id,
+    p_description: description || `Contribution to ${goal.title}`,
+    p_date: new Date().toISOString().split('T')[0],
+    p_currency: goal.currency,
+  });
+  if (spendError) {
+    throw new Error(`Failed to spend from source account: ${spendError.message}`);
   }
 
-  // Create corresponding transaction for Goals Savings Account
-  const { data: goalsTransaction, error: goalsTransactionError } = await supabase
-    .from('transactions')
-    .insert({
-      user_id: goal.user_id,
-      account_id: goalsAccount.id,
-      amount: amount,
-      currency: goal.currency,
-      type: 'transfer',
-      description: description || `Contribution to ${goal.title}`,
-      date: new Date().toISOString(),
-      category_id: goalCategory.id,
-      metadata: {
-        goal_id: goal_id,
-        contribution_type: 'manual',
-        goal_title: goal.title,
-        source_account_id: source_account_id,
-      },
-    })
-    .select()
-    .single();
+  const createdExpenseId = (spendResult as any)?.id || (spendResult as any)?.transaction_id || null;
 
-  if (goalsTransactionError) {
-    throw new Error(`Failed to create goals transaction: ${goalsTransactionError.message}`);
-  }
-
-  // Update account balances
-  const { error: sourceUpdateError } = await supabase
-    .from('accounts')
-    .update({ balance: sourceAccount.balance - amount })
-    .eq('id', source_account_id);
-
-  if (sourceUpdateError) {
-    throw new Error(`Failed to update source account balance: ${sourceUpdateError.message}`);
-  }
-
-  const { error: goalsUpdateError } = await supabase
-    .from('accounts')
-    .update({ balance: goalsAccount.balance + amount })
-    .eq('id', goalsAccount.id);
-
-  if (goalsUpdateError) {
-    throw new Error(`Failed to update goals account balance: ${goalsUpdateError.message}`);
+  // Receive into Goals Savings account as goal bucket for this goal
+  const { error: receiveError } = await supabase.rpc('receive_to_account_bucket', {
+    p_user_id: goal.user_id,
+    p_account_id: goalsAccount.id,
+    p_bucket: { type: 'goal', id: goal_id },
+    p_amount: amount,
+    p_category: goalCategory.id,
+    p_description: description || `Contribution to ${goal.title}`,
+    p_date: new Date().toISOString().split('T')[0],
+    p_currency: goal.currency,
+  });
+  if (receiveError) {
+    throw new Error(`Failed to receive into goal bucket: ${receiveError.message}`);
   }
 
   // Update goal current amount
@@ -256,7 +217,7 @@ export async function addContributionToGoal(contributionData: AddContributionDat
     .from('goal_contributions')
     .insert({
       goal_id: goal_id,
-      transaction_id: transaction.id,
+      transaction_id: createdExpenseId,
       amount: amount,
       source_account_id: source_account_id,
       contribution_type: 'manual',
@@ -630,75 +591,36 @@ export async function withdrawFromGoal(
     throw new Error(`Failed to find Goal Savings category: ${categoryError.message}`);
   }
 
-  // Create transaction from Goals Savings Account to destination
-  const { data: transaction, error: transactionError } = await supabase
-    .from('transactions')
-    .insert({
-      user_id: goal.user_id,
-      account_id: goalsAccount.id,
-      amount: amount,
-      currency: goal.currency,
-      type: 'transfer',
-      description: note || `Withdrawal from ${goal.title}`,
-      date: new Date().toISOString(),
-      category_id: goalCategory.id,
-      metadata: {
-        goal_id: goalId,
-        withdrawal_type: 'manual',
-        goal_title: goal.title,
-        destination_account_id: destinationAccountId,
-      },
-    })
-    .select()
-    .single();
-
-  if (transactionError) {
-    throw new Error(`Failed to create withdrawal transaction: ${transactionError.message}`);
+  // Spend from goal bucket in Goals Savings account
+  const { data: spendResult, error: spendError } = await supabase.rpc('spend_from_account_bucket', {
+    p_user_id: goal.user_id,
+    p_account_id: goalsAccount.id,
+    p_bucket: { type: 'goal', id: goalId },
+    p_amount: amount,
+    p_category: goalCategory.id,
+    p_description: note || `Withdrawal from ${goal.title}`,
+    p_date: new Date().toISOString().split('T')[0],
+    p_currency: goal.currency,
+  });
+  if (spendError) {
+    throw new Error(`Failed to spend from goal bucket: ${spendError.message}`);
   }
 
-  // Create corresponding transaction for destination account
-  const { data: destTransaction, error: destTransactionError } = await supabase
-    .from('transactions')
-    .insert({
-      user_id: goal.user_id,
-      account_id: destinationAccountId,
-      amount: amount,
-      currency: goal.currency,
-      type: 'transfer',
-      description: note || `Withdrawal from ${goal.title}`,
-      date: new Date().toISOString(),
-      category_id: goalCategory.id,
-      metadata: {
-        goal_id: goalId,
-        withdrawal_type: 'manual',
-        goal_title: goal.title,
-        source_account_id: goalsAccount.id,
-      },
-    })
-    .select()
-    .single();
+  const createdWithdrawalTxnId = (spendResult as any)?.id || (spendResult as any)?.transaction_id || null;
 
-  if (destTransactionError) {
-    throw new Error(`Failed to create destination transaction: ${destTransactionError.message}`);
-  }
-
-  // Update account balances
-  const { error: goalsUpdateError } = await supabase
-    .from('accounts')
-    .update({ balance: goalsAccount.balance - amount })
-    .eq('id', goalsAccount.id);
-
-  if (goalsUpdateError) {
-    throw new Error(`Failed to update goals account balance: ${goalsUpdateError.message}`);
-  }
-
-  const { error: destUpdateError } = await supabase
-    .from('accounts')
-    .update({ balance: destAccount.balance + amount })
-    .eq('id', destinationAccountId);
-
-  if (destUpdateError) {
-    throw new Error(`Failed to update destination account balance: ${destUpdateError.message}`);
+  // Receive into destination account (personal funds)
+  const { error: receiveError } = await supabase.rpc('receive_to_account_bucket', {
+    p_user_id: goal.user_id,
+    p_account_id: destinationAccountId,
+    p_bucket: { type: 'personal', id: null },
+    p_amount: amount,
+    p_category: goalCategory.id,
+    p_description: note || `Withdrawal from ${goal.title}`,
+    p_date: new Date().toISOString().split('T')[0],
+    p_currency: goal.currency,
+  });
+  if (receiveError) {
+    throw new Error(`Failed to receive into destination account: ${receiveError.message}`);
   }
 
   // Update goal current amount
@@ -717,7 +639,8 @@ export async function withdrawFromGoal(
     throw new Error(`Failed to update goal: ${goalUpdateError.message}`);
   }
 
-  return { goal: updatedGoal, transaction };
+  // Return stub transaction with id if created; otherwise return updated goal
+  return { goal: updatedGoal, transaction: { id: createdWithdrawalTxnId } as any };
 }
 
 /**

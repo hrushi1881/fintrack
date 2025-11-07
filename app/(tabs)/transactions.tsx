@@ -38,7 +38,7 @@ interface Transaction {
 export default function TransactionsScreen() {
   const { user } = useAuth();
   const { backgroundMode } = useBackgroundMode();
-  const { transactions, loading, refreshTransactions } = useRealtimeData();
+  const { transactions, loading, refreshTransactions, refreshAccounts } = useRealtimeData();
   const { currency } = useSettings();
   const [selectedDate, setSelectedDate] = useState('');
   const [viewMode, setViewMode] = useState('list'); // 'list' or 'calendar'
@@ -253,6 +253,7 @@ export default function TransactionsScreen() {
                   category={transaction.category?.name || 'Other'}
                   description={transaction.description}
                   date={transaction.date}
+                  metadata={(transaction as any).metadata}
                   onPress={() => router.push(`/transaction/${transaction.id}`)}
                 />
               ))
@@ -314,8 +315,9 @@ export default function TransactionsScreen() {
         onClose={() => {
           setPayModalVisible(false);
         }}
-        onSuccess={() => {
-          refreshTransactions(); // Refresh transactions after adding
+        onSuccess={async () => {
+          // Refresh both transactions and accounts to show updated balances
+          await Promise.all([refreshTransactions(), refreshAccounts()]);
         }}
       />
       <ReceiveModal 
@@ -323,8 +325,9 @@ export default function TransactionsScreen() {
         onClose={() => {
           setReceiveModalVisible(false);
         }}
-        onSuccess={() => {
-          refreshTransactions(); // Refresh transactions after adding
+        onSuccess={async () => {
+          // Refresh both transactions and accounts to show updated balances
+          await Promise.all([refreshTransactions(), refreshAccounts()]);
         }}
       />
       <TransferModal 
@@ -332,8 +335,9 @@ export default function TransactionsScreen() {
         onClose={() => {
           setTransferModalVisible(false);
         }}
-        onSuccess={() => {
-          refreshTransactions(); // Refresh transactions after adding
+        onSuccess={async () => {
+          // Refresh both transactions and accounts to show updated balances
+          await Promise.all([refreshTransactions(), refreshAccounts()]);
         }}
       />
     </>

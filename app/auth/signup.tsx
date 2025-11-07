@@ -32,6 +32,13 @@ export default function SignUpScreen() {
       return false;
     }
 
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email.trim())) {
+      Alert.alert('Invalid Email', 'Please enter a valid email address');
+      return false;
+    }
+
     if (password !== confirmPassword) {
       Alert.alert('Error', 'Passwords do not match');
       return false;
@@ -63,13 +70,15 @@ export default function SignUpScreen() {
       });
       
       if (error) {
-        Alert.alert('Sign Up Failed', error.message);
+        console.error('Sign up error:', error);
+        Alert.alert('Sign Up Failed', error.message || 'Unable to create account. Please try again.');
       } else {
         // Navigate directly to account setup
         router.replace('/account-setup');
       }
-    } catch (error) {
-      Alert.alert('Error', 'An unexpected error occurred');
+    } catch (error: any) {
+      console.error('Unexpected sign up error:', error);
+      Alert.alert('Error', error?.message || 'An unexpected error occurred. Please try again.');
     } finally {
       setIsLoading(false);
     }

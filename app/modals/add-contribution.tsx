@@ -6,7 +6,11 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useNotification } from '@/contexts/NotificationContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
+import { useLiabilities } from '@/contexts/LiabilitiesContext';
+import FundPicker, { FundBucket } from '@/components/FundPicker';
+import { supabase } from '@/lib/supabase';
 import { addContributionToGoal, AddContributionData, checkMilestoneAchievements, checkGoalCompletion } from '@/utils/goals';
+import { createCategory } from '@/utils/categories';
 import { formatCurrencyAmount } from '@/utils/currency';
 import { Goal } from '@/types';
 
@@ -32,6 +36,8 @@ export default function AddContributionModal({
   const [sourceAccountId, setSourceAccountId] = useState('');
   const [description, setDescription] = useState('');
   const [loading, setLoading] = useState(false);
+  const [selectedFundBucket, setSelectedFundBucket] = useState<FundBucket | null>(null);
+  const [showFundPicker, setShowFundPicker] = useState(false);
 
   // Filter out Goals Savings Account from source accounts
   const availableAccounts = accounts.filter(account => account.type !== 'goals_savings');
@@ -41,6 +47,20 @@ export default function AddContributionModal({
       setSourceAccountId(availableAccounts[0].id);
     }
   }, [visible, availableAccounts, sourceAccountId]);
+
+  // Reset fund bucket when source account changes
+  useEffect(() => {
+    if (sourceAccountId && selectedFundBucket) {
+      setSelectedFundBucket(null);
+    }
+  }, [sourceAccountId]);
+
+  // Auto-show fund picker when account is selected
+  useEffect(() => {
+    if (visible && sourceAccountId && !selectedFundBucket) {
+      setShowFundPicker(true);
+    }
+  }, [visible, sourceAccountId]);
 
   const handleSubmit = async () => {
     if (!user || !goal) return;
@@ -62,21 +82,120 @@ export default function AddContributionModal({
       return;
     }
 
-    if (sourceAccount.balance < amountValue) {
-      Alert.alert('Error', 'Insufficient balance in source account');
+    // We rely on bucket-aware deduction; base balance check is not sufficient when using liability/goal buckets
+
+    if (!selectedFundBucket) {
+      Alert.alert('Error', 'Please select a fund source');
       return;
     }
 
     setLoading(true);
     try {
-      const contributionData: AddContributionData = {
-        goal_id: goal.id,
-        amount: amountValue,
-        source_account_id: sourceAccountId,
-        description: description.trim() || undefined,
+      // Get Goals Savings Account
+      const { data: goalsAccount, error: goalsAccErr } = await supabase
+        .from('accounts')
+        .select('*')
+        .eq('user_id', user.id)
+        .eq('type', 'goals_savings')
+        .single();
+      if (goalsAccErr || !goalsAccount) throw new Error('Goals Savings Account not found');
+
+      // Get Goal Savings category; create if missing
+      let goalCategoryId: string | null = null;
+      const { data: goalCategory, error: categoryError } = await supabase
+        .from('categories')
+        .select('id')
+        .eq('user_id', user.id)
+        .eq('name', 'Goal Savings')
+        .contains('activity_types', ['goal'])
+        .eq('is_deleted', false)
+        .single();
+      if (goalCategory?.id) {
+        goalCategoryId = goalCategory.id;
+      } else {
+        try {
+          const created = await createCategory({
+            name: 'Goal Savings',
+            color: '#10B981',
+            icon: 'flag',
+            activity_types: ['goal'] as any,
+          });
+          goalCategoryId = created.id;
+        } catch (e) {
+          throw new Error('Goal Savings category not found');
+        }
+      }
+
+      // 1) Deduct from selected bucket using spend_from_account_bucket
+      const bucketParam = {
+        type: selectedFundBucket.type,
+        id: selectedFundBucket.type !== 'personal' ? selectedFundBucket.id : null,
       };
 
-      const { goal: updatedGoal } = await addContributionToGoal(contributionData);
+      const { data: sourceTxn, error: bucketErr } = await supabase.rpc('spend_from_account_bucket', {
+        p_user_id: user.id,
+        p_account_id: sourceAccountId,
+        p_bucket: bucketParam,
+        p_amount: amountValue,
+        p_category: goalCategoryId,
+        p_description: description.trim() || `Contribution to ${goal.title}`,
+        p_date: new Date().toISOString().split('T')[0],
+        p_currency: goal.currency,
+      });
+      if (bucketErr) throw bucketErr;
+
+      // 2) Receive into Goals Savings account as goal bucket using RPC
+      // Get category name for the RPC (it expects category name, not ID)
+      const { data: goalCategoryData } = await supabase
+        .from('categories')
+        .select('name')
+        .eq('id', goalCategoryId)
+        .single();
+      
+      const categoryName = goalCategoryData?.name || 'Goal Savings';
+
+      const { error: receiveError } = await supabase.rpc('receive_to_account_bucket', {
+        p_user_id: user.id,
+        p_account_id: goalsAccount.id,
+        p_bucket_type: 'goal',
+        p_bucket_id: goal.id,
+        p_amount: amountValue,
+        p_category: categoryName,
+        p_description: description.trim() || `Contribution to ${goal.title}`,
+        p_date: new Date().toISOString().split('T')[0],
+        p_notes: `Contribution from ${accounts.find(acc => acc.id === sourceAccountId)?.name || 'account'}`,
+        p_currency: goal.currency,
+      });
+      if (receiveError) throw receiveError;
+
+      // 3) Get the transaction ID from the source transaction (spend_from_account_bucket result)
+      // The receive_to_account_bucket creates a transaction internally, but we need to link it
+      // Let's fetch the most recent transaction for this goal contribution
+      const { data: recentTransactions, error: fetchTxnError } = await supabase
+        .from('transactions')
+        .select('id')
+        .eq('account_id', goalsAccount.id)
+        .eq('type', 'income')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+      
+      if (fetchTxnError) {
+        console.warn('Could not fetch transaction ID for goal contribution:', fetchTxnError);
+      }
+
+      // 4) Create goal contribution record (link to the expense transaction from source account)
+      const sourceTransactionId = (sourceTxn as any)?.id || (sourceTxn as any)?.transaction_id || null;
+      const { error: contributionError } = await supabase
+        .from('goal_contributions')
+        .insert({
+          goal_id: goal.id,
+          transaction_id: sourceTransactionId || recentTransactions?.id,
+          amount: amountValue,
+          source_account_id: sourceAccountId,
+          contribution_type: 'manual',
+        });
+      if (contributionError) throw contributionError;
       
       // Refresh data to show updated goal progress and account balances
       await Promise.all([
@@ -84,6 +203,9 @@ export default function AddContributionModal({
         refreshAccounts(),
         refreshTransactions(),
       ]);
+      
+      // Small delay to ensure database has committed and state has updated
+      await new Promise(resolve => setTimeout(resolve, 200));
 
       // Check if goal is now completed
       try {
@@ -145,6 +267,8 @@ export default function AddContributionModal({
   };
 
   const selectedAccount = availableAccounts.find(acc => acc.id === sourceAccountId);
+  
+  // Styles for selected fund info
 
   return (
     <Modal
@@ -224,7 +348,10 @@ export default function AddContributionModal({
                         styles.accountOption,
                         sourceAccountId === account.id && styles.accountOptionSelected
                       ]}
-                      onPress={() => setSourceAccountId(account.id)}
+                      onPress={() => {
+                        setSourceAccountId(account.id);
+                        setShowFundPicker(true);
+                      }}
                     >
                       <View style={styles.accountInfo}>
                         <View style={[styles.accountIcon, { backgroundColor: account.color }]}>
@@ -243,6 +370,25 @@ export default function AddContributionModal({
                     </TouchableOpacity>
                   ))}
                 </View>
+                {sourceAccountId && selectedFundBucket && (
+                  <View style={styles.selectedFundInfo}>
+                    <Ionicons 
+                      name={
+                        selectedFundBucket.type === 'personal' ? 'wallet' :
+                        selectedFundBucket.type === 'liability' ? 'card' :
+                        'flag'
+                      } 
+                      size={16} 
+                      color="#10B981" 
+                    />
+                    <Text style={styles.selectedFundText}>
+                      Using: {selectedFundBucket.name}
+                    </Text>
+                    <TouchableOpacity onPress={() => setShowFundPicker(true)}>
+                      <Text style={styles.changeFundText}>Change</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
               </View>
 
               {/* Description */}
@@ -288,6 +434,17 @@ export default function AddContributionModal({
             </View>
           </ScrollView>
         </SafeAreaView>
+        {/* FundPicker Modal */}
+        <FundPicker
+          visible={showFundPicker}
+          onClose={() => setShowFundPicker(false)}
+          accountId={sourceAccountId}
+          amount={amount ? parseFloat(amount) : 0}
+          onSelect={(bucket) => {
+            setSelectedFundBucket(bucket);
+            setShowFundPicker(false);
+          }}
+        />
       </LinearGradient>
     </Modal>
   );
@@ -450,6 +607,11 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: 'rgba(255, 255, 255, 0.7)',
   },
+  accountDetailText: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.6)',
+    marginTop: 2,
+  },
   textInput: {
     backgroundColor: 'rgba(255, 255, 255, 0.1)',
     borderRadius: 12,
@@ -491,5 +653,25 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: 'white',
+  },
+  selectedFundInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 12,
+    padding: 12,
+    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    borderRadius: 8,
+    gap: 8,
+  },
+  selectedFundText: {
+    flex: 1,
+    fontSize: 14,
+    color: '#10B981',
+    fontWeight: '600',
+  },
+  changeFundText: {
+    fontSize: 14,
+    color: '#10B981',
+    textDecorationLine: 'underline',
   },
 });

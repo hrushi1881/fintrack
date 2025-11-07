@@ -6,9 +6,11 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useNotification } from '@/contexts/NotificationContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
+import { useLiabilities } from '@/contexts/LiabilitiesContext';
 import { supabase } from '@/lib/supabase';
 import { formatCurrencyAmount } from '@/utils/currency';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import FundPicker, { FundBucket } from '@/components/FundPicker';
 
 interface PayModalProps {
   visible: boolean;
@@ -21,7 +23,8 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
   const { user } = useAuth();
   const { showNotification } = useNotification();
   const { currency } = useSettings();
-  const { globalRefresh } = useRealtimeData();
+  const { globalRefresh, refreshAccounts } = useRealtimeData();
+  const { getAccountBreakdown } = useLiabilities();
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState('');
@@ -32,6 +35,10 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
   const [categories, setCategories] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [errors, setErrors] = useState<{[key: string]: string}>({});
+  
+  // Fund selection state
+  const [selectedFundBucket, setSelectedFundBucket] = useState<FundBucket | null>(null);
+  const [showFundPicker, setShowFundPicker] = useState(false);
 
   // Fetch user accounts
   useEffect(() => {
@@ -45,8 +52,26 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
   useEffect(() => {
     if (visible && preselectedAccountId) {
       setAccount(preselectedAccountId);
+      setSelectedFundBucket(null); // Reset fund bucket when account changes
     }
   }, [visible, preselectedAccountId]);
+
+  // When account is selected, show fund picker if not already selected
+  useEffect(() => {
+    if (visible && account && !selectedFundBucket) {
+      // Auto-show fund picker when account is selected
+      setShowFundPicker(true);
+    }
+  }, [visible, account]);
+
+  // Reset fund bucket when account changes
+  useEffect(() => {
+    if (account && selectedFundBucket) {
+      // Keep fund bucket only if it's still valid for the account
+      // For now, reset it when account changes
+      setSelectedFundBucket(null);
+    }
+  }, [account]);
 
   const fetchAccounts = async () => {
     try {
@@ -81,6 +106,8 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
     }
   };
 
+
+
   const validateForm = () => {
     const newErrors: {[key: string]: string} = {};
 
@@ -92,6 +119,10 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
 
     if (!account) {
       newErrors.account = 'Please select an account';
+    }
+
+    if (!selectedFundBucket) {
+      newErrors.fundBucket = 'Please select a fund source';
     }
 
     if (!category) {
@@ -114,28 +145,74 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
     try {
       const amountValue = parseFloat(amount);
       
-      // Create transaction using our helper function
-      const { data, error } = await supabase.rpc('create_transaction', {
+      // Get category name from category ID
+      const selectedCategory = categories.find(cat => cat.id === category);
+      const categoryName = selectedCategory?.name || null;
+
+      if (!selectedFundBucket) {
+        throw new Error('No fund source selected');
+      }
+
+      // Use spend_from_account_bucket RPC (expects p_bucket as JSONB)
+      const bucketParam = {
+        type: selectedFundBucket.type,
+        id: selectedFundBucket.type !== 'personal' ? selectedFundBucket.id : null,
+      };
+
+      // Get category ID for the RPC (it expects category_id, not category name)
+      const selectedCategoryId = categories.find(cat => cat.id === category)?.id || null;
+
+      console.log('📤 Calling spend_from_account_bucket RPC:', {
         p_user_id: user?.id,
         p_account_id: account,
+        p_bucket: bucketParam,
         p_amount: amountValue,
-        p_type: 'expense',
-        p_category: category,
+        p_category: selectedCategoryId,
+      });
+
+      const { data: rpcData, error } = await supabase.rpc('spend_from_account_bucket', {
+        p_user_id: user?.id,
+        p_account_id: account,
+        p_bucket: bucketParam,
+        p_amount: amountValue,
+        p_category: selectedCategoryId,
         p_description: description.trim(),
         p_date: date.toISOString().split('T')[0],
-        p_notes: `Payment made on ${date}`,
         p_currency: currency
       });
 
-      if (error) throw error;
+      if (error) {
+        console.error('❌ RPC Error:', error);
+        throw error;
+      }
 
-      // Get account name for notification
-      const selectedAccount = accounts.find(acc => acc.id === account);
-      const accountName = selectedAccount?.name || 'Account';
+      console.log('✅ RPC Success, refreshing account data...');
+      
+      // Force immediate account refresh to get updated balance
+      await refreshAccounts();
+      
+      // Small delay to ensure database has committed and state has updated
+      await new Promise(resolve => setTimeout(resolve, 200));
 
-      // Get category name for notification
-      const selectedCategory = categories.find(cat => cat.id === category);
-      const categoryName = selectedCategory?.name || 'Other';
+      // Get account name for notification (fetch fresh account data directly from DB)
+      const { data: freshAccountData } = await supabase
+        .from('accounts')
+        .select('name, balance')
+        .eq('id', account)
+        .single();
+      
+      const accountName = freshAccountData?.name || 'Account';
+
+      // Category name already retrieved above
+      const displayCategoryName = categoryName || 'Uncategorized';
+
+      // Build notification description based on fund source
+      let descriptionText = displayCategoryName;
+      if (selectedFundBucket.type === 'liability') {
+        descriptionText += ` (from ${selectedFundBucket.name})`;
+      } else if (selectedFundBucket.type === 'goal') {
+        descriptionText += ` (from ${selectedFundBucket.name})`;
+      }
 
       // Show success notification
       showNotification({
@@ -143,13 +220,16 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
         title: 'Paid',
         amount: amountValue,
         currency: currency,
-        description: categoryName,
+        description: descriptionText,
         account: accountName,
         date: date.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }),
       });
 
-      // Global refresh to update all data
+      // Global refresh to update all data (accounts already refreshed above)
       await globalRefresh();
+
+      // Additional delay to ensure all UI components have refreshed
+      await new Promise(resolve => setTimeout(resolve, 200));
 
       onSuccess?.(); // Call success callback for immediate UI update
       
@@ -159,6 +239,7 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
       setCategory('');
       setAccount('');
       setDate(new Date());
+      setSelectedFundBucket(null);
       setErrors({});
       onClose();
 
@@ -261,13 +342,13 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
                     key={cat.id}
                     style={[
                       styles.categoryButton,
-                      category === cat.name && styles.selectedCategory
+                      category === cat.id && styles.selectedCategory
                     ]}
-                    onPress={() => setCategory(cat.name)}
+                    onPress={() => setCategory(cat.id)}
                   >
                     <Text style={[
                       styles.categoryText,
-                      category === cat.name && styles.selectedCategoryText
+                      category === cat.id && styles.selectedCategoryText
                     ]}>
                       {cat.name}
                     </Text>
@@ -287,7 +368,10 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
                       styles.accountButton,
                       account === acc.id.toString() && styles.selectedAccount
                     ]}
-                    onPress={() => setAccount(acc.id.toString())}
+                    onPress={() => {
+                      setAccount(acc.id.toString());
+                      setSelectedFundBucket(null); // Reset fund bucket when account changes
+                    }}
                   >
                     <View style={styles.accountInfo}>
                       <Text style={[
@@ -300,7 +384,7 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
                         styles.accountBalance,
                         account === acc.id.toString() && styles.selectedAccountText
                       ]}>
-                        ${acc.balance.toLocaleString()}
+                        {formatCurrencyAmount(acc.balance, currency)}
                       </Text>
                     </View>
                     {account === acc.id.toString() && (
@@ -309,7 +393,53 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
                   </TouchableOpacity>
                 ))}
               </View>
+              {errors.account && <Text style={styles.errorText}>{errors.account}</Text>}
             </View>
+
+            {/* Selected Fund Source */}
+            {account && (
+              <View style={styles.inputCard}>
+                <Text style={styles.inputLabel}>Fund Source</Text>
+                {selectedFundBucket ? (
+                  <TouchableOpacity
+                    style={styles.fundBucketButton}
+                    onPress={() => setShowFundPicker(true)}
+                  >
+                    <View style={styles.fundBucketInfo}>
+                      <View style={[styles.fundBucketIcon, { backgroundColor: (selectedFundBucket.color || '#6366F1') + '20' }]}>
+                        <Ionicons
+                          name={
+                            selectedFundBucket.type === 'personal'
+                              ? 'person'
+                              : selectedFundBucket.type === 'liability'
+                              ? 'card'
+                              : 'flag'
+                          }
+                          size={20}
+                          color={selectedFundBucket.color || '#6366F1'}
+                        />
+                      </View>
+                      <View style={styles.fundBucketDetails}>
+                        <Text style={styles.fundBucketName}>{selectedFundBucket.name}</Text>
+                        <Text style={styles.fundBucketAmount}>
+                          Available: {formatCurrencyAmount(selectedFundBucket.amount, currency)}
+                        </Text>
+                      </View>
+                    </View>
+                    <Ionicons name="chevron-forward" size={20} color="rgba(255,255,255,0.7)" />
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity
+                    style={styles.selectFundButton}
+                    onPress={() => setShowFundPicker(true)}
+                  >
+                    <Ionicons name="wallet-outline" size={20} color="#10B981" />
+                    <Text style={styles.selectFundText}>Select Fund Source</Text>
+                  </TouchableOpacity>
+                )}
+                {errors.fundBucket && <Text style={styles.errorText}>{errors.fundBucket}</Text>}
+              </View>
+            )}
 
             {/* Date Input */}
             <View style={styles.inputCard}>
@@ -349,9 +479,22 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
                 </View>
               </View>
             </View>
+
           </ScrollView>
         </SafeAreaView>
       </LinearGradient>
+
+      {/* Fund Picker Modal */}
+      <FundPicker
+        visible={showFundPicker}
+        onClose={() => setShowFundPicker(false)}
+        accountId={account}
+        onSelect={(bucket) => {
+          setSelectedFundBucket(bucket);
+          setShowFundPicker(false);
+        }}
+        amount={parseFloat(amount) || 0}
+      />
     </Modal>
   );
 }
@@ -507,6 +650,25 @@ const styles = StyleSheet.create({
     color: '#9CA3AF',
     fontSize: 14,
   },
+  accountBreakdown: {
+    marginTop: 4,
+    gap: 2,
+  },
+  accountBalanceText: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.7)',
+    fontWeight: '600',
+  },
+  personalFundsText: {
+    fontSize: 11,
+    color: '#10B981',
+    marginTop: 2,
+  },
+  liabilityFundsText: {
+    fontSize: 11,
+    color: '#EF4444',
+    marginTop: 2,
+  },
   selectedAccountText: {
     color: '#10B981',
   },
@@ -548,6 +710,167 @@ const styles = StyleSheet.create({
   balanceAfter: {
     color: '#10B981',
     fontSize: 16,
+    fontWeight: 'bold',
+  },
+  sourceToggle: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 12,
+    padding: 4,
+  },
+  sourceButton: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  selectedSource: {
+    backgroundColor: '#10B981',
+  },
+  sourceText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: '500',
+  },
+  selectedSourceText: {
+    color: 'white',
+    fontWeight: 'bold',
+  },
+  liabilityList: {
+    gap: 8,
+  },
+  liabilityButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 12,
+    padding: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  selectedLiability: {
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    borderWidth: 1,
+    borderColor: '#10B981',
+  },
+  liabilityInfo: {
+    flex: 1,
+  },
+  liabilityName: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  liabilityBalance: {
+    color: '#9CA3AF',
+    fontSize: 14,
+  },
+  selectedLiabilityText: {
+    color: '#10B981',
+  },
+  liabilityPortionText: {
+    color: '#F59E0B',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  checkboxRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  checkboxLabel: {
+    color: 'white',
+    fontSize: 14,
+    marginLeft: 8,
+  },
+  dateButtonText: {
+    color: 'white',
+    fontSize: 16,
+  },
+  dateButtonPlaceholder: {
+    color: 'rgba(255,255,255,0.7)',
+  },
+  segmentedControl: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  segment: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+  },
+  activeSegment: {
+    backgroundColor: '#10B981',
+  },
+  segmentDivider: {
+    width: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  fundBucketButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 12,
+    padding: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  fundBucketInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  fundBucketIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  fundBucketDetails: {
+    flex: 1,
+  },
+  fundBucketName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#fff',
+    marginBottom: 4,
+  },
+  fundBucketAmount: {
+    fontSize: 14,
+    color: 'rgba(255, 255, 255, 0.7)',
+  },
+  selectFundButton: {
+    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    borderRadius: 12,
+    padding: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#10B981',
+    borderStyle: 'dashed',
+  },
+  selectFundText: {
+    color: '#10B981',
+    fontSize: 16,
+    fontWeight: '600',
+    marginLeft: 8,
+  },
+  segmentText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: 14,
+    fontWeight: '500',
+    marginLeft: 8,
+  },
+  activeSegmentText: {
+    color: 'white',
     fontWeight: 'bold',
   },
 });

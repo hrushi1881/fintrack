@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, Alert } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
 import { useBackgroundMode } from '@/contexts/BackgroundModeContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
@@ -31,6 +31,13 @@ export default function AccountsScreen() {
   const { accounts, totalBalance, loading, refreshAccounts } = useRealtimeData();
   const { currency } = useSettings();
   const [addAccountModalVisible, setAddAccountModalVisible] = useState(false);
+
+  // Refresh accounts when screen comes into focus to ensure latest balances
+  useFocusEffect(
+    React.useCallback(() => {
+      refreshAccounts().catch(console.error);
+    }, [refreshAccounts])
+  );
 
   const formatCurrency = (amount: number) => {
     return formatCurrencyAmount(amount, currency);
@@ -133,6 +140,8 @@ export default function AccountsScreen() {
                       icon: iconType,
                       backgroundColor: 'rgba(153, 215, 149, 1)',
                       iconBackgroundColor: '#000',
+                      liabilityFunds: (account as any).liability_funds,
+                      ownFunds: (account as any).own_funds,
                     }}
                     onPress={(id) => router.push(`/account/${id}`)}
                     style={{ marginBottom: index === accounts.length - 1 ? 0 : 12 }}

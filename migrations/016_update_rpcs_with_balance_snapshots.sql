@@ -1,0 +1,540 @@
+-- Migration 016: Update RPC functions to capture and store balance snapshots
+-- Created: 2025-01-29
+-- Purpose: Modify transaction-creating RPCs to store balance_before and balance_after
+
+-- Update spend_from_account_bucket to capture balance snapshots
+CREATE OR REPLACE FUNCTION spend_from_account_bucket(
+  p_user_id uuid,
+  p_account_id uuid,
+  p_bucket jsonb,
+  p_amount numeric,
+  p_category text,
+  p_description text,
+  p_date date DEFAULT CURRENT_DATE,
+  p_currency text DEFAULT 'USD'::text
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $function$
+DECLARE
+  v_balance DECIMAL(14,2);
+  v_balance_before DECIMAL(14,2);
+  v_balance_after DECIMAL(14,2);
+  v_total_liability DECIMAL(14,2) := 0;
+  v_total_goal DECIMAL(14,2) := 0;
+  v_personal_available DECIMAL(14,2);
+  v_type TEXT := lower(p_bucket->>'type');
+  v_id UUID := NULL;
+  v_category_id UUID := NULL;
+BEGIN
+  IF v_type NOT IN ('personal','liability','goal') THEN
+    RAISE EXCEPTION 'Invalid bucket type';
+  END IF;
+  IF v_type IN ('liability','goal') THEN
+    v_id := (p_bucket->>'id')::UUID;
+    IF v_id IS NULL THEN RAISE EXCEPTION 'Missing bucket id'; END IF;
+  END IF;
+
+  -- Cast category from TEXT to UUID (handle NULL)
+  IF p_category IS NOT NULL AND p_category != '' THEN
+    BEGIN
+      v_category_id := p_category::UUID;
+    EXCEPTION WHEN OTHERS THEN
+      RAISE EXCEPTION 'Invalid category UUID: %', p_category;
+    END;
+  END IF;
+
+  -- Get current balance (this is balance_before)
+  SELECT balance INTO v_balance FROM accounts WHERE id = p_account_id AND user_id = p_user_id;
+  IF v_balance IS NULL THEN RAISE EXCEPTION 'Account not found'; END IF;
+  v_balance_before := v_balance;
+
+  -- Sum liability portions for account
+  SELECT COALESCE(SUM((amount)::DECIMAL),0) INTO v_total_liability
+  FROM account_liability_portions
+  WHERE account_id = p_account_id;
+
+  -- Sum goal portions for account
+  SELECT COALESCE(SUM((amount)::DECIMAL),0) INTO v_total_goal
+  FROM account_goal_portions
+  WHERE account_id = p_account_id;
+
+  v_personal_available := GREATEST(v_balance - v_total_liability - v_total_goal, 0);
+
+  IF v_type = 'personal' THEN
+    IF p_amount > v_personal_available THEN
+      RAISE EXCEPTION 'Insufficient personal funds (available %)', v_personal_available;
+    END IF;
+  ELSIF v_type = 'liability' THEN
+    -- Ensure sufficient specific liability portion
+    IF NOT EXISTS (
+      SELECT 1 FROM account_liability_portions
+      WHERE account_id = p_account_id AND liability_id = v_id AND amount >= p_amount
+    ) THEN
+      RAISE EXCEPTION 'Insufficient liability funds in selected bucket';
+    END IF;
+    -- Deduct portion
+    UPDATE account_liability_portions
+    SET amount = amount - p_amount,
+        updated_at = NOW()
+    WHERE account_id = p_account_id AND liability_id = v_id;
+    DELETE FROM account_liability_portions
+    WHERE account_id = p_account_id AND liability_id = v_id AND amount <= 0;
+  ELSE
+    -- goal
+    IF NOT EXISTS (
+      SELECT 1 FROM account_goal_portions
+      WHERE account_id = p_account_id AND goal_id = v_id AND amount >= p_amount
+    ) THEN
+      RAISE EXCEPTION 'Insufficient goal funds in selected bucket';
+    END IF;
+    UPDATE account_goal_portions
+    SET amount = amount - p_amount,
+        updated_at = NOW()
+    WHERE account_id = p_account_id AND goal_id = v_id;
+    DELETE FROM account_goal_portions
+    WHERE account_id = p_account_id AND goal_id = v_id AND amount <= 0;
+  END IF;
+
+  -- Decrement account balance
+  UPDATE accounts SET balance = balance - p_amount, updated_at = NOW() WHERE id = p_account_id;
+  
+  -- Get balance after (should be balance_before - p_amount)
+  SELECT balance INTO v_balance_after FROM accounts WHERE id = p_account_id;
+  
+  -- Insert expense transaction with balance snapshots
+  INSERT INTO transactions (
+    user_id, account_id, amount, currency, type,
+    description, date, category_id, metadata,
+    balance_before, balance_after
+  ) VALUES (
+    p_user_id, p_account_id, -p_amount, p_currency, 'expense',
+    p_description, p_date, v_category_id,
+    jsonb_build_object('bucket_type', v_type, 'bucket_id', v_id),
+    v_balance_before, v_balance_after
+  );
+END;
+$function$;
+
+-- Update receive_to_account_bucket to capture balance snapshots
+CREATE OR REPLACE FUNCTION receive_to_account_bucket(
+  p_user_id uuid,
+  p_account_id uuid,
+  p_bucket_type text,
+  p_bucket_id uuid,
+  p_amount numeric,
+  p_category text,
+  p_description text,
+  p_date date DEFAULT CURRENT_DATE,
+  p_notes text DEFAULT NULL::text,
+  p_currency text DEFAULT 'INR'::text
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $function$
+DECLARE
+  v_category_id uuid;
+  v_account_currency text;
+  v_balance_before DECIMAL(14,2);
+  v_balance_after DECIMAL(14,2);
+BEGIN
+  -- Get account currency and current balance (balance_before)
+  SELECT currency, balance INTO v_account_currency, v_balance_before 
+  FROM accounts 
+  WHERE id = p_account_id;
+  
+  -- Find or create category
+  SELECT id INTO v_category_id
+  FROM categories
+  WHERE user_id = p_user_id 
+    AND name = p_category 
+    AND is_deleted = false
+  LIMIT 1;
+  
+  -- Create category if not found (optional - you may want to require category exists)
+  IF v_category_id IS NULL THEN
+    -- For now, allow null category_id
+    v_category_id := NULL;
+  END IF;
+
+  -- Update account balance
+  UPDATE accounts 
+  SET balance = balance + p_amount,
+      updated_at = NOW()
+  WHERE id = p_account_id;
+  
+  -- Get balance after
+  SELECT balance INTO v_balance_after FROM accounts WHERE id = p_account_id;
+
+  -- If bucket_type is 'goal', add/update account_goal_portions
+  IF p_bucket_type = 'goal' AND p_bucket_id IS NOT NULL THEN
+    INSERT INTO account_goal_portions (account_id, goal_id, amount, notes)
+    VALUES (p_account_id, p_bucket_id, p_amount, p_notes)
+    ON CONFLICT (account_id, goal_id)
+    DO UPDATE SET 
+      amount = account_goal_portions.amount + EXCLUDED.amount,
+      updated_at = NOW();
+      
+    -- Update goal current_amount
+    UPDATE goals
+    SET current_amount = current_amount + p_amount,
+        updated_at = NOW()
+    WHERE id = p_bucket_id;
+  END IF;
+  -- Note: Personal funds are just account balance minus liability/goal portions (no separate table)
+
+  -- Create income transaction with balance snapshots
+  INSERT INTO transactions (
+    user_id, account_id, amount, currency, type, 
+    description, date, category_id, metadata,
+    balance_before, balance_after
+  ) VALUES (
+    p_user_id, p_account_id, p_amount, COALESCE(v_account_currency, p_currency), 'income',
+    p_description, p_date, v_category_id,
+    jsonb_build_object(
+      'bucket_type', p_bucket_type,
+      'bucket_id', p_bucket_id,
+      'notes', p_notes
+    ),
+    v_balance_before, v_balance_after
+  );
+
+END;
+$function$;
+
+-- Update repay_liability to capture balance snapshots
+CREATE OR REPLACE FUNCTION repay_liability(
+  p_user_id uuid,
+  p_account_id uuid,
+  p_liability_id uuid,
+  p_amount numeric,
+  p_date date DEFAULT CURRENT_DATE,
+  p_notes text DEFAULT NULL::text
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $function$
+DECLARE
+  v_balance DECIMAL(14,2);
+  v_balance_before DECIMAL(14,2);
+  v_balance_after DECIMAL(14,2);
+  v_currency TEXT;
+BEGIN
+  -- Get current balance and currency (balance_before)
+  SELECT balance, currency INTO v_balance, v_currency 
+  FROM accounts 
+  WHERE id = p_account_id AND user_id = p_user_id;
+  
+  IF v_balance IS NULL THEN RAISE EXCEPTION 'Account not found'; END IF;
+  IF p_amount <= 0 THEN RAISE EXCEPTION 'Invalid amount'; END IF;
+  IF v_balance < p_amount THEN RAISE EXCEPTION 'Insufficient account balance'; END IF;
+
+  v_balance_before := v_balance;
+
+  -- Deduct from account
+  UPDATE accounts SET balance = balance - p_amount, updated_at = NOW() WHERE id = p_account_id;
+  
+  -- Get balance after
+  SELECT balance INTO v_balance_after FROM accounts WHERE id = p_account_id;
+
+  -- Reduce liability owed
+  UPDATE liabilities SET current_balance = GREATEST(current_balance - p_amount, 0), updated_at = NOW() WHERE id = p_liability_id;
+
+  -- Log
+  INSERT INTO liability_activity_log(liability_id, user_id, activity_type, amount, notes)
+  VALUES (p_liability_id, p_user_id, 'repay', p_amount, p_notes);
+
+  -- Transaction record with balance snapshots
+  INSERT INTO transactions(user_id, account_id, amount, currency, type, description, date, metadata, balance_before, balance_after)
+  VALUES (
+    p_user_id, p_account_id, -p_amount, v_currency, 'expense', 
+    COALESCE(p_notes,'Liability Repayment'), p_date,
+    jsonb_build_object('liability_id', p_liability_id, 'bucket','repay'),
+    v_balance_before, v_balance_after
+  );
+END;
+$function$;
+
+-- Update settle_liability_portion to capture balance snapshots
+CREATE OR REPLACE FUNCTION settle_liability_portion(
+  p_user_id uuid,
+  p_account_id uuid,
+  p_liability_id uuid,
+  p_amount numeric,
+  p_date date DEFAULT CURRENT_DATE,
+  p_notes text DEFAULT NULL::text
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $function$
+DECLARE
+  v_portion_amount DECIMAL(14,2);
+  v_balance_before DECIMAL(14,2);
+  v_balance_after DECIMAL(14,2);
+  v_currency TEXT;
+BEGIN
+  -- Get liability portion amount
+  SELECT amount INTO v_portion_amount
+  FROM account_liability_portions 
+  WHERE account_id = p_account_id 
+    AND liability_id = p_liability_id;
+  
+  IF v_portion_amount IS NULL THEN
+    RAISE EXCEPTION 'No liability portion found for account % and liability %', p_account_id, p_liability_id;
+  END IF;
+  
+  IF v_portion_amount < p_amount THEN
+    RAISE EXCEPTION 'Insufficient liability funds: have %, need %', v_portion_amount, p_amount;
+  END IF;
+
+  -- Get current balance and currency (balance_before)
+  SELECT balance, currency INTO v_balance_before, v_currency
+  FROM accounts
+  WHERE id = p_account_id AND user_id = p_user_id;
+  
+  IF v_balance_before IS NULL THEN RAISE EXCEPTION 'Account not found'; END IF;
+
+  -- Deduct from account balance
+  UPDATE accounts 
+  SET balance = balance - p_amount,
+      updated_at = now()
+  WHERE id = p_account_id;
+  
+  -- Get balance after
+  SELECT balance INTO v_balance_after FROM accounts WHERE id = p_account_id;
+  
+  -- Update liability portion
+  UPDATE account_liability_portions
+  SET amount = amount - p_amount,
+      updated_at = now()
+  WHERE account_id = p_account_id 
+    AND liability_id = p_liability_id;
+  
+  -- Delete portion if amount becomes zero or negative
+  DELETE FROM account_liability_portions
+  WHERE account_id = p_account_id 
+    AND liability_id = p_liability_id
+    AND amount <= 0;
+    
+  -- Update liability balance
+  UPDATE liabilities
+  SET current_balance = current_balance - p_amount,
+      updated_at = now()
+  WHERE id = p_liability_id;
+  
+  -- Create transaction record with balance snapshots
+  INSERT INTO transactions (
+    user_id, account_id, amount, currency, type, 
+    description, date, metadata,
+    balance_before, balance_after
+  ) VALUES (
+    p_user_id, p_account_id, -p_amount, v_currency, 'expense',
+    COALESCE(p_notes, 'Payment from liability funds'),
+    p_date,
+    jsonb_build_object(
+      'liability_source_id', p_liability_id,
+      'spent_from_liability_portion', true,
+      'notes', p_notes
+    ),
+    v_balance_before, v_balance_after
+  );
+END;
+$function$;
+
+-- Update draw_liability_funds to capture balance snapshots (for each account)
+CREATE OR REPLACE FUNCTION draw_liability_funds(
+  p_user_id uuid,
+  p_liability_id uuid,
+  p_distributions jsonb,
+  p_date date DEFAULT CURRENT_DATE,
+  p_notes text DEFAULT NULL::text,
+  p_category_id uuid DEFAULT NULL::uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $function$
+DECLARE
+  v_total_drawn DECIMAL(14,2) := 0;
+  v_original_amount DECIMAL(14,2);
+  v_disbursed_amount DECIMAL(14,2);
+  v_available DECIMAL(14,2);
+  v_item JSONB;
+  v_account_id UUID;
+  v_amount DECIMAL(14,2);
+  v_balance_before DECIMAL(14,2);
+  v_balance_after DECIMAL(14,2);
+  v_currency TEXT;
+BEGIN
+  SELECT COALESCE(original_amount,0), COALESCE(disbursed_amount,0)
+    INTO v_original_amount, v_disbursed_amount
+  FROM liabilities
+  WHERE id = p_liability_id AND user_id = p_user_id;
+
+  IF v_original_amount IS NULL THEN
+    RAISE EXCEPTION 'Liability not found';
+  END IF;
+
+  v_available := GREATEST(v_original_amount - v_disbursed_amount, 0);
+
+  -- Sum requested draw
+  FOR v_item IN SELECT * FROM jsonb_array_elements(p_distributions)
+  LOOP
+    v_total_drawn := v_total_drawn + ((v_item->>'amount')::DECIMAL);
+  END LOOP;
+
+  -- If over available, increase totals accordingly
+  IF v_total_drawn > v_available THEN
+    UPDATE liabilities
+      SET original_amount = COALESCE(original_amount,0) + (v_total_drawn - v_available),
+          current_balance = COALESCE(current_balance,0) + (v_total_drawn - v_available),
+          updated_at = NOW()
+      WHERE id = p_liability_id;
+
+    INSERT INTO liability_activity_log (liability_id, user_id, activity_type, amount, notes, metadata)
+    VALUES (p_liability_id, p_user_id, 'limit_increase', v_total_drawn - v_available, p_notes, jsonb_build_object('reason','draw_exceeds_available'));
+  END IF;
+
+  -- Credit accounts and upsert portions
+  FOR v_item IN SELECT * FROM jsonb_array_elements(p_distributions)
+  LOOP
+    v_account_id := (v_item->>'account_id')::UUID;
+    v_amount := (v_item->>'amount')::DECIMAL;
+    IF v_amount <= 0 THEN CONTINUE; END IF;
+
+    -- Get current balance and currency (balance_before)
+    SELECT balance, currency INTO v_balance_before, v_currency
+    FROM accounts
+    WHERE id = v_account_id;
+    
+    IF v_balance_before IS NULL THEN
+      RAISE EXCEPTION 'Account not found: %', v_account_id;
+    END IF;
+
+    -- Update account balance
+    UPDATE accounts SET balance = balance + v_amount, updated_at = NOW() WHERE id = v_account_id;
+    
+    -- Get balance after
+    SELECT balance INTO v_balance_after FROM accounts WHERE id = v_account_id;
+
+    -- upsert into account_liability_portions
+    INSERT INTO account_liability_portions(account_id, liability_id, amount)
+    VALUES (v_account_id, p_liability_id, v_amount)
+    ON CONFLICT (account_id, liability_id)
+    DO UPDATE SET amount = account_liability_portions.amount + EXCLUDED.amount, updated_at = NOW();
+
+    -- Insert transaction as income with balance snapshots
+    INSERT INTO transactions(user_id, account_id, amount, currency, type, description, date, category_id, metadata, balance_before, balance_after)
+    VALUES (
+      p_user_id, v_account_id, v_amount, v_currency, 'income', 
+      COALESCE(p_notes,'Liability Draw'), p_date, p_category_id,
+      jsonb_build_object('liability_id', p_liability_id, 'bucket','liability_draw'),
+      v_balance_before, v_balance_after
+    );
+  END LOOP;
+
+  -- Update disbursed amount (+ total draw)
+  UPDATE liabilities
+    SET disbursed_amount = COALESCE(disbursed_amount,0) + v_total_drawn,
+        updated_at = NOW()
+    WHERE id = p_liability_id;
+
+  -- Log draw
+  INSERT INTO liability_activity_log (liability_id, user_id, activity_type, amount, notes)
+  VALUES (p_liability_id, p_user_id, 'draw', v_total_drawn, p_notes);
+END;
+$function$;
+
+-- Update create_transfer_transaction to capture balance snapshots for both accounts
+CREATE OR REPLACE FUNCTION create_transfer_transaction(
+  p_user_id uuid,
+  p_from_account_id uuid,
+  p_to_account_id uuid,
+  p_amount numeric,
+  p_description text DEFAULT NULL,
+  p_date date DEFAULT CURRENT_DATE,
+  p_currency text DEFAULT 'USD'
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $function$
+DECLARE
+  v_from_balance_before DECIMAL(14,2);
+  v_from_balance_after DECIMAL(14,2);
+  v_to_balance_before DECIMAL(14,2);
+  v_to_balance_after DECIMAL(14,2);
+  v_currency TEXT;
+BEGIN
+  -- Check if from account has sufficient balance and get balance_before
+  SELECT balance, currency INTO v_from_balance_before, v_currency
+  FROM accounts 
+  WHERE id = p_from_account_id;
+  
+  IF v_from_balance_before IS NULL THEN
+    RAISE EXCEPTION 'Source account not found';
+  END IF;
+  
+  IF v_from_balance_before < p_amount THEN
+    RAISE EXCEPTION 'Insufficient funds in source account';
+  END IF;
+  
+  -- Get to account balance_before
+  SELECT balance INTO v_to_balance_before
+  FROM accounts
+  WHERE id = p_to_account_id;
+  
+  IF v_to_balance_before IS NULL THEN
+    RAISE EXCEPTION 'Destination account not found';
+  END IF;
+  
+  -- Update from account balance
+  UPDATE accounts 
+  SET balance = balance - p_amount,
+      updated_at = now()
+  WHERE id = p_from_account_id;
+  
+  -- Get from account balance_after
+  SELECT balance INTO v_from_balance_after FROM accounts WHERE id = p_from_account_id;
+  
+  -- Update to account balance
+  UPDATE accounts 
+  SET balance = balance + p_amount,
+      updated_at = now()
+  WHERE id = p_to_account_id;
+  
+  -- Get to account balance_after
+  SELECT balance INTO v_to_balance_after FROM accounts WHERE id = p_to_account_id;
+  
+  -- Create transfer transaction for source account (expense)
+  INSERT INTO transactions (
+    user_id, from_account_id, to_account_id, amount, currency, type,
+    description, date, metadata,
+    balance_before, balance_after
+  ) VALUES (
+    p_user_id, p_from_account_id, p_to_account_id, -p_amount, COALESCE(v_currency, p_currency), 'transfer',
+    COALESCE(p_description, 'Transfer between accounts'),
+    p_date,
+    jsonb_build_object('is_transfer', true),
+    v_from_balance_before, v_from_balance_after
+  );
+  
+  -- Create transfer transaction for destination account (income)
+  INSERT INTO transactions (
+    user_id, from_account_id, to_account_id, amount, currency, type,
+    description, date, metadata,
+    balance_before, balance_after
+  ) VALUES (
+    p_user_id, p_from_account_id, p_to_account_id, p_amount, COALESCE(v_currency, p_currency), 'transfer',
+    COALESCE(p_description, 'Transfer between accounts'),
+    p_date,
+    jsonb_build_object('is_transfer', true),
+    v_to_balance_before, v_to_balance_after
+  );
+END;
+$function$;
+

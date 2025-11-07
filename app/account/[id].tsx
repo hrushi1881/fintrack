@@ -2,10 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, StatusBar } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { useSettings } from '@/contexts/SettingsContext';
+import { useLiabilities } from '@/contexts/LiabilitiesContext';
 import { formatCurrencyAmount } from '@/utils/currency';
 import { calculateGoalProgress, getProgressColor } from '@/utils/goals';
 import TransactionCard from '@/components/TransactionCard';
@@ -24,6 +25,13 @@ interface Account {
   color: string;
   icon: string;
   description?: string;
+  liability_funds?: number;
+  own_funds?: number;
+  liability_portions?: Array<{
+    id: string;
+    liability_id: string;
+    amount: number;
+  }>;
 }
 
 interface Transaction {
@@ -33,7 +41,7 @@ interface Transaction {
   description: string;
   date: string;
   account_id: string;
-  category_id: string;
+  category_id?: string;
   category?: {
     name: string;
   };
@@ -43,6 +51,7 @@ export default function AccountDetailScreen() {
   const { user } = useAuth();
   const { accounts, transactions, goals, budgets, refreshAccounts, refreshTransactions, refreshGoals, refreshBudgets } = useRealtimeData();
   const { currency } = useSettings();
+  const { getAccountBreakdown } = useLiabilities();
   const { id } = useLocalSearchParams<{ id: string }>();
   
   const [activeTab, setActiveTab] = useState('transactions');
@@ -51,17 +60,34 @@ export default function AccountDetailScreen() {
   const [transferModalVisible, setTransferModalVisible] = useState(false);
   const [addBudgetModalVisible, setAddBudgetModalVisible] = useState(false);
   
+  
   const [account, setAccount] = useState<Account | null>(null);
   const [accountTransactions, setAccountTransactions] = useState<Transaction[]>([]);
+  const [accountBreakdown, setAccountBreakdown] = useState<any>(null);
+
+  // Refresh accounts when screen comes into focus to ensure latest balances
+  useFocusEffect(
+    React.useCallback(() => {
+      refreshAccounts().catch(console.error);
+    }, [refreshAccounts])
+  );
 
   useEffect(() => {
     if (id && accounts.length > 0) {
       const foundAccount = accounts.find(acc => acc.id === id);
       if (foundAccount) {
+        // Update account state with latest balance from accounts array
         setAccount(foundAccount);
+        loadAccountBreakdown();
       }
     }
   }, [id, accounts]);
+
+  const loadAccountBreakdown = async () => {
+    if (!id) return;
+    const breakdown = await getAccountBreakdown(id);
+    setAccountBreakdown(breakdown);
+  };
 
   useEffect(() => {
     if (account && transactions.length > 0) {
@@ -76,6 +102,68 @@ export default function AccountDetailScreen() {
 
   const handleTransactionPress = (transactionId: string) => {
     router.push(`/transaction/${transactionId}`);
+  };
+
+  const renderFundBreakdown = () => {
+    if (!accountBreakdown || accountBreakdown.total === 0) return null;
+    
+    return (
+      <View style={styles.fundBreakdownCard}>
+        <Text style={styles.fundBreakdownTitle}>Fund Breakdown</Text>
+        <View style={styles.fundBreakdownRow}>
+          <View style={styles.fundItem}>
+            <View style={[styles.fundIcon, { backgroundColor: '#10B98120' }]}>
+              <Ionicons name="person" size={16} color="#10B981" />
+            </View>
+            <View style={styles.fundInfo}>
+              <Text style={styles.fundLabel}>Personal</Text>
+              <Text style={styles.fundAmount}>{formatCurrency(accountBreakdown.personal)}</Text>
+            </View>
+          </View>
+          
+          {accountBreakdown.liabilityPortions && accountBreakdown.liabilityPortions.length > 0 && (
+            <View style={styles.fundItem}>
+              <View style={[styles.fundIcon, { backgroundColor: '#6366F120' }]}>
+                <Ionicons name="card" size={16} color="#6366F1" />
+              </View>
+              <View style={styles.fundInfo}>
+                <Text style={styles.fundLabel}>Liabilities</Text>
+                <Text style={styles.fundAmount}>{formatCurrency(accountBreakdown.totalLiability)}</Text>
+              </View>
+            </View>
+          )}
+          
+          {accountBreakdown.goalPortions && accountBreakdown.goalPortions.length > 0 && (
+            <View style={styles.fundItem}>
+              <View style={[styles.fundIcon, { backgroundColor: '#F59E0B20' }]}>
+                <Ionicons name="flag" size={16} color="#F59E0B" />
+              </View>
+              <View style={styles.fundInfo}>
+                <Text style={styles.fundLabel}>Goals</Text>
+                <Text style={styles.fundAmount}>{formatCurrency(accountBreakdown.totalGoal || 0)}</Text>
+              </View>
+            </View>
+          )}
+        </View>
+        
+        {/* Detailed breakdown if multiple liabilities or goals */}
+        {(accountBreakdown.liabilityPortions?.length > 1 || accountBreakdown.goalPortions?.length > 1) && (
+          <View style={styles.detailedBreakdown}>
+            {accountBreakdown.liabilityPortions && accountBreakdown.liabilityPortions.length > 1 && (
+              <View style={styles.detailedSection}>
+                <Text style={styles.detailedTitle}>Liability Details:</Text>
+                {accountBreakdown.liabilityPortions.map((portion: any) => (
+                  <View key={portion.liabilityId} style={styles.detailedRow}>
+                    <Text style={styles.detailedLabel}>{portion.liabilityName}:</Text>
+                    <Text style={styles.detailedValue}>{formatCurrency(portion.amount)}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+          </View>
+        )}
+      </View>
+    );
   };
 
   const renderHeader = () => (
@@ -95,6 +183,29 @@ export default function AccountDetailScreen() {
         <Text style={styles.balanceAmount}>
           {formatCurrency(account?.balance || 0)}
         </Text>
+        {accountBreakdown && accountBreakdown.totalLiability > 0 && (
+          <View style={styles.balanceBreakdown}>
+            <View style={styles.balanceRow}>
+              <Text style={styles.balanceRowLabel}>💵 Personal Funds:</Text>
+              <Text style={styles.balanceRowAmount}>
+                {formatCurrency(accountBreakdown.personal)}
+              </Text>
+            </View>
+            {accountBreakdown.liabilityPortions.map((portion: any) => (
+              <View key={portion.liabilityId} style={styles.balanceRow}>
+                <Text style={styles.balanceRowLabel}>🏦 {portion.liabilityName}:</Text>
+                <Text style={[styles.balanceRowAmount, styles.liabilityAmount]}>
+                  {formatCurrency(portion.amount)}
+                </Text>
+              </View>
+            ))}
+          </View>
+        )}
+        {accountBreakdown && accountBreakdown.totalLiability === 0 && accountBreakdown.personal === accountBreakdown.total && (
+          <View style={styles.balanceBreakdown}>
+            <Text style={styles.allPersonalText}>All funds are personal</Text>
+          </View>
+        )}
       </View>
     </View>
   );
@@ -124,6 +235,8 @@ export default function AccountDetailScreen() {
         <Ionicons name="swap-horizontal" size={20} color="#FFFFFF" />
         <Text style={styles.actionText}>Transfer</Text>
       </TouchableOpacity>
+
+      
     </View>
   );
 
@@ -197,7 +310,7 @@ export default function AccountDetailScreen() {
   const renderBudgets = () => {
     // Get budgets that include this account
     const accountBudgets = budgets.filter(budget => 
-      budget.budget_accounts?.some(ba => ba.account_id === account?.id)
+      (budget as any).budget_accounts?.some((ba: any) => ba.account_id === account?.id)
     );
 
     return (
@@ -389,27 +502,42 @@ export default function AccountDetailScreen() {
       <PayModal 
         visible={payModalVisible} 
         onClose={() => setPayModalVisible(false)}
-        onSuccess={() => {
-          refreshAccounts();
-          refreshTransactions();
+        onSuccess={async () => {
+          // Wait for refresh to complete before updating UI
+          await Promise.all([
+            refreshAccounts(),
+            refreshTransactions(),
+          ]);
+          // Reload account breakdown to show updated fund breakdown
+          await loadAccountBreakdown();
         }}
         preselectedAccountId={account?.id}
       />
       <ReceiveModal 
         visible={receiveModalVisible} 
         onClose={() => setReceiveModalVisible(false)}
-        onSuccess={() => {
-          refreshAccounts();
-          refreshTransactions();
+        onSuccess={async () => {
+          // Wait for refresh to complete before updating UI
+          await Promise.all([
+            refreshAccounts(),
+            refreshTransactions(),
+          ]);
+          // Reload account breakdown to show updated fund breakdown
+          await loadAccountBreakdown();
         }}
         preselectedAccountId={account?.id}
       />
       <TransferModal 
         visible={transferModalVisible} 
         onClose={() => setTransferModalVisible(false)}
-        onSuccess={() => {
-          refreshAccounts();
-          refreshTransactions();
+        onSuccess={async () => {
+          // Wait for refresh to complete before updating UI
+          await Promise.all([
+            refreshAccounts(),
+            refreshTransactions(),
+          ]);
+          // Reload account breakdown to show updated fund breakdown
+          await loadAccountBreakdown();
         }}
         preselectedAccountId={account?.id}
       />
@@ -417,6 +545,7 @@ export default function AccountDetailScreen() {
         visible={addBudgetModalVisible} 
         onClose={() => setAddBudgetModalVisible(false)}
       />
+      
     </>
   );
 }
@@ -481,6 +610,79 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#000000',
   },
+  balanceBreakdown: {
+    marginTop: 16,
+    width: '100%',
+  },
+  balanceRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  balanceRowLabel: {
+    fontSize: 14,
+    color: '#666666',
+    fontWeight: '500',
+  },
+  balanceRowAmount: {
+    fontSize: 16,
+    color: '#000000',
+    fontWeight: '600',
+  },
+  liabilityAmount: {
+    color: '#EF4444',
+    fontWeight: '600',
+  },
+  allPersonalText: {
+    color: '#6B7280',
+    fontSize: 12,
+    fontStyle: 'italic',
+    marginTop: 8,
+  },
+  liabilityBreakdownCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    padding: 16,
+    marginTop: 16,
+    borderWidth: 1,
+    borderColor: '#000000',
+    minWidth: 200,
+  },
+  liabilityBreakdownTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#000000',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  liabilityPortionRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5E7EB',
+  },
+  liabilityPortionInfo: {
+    flex: 1,
+  },
+  liabilityPortionName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 2,
+  },
+  liabilityPortionType: {
+    fontSize: 12,
+    color: '#6B7280',
+    textTransform: 'uppercase',
+  },
+  liabilityPortionAmount: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#F59E0B',
+  },
   quickActionsContainer: {
     flexDirection: 'row',
     justifyContent: 'center',
@@ -506,6 +708,9 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     marginTop: 4,
     fontWeight: '600',
+  },
+  convertButton: {
+    backgroundColor: '#F59E0B',
   },
   tabsContainer: {
     flexDirection: 'row',
@@ -705,6 +910,84 @@ const styles = StyleSheet.create({
   },
   createBudgetText: {
     fontSize: 16,
+    fontWeight: '600',
+    color: 'white',
+  },
+  fundBreakdownCard: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 16,
+    marginHorizontal: 20,
+  },
+  fundBreakdownTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: 'white',
+    marginBottom: 12,
+  },
+  fundBreakdownRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  fundItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    minWidth: '45%',
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderRadius: 12,
+    padding: 12,
+  },
+  fundIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 8,
+  },
+  fundInfo: {
+    flex: 1,
+  },
+  fundLabel: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.7)',
+    marginBottom: 4,
+  },
+  fundAmount: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: 'white',
+  },
+  detailedBreakdown: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  detailedSection: {
+    marginBottom: 8,
+  },
+  detailedTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: 'rgba(255, 255, 255, 0.8)',
+    marginBottom: 8,
+  },
+  detailedRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+    paddingLeft: 8,
+  },
+  detailedLabel: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.6)',
+  },
+  detailedValue: {
+    fontSize: 12,
     fontWeight: '600',
     color: 'white',
   },

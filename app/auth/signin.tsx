@@ -18,19 +18,28 @@ export default function SignInScreen() {
       return;
     }
 
+    // Validate email format before API call
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email.trim())) {
+      Alert.alert('Invalid Email', 'Please enter a valid email address');
+      return;
+    }
+
     setIsLoading(true);
     
     try {
       const { error } = await signIn(email, password);
       
       if (error) {
-        Alert.alert('Sign In Failed', error.message);
+        console.error('Sign in error:', error);
+        Alert.alert('Sign In Failed', error.message || 'Unable to sign in. Please check your credentials and try again.');
       } else {
         // Navigation will be handled by auth state change
         router.replace('/(tabs)');
       }
-    } catch (error) {
-      Alert.alert('Error', 'An unexpected error occurred');
+    } catch (error: any) {
+      console.error('Unexpected sign in error:', error);
+      Alert.alert('Error', error?.message || 'An unexpected error occurred. Please try again.');
     } finally {
       setIsLoading(false);
     }

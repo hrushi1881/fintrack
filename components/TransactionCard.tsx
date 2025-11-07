@@ -13,6 +13,7 @@ interface TransactionCardProps {
   date: string;
   icon?: string;
   currency?: string;
+  metadata?: any;
   onPress?: () => void;
 }
 
@@ -23,8 +24,35 @@ export default function TransactionCard({
   description,
   date,
   icon,
+  metadata,
   onPress,
 }: TransactionCardProps) {
+  
+  const getFundSourceBadge = () => {
+    if (!metadata || type === 'income') return null;
+    
+    const bucketType = metadata.bucket_type || metadata.bucket;
+    if (!bucketType || bucketType === 'personal') return null;
+    
+    const bucketId = metadata.bucket_id || metadata.liability_id || metadata.goal_id;
+    
+    let iconName = 'card';
+    let color = '#6366F1';
+    let label = 'Liability';
+    
+    if (bucketType === 'goal') {
+      iconName = 'flag';
+      color = '#F59E0B';
+      label = 'Goal';
+    }
+    
+    return (
+      <View style={[styles.fundBadge, { backgroundColor: color + '20', borderColor: color + '40' }]}>
+        <Ionicons name={iconName as any} size={12} color={color} />
+        <Text style={[styles.fundBadgeText, { color }]}>{label}</Text>
+      </View>
+    );
+  };
   const { currency } = useSettings();
   const formatCurrency = (amount: number) => {
     return formatCurrencyAmount(amount, currency);
@@ -87,10 +115,13 @@ export default function TransactionCard({
           <Text style={styles.amount}>
             {formatCurrency(Math.abs(amount))}
           </Text>
-          <View style={[styles.typeBadge, { backgroundColor: getTypeColor(type) }]}>
-            <Text style={styles.typeText}>
-              {type.charAt(0).toUpperCase() + type.slice(1)}
-            </Text>
+          <View style={styles.badgesRow}>
+            {getFundSourceBadge()}
+            <View style={[styles.typeBadge, { backgroundColor: getTypeColor(type) }]}>
+              <Text style={styles.typeText}>
+                {type.charAt(0).toUpperCase() + type.slice(1)}
+              </Text>
+            </View>
           </View>
         </View>
         
@@ -159,6 +190,24 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#FFFFFF',
     textTransform: 'uppercase',
+  },
+  badgesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  fundBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 4,
+  },
+  fundBadgeText: {
+    fontSize: 10,
+    fontWeight: '600',
   },
   categoryDescription: {
     fontSize: 14,

@@ -46,21 +46,106 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email.trim())) {
+      return { 
+        error: { 
+          message: 'Invalid email format. Please enter a valid email address.',
+          name: 'ValidationError',
+          status: 400
+        } as AuthError 
+      };
+    }
+
+    // Validate password
+    if (!password || password.length < 6) {
+      return { 
+        error: { 
+          message: 'Password must be at least 6 characters long.',
+          name: 'ValidationError',
+          status: 400
+        } as AuthError 
+      };
+    }
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: email.trim().toLowerCase(),
       password,
     });
-    return { error };
+
+    // Provide more user-friendly error messages
+    if (error) {
+      let friendlyMessage = error.message;
+      if (error.message.includes('Invalid login credentials') || error.message.includes('email not confirmed')) {
+        friendlyMessage = 'Invalid email or password. Please check your credentials and try again.';
+      } else if (error.message.includes('Email rate limit')) {
+        friendlyMessage = 'Too many login attempts. Please wait a few minutes and try again.';
+      }
+      return { 
+        error: { 
+          ...error, 
+          message: friendlyMessage 
+        } 
+      };
+    }
+
+    return { error: null };
   };
 
   const signUp = async (email: string, password: string, userData: UserData) => {
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email.trim())) {
+      return { 
+        error: { 
+          message: 'Invalid email format. Please enter a valid email address.',
+          name: 'ValidationError',
+          status: 400
+        } as AuthError 
+      };
+    }
+
+    // Validate password
+    if (!password || password.length < 8) {
+      return { 
+        error: { 
+          message: 'Password must be at least 8 characters long.',
+          name: 'ValidationError',
+          status: 400
+        } as AuthError 
+      };
+    }
+
     const { data, error } = await supabase.auth.signUp({
-      email,
+      email: email.trim().toLowerCase(),
       password,
       options: {
         emailRedirectTo: undefined, // Disable email verification
+        data: {
+          first_name: userData.firstName,
+          last_name: userData.lastName,
+        }
       }
     });
+
+    // Provide more user-friendly error messages
+    if (error) {
+      let friendlyMessage = error.message;
+      if (error.message.includes('User already registered')) {
+        friendlyMessage = 'An account with this email already exists. Please sign in instead.';
+      } else if (error.message.includes('Password')) {
+        friendlyMessage = 'Password does not meet requirements. Please use a stronger password.';
+      } else if (error.message.includes('Email rate limit')) {
+        friendlyMessage = 'Too many signup attempts. Please wait a few minutes and try again.';
+      }
+      return { 
+        error: { 
+          ...error, 
+          message: friendlyMessage 
+        } 
+      };
+    }
 
     if (!error && data.user) {
       // Create user profile immediately
@@ -74,10 +159,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       if (profileError) {
         console.error('Error creating user profile:', profileError);
+        // Don't fail signup if profile creation fails, but log it
       }
     }
 
-    return { error };
+    return { error: null };
   };
 
   const signOut = async () => {

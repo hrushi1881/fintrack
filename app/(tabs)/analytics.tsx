@@ -1,14 +1,16 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, Dimensions } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useBackgroundMode } from '@/contexts/BackgroundModeContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { useSettings } from '@/contexts/SettingsContext';
+import { useAuth } from '@/contexts/AuthContext';
 import { formatCurrencyAmount } from '@/utils/currency';
 import GlassmorphCard from '@/components/GlassmorphCard';
 import IOSGradientBackground from '@/components/iOSGradientBackground';
 import { theme, BACKGROUND_MODES } from '@/theme';
+import { supabase } from '@/lib/supabase';
 
 const screenWidth = Dimensions.get('window').width;
 
@@ -16,7 +18,10 @@ export default function AnalyticsScreen() {
   const { backgroundMode } = useBackgroundMode();
   const { accounts, transactions, totalBalance, loading } = useRealtimeData();
   const { currency } = useSettings();
+  const { user } = useAuth();
   const [selectedPeriod, setSelectedPeriod] = useState('month');
+  const [categoryStats, setCategoryStats] = useState<any[]>([]);
+  const [fetching, setFetching] = useState(false);
 
   const periods = [
     { key: 'week', label: 'Week' },
@@ -24,42 +29,95 @@ export default function AnalyticsScreen() {
     { key: 'year', label: 'Year' },
   ];
 
-  const expenseData = {
-    labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'],
-    datasets: [
-      {
-        data: [1200, 1500, 1100, 1800, 1600, 1400],
-        color: (opacity = 1) => `rgba(16, 185, 129, ${opacity})`,
-        strokeWidth: 2,
-      },
-    ],
-  };
+  const getInterval = useMemo(() => {
+    switch (selectedPeriod) {
+      case 'week':
+        return '7 days';
+      case 'year':
+        return '12 months';
+      case 'month':
+      default:
+        return '1 month';
+    }
+  }, [selectedPeriod]);
 
-  const incomeData = {
-    labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'],
-    datasets: [
-      {
-        data: [3000, 3200, 2800, 3500, 3300, 3100],
-        color: (opacity = 1) => `rgba(59, 130, 246, ${opacity})`,
-        strokeWidth: 2,
-      },
-    ],
-  };
+  useEffect(() => {
+    const fetchStats = async () => {
+      if (!user?.id) return;
+      setFetching(true);
+      try {
+        const { data, error } = await supabase.rpc('get_category_stats', {
+          user_uuid: user.id,
+          time_range: getInterval as any,
+        });
+        if (error) {
+          console.error('Error fetching category stats:', error);
+          setCategoryStats([]);
+        } else {
+          setCategoryStats(data || []);
+        }
+      } finally {
+        setFetching(false);
+      }
+    };
+    fetchStats();
+  }, [user?.id, getInterval]);
 
-  const expenseCategories = [
-    { name: 'Food', population: 35, color: '#F59E0B', legendFontColor: '#FFFFFF' },
-    { name: 'Transport', population: 25, color: '#3B82F6', legendFontColor: '#FFFFFF' },
-    { name: 'Entertainment', population: 20, color: '#8B5CF6', legendFontColor: '#FFFFFF' },
-    { name: 'Shopping', population: 15, color: '#EF4444', legendFontColor: '#FFFFFF' },
-    { name: 'Utilities', population: 5, color: '#10B981', legendFontColor: '#FFFFFF' },
-  ];
+  const filteredTransactions = useMemo(() => {
+    if (!transactions) return [] as any[];
+    const now = new Date();
+    const start = new Date();
+    if (selectedPeriod === 'week') start.setDate(now.getDate() - 7);
+    if (selectedPeriod === 'month') start.setMonth(now.getMonth() - 1);
+    if (selectedPeriod === 'year') start.setFullYear(now.getFullYear() - 1);
+    return transactions.filter((t: any) => {
+      const d = new Date(t.date || t.created_at);
+      return d >= start && d <= now;
+    });
+  }, [transactions, selectedPeriod]);
+
+  const totals = useMemo(() => {
+    let income = 0;
+    let expenses = 0;
+    for (const t of filteredTransactions) {
+      const amt = Number(t.amount) || 0;
+      if (t.type === 'income') income += amt;
+      if (t.type === 'expense') expenses += Math.abs(amt);
+    }
+    const net = income - expenses;
+    const savingsRate = income > 0 ? Math.round(((income - expenses) / income) * 100) : 0;
+    return { income, expenses, net, savingsRate };
+  }, [filteredTransactions]);
+
+  const expenseCategories = useMemo(() => {
+    // Fall back to simple aggregation if RPC not available
+    if (categoryStats && categoryStats.length > 0) {
+      return categoryStats.map((c: any) => ({
+        name: c.category_name,
+        population: Number(c.percentage) || 0,
+        color: c.color || '#10B981',
+      }));
+    }
+    const map: Record<string, { amount: number; color: string }> = {};
+    for (const t of filteredTransactions) {
+      if (t.type !== 'expense') continue;
+      const key = t.category?.name || 'Other';
+      if (!map[key]) map[key] = { amount: 0, color: '#10B981' };
+      map[key].amount += Math.abs(Number(t.amount) || 0);
+    }
+    const total = Object.values(map).reduce((s, v) => s + v.amount, 0) || 1;
+    return Object.entries(map)
+      .map(([name, v]) => ({ name, population: Math.round((v.amount / total) * 100), color: v.color }))
+      .sort((a, b) => b.population - a.population)
+      .slice(0, 8);
+  }, [categoryStats, filteredTransactions]);
 
 
   const stats = [
-    { title: 'Total Income', value: formatCurrencyAmount(18500, currency), change: '+12%', color: '#10B981' },
-    { title: 'Total Expenses', value: formatCurrencyAmount(8800, currency), change: '-5%', color: '#EF4444' },
-    { title: 'Net Savings', value: formatCurrencyAmount(9700, currency), change: '+18%', color: '#3B82F6' },
-    { title: 'Savings Rate', value: '52%', change: '+8%', color: '#8B5CF6' },
+    { title: 'Total Income', value: formatCurrencyAmount(totals.income, currency), change: '', color: '#10B981' },
+    { title: 'Total Expenses', value: formatCurrencyAmount(totals.expenses, currency), change: '', color: '#EF4444' },
+    { title: 'Net Savings', value: formatCurrencyAmount(totals.net, currency), change: '', color: '#3B82F6' },
+    { title: 'Savings Rate', value: `${totals.savingsRate}%`, change: '', color: '#8B5CF6' },
   ];
 
   const renderBackground = () => {
@@ -128,15 +186,15 @@ export default function AnalyticsScreen() {
             <Text style={styles.chartTitle}>Expense Trend</Text>
             <View style={styles.simpleChart}>
               <View style={styles.chartBars}>
-                {expenseData.datasets[0].data.map((value, index) => (
+                {expenseCategories.slice(0, 6).map((c, index) => (
                   <View key={index} style={styles.chartBarContainer}>
-                    <View 
+                    <View
                       style={[
-                        styles.chartBar, 
-                        { height: (value / 2000) * 100 }
-                      ]} 
+                        styles.chartBar,
+                        { height: Math.max(6, c.population), backgroundColor: c.color }
+                      ]}
                     />
-                    <Text style={styles.chartLabel}>{expenseData.labels[index]}</Text>
+                    <Text style={styles.chartLabel}>{c.name.substring(0, 3)}</Text>
                   </View>
                 ))}
               </View>
@@ -148,12 +206,12 @@ export default function AnalyticsScreen() {
             <Text style={styles.chartTitle}>Income vs Expenses</Text>
             <View style={styles.comparisonChart}>
               <View style={styles.comparisonItem}>
-                <View style={[styles.comparisonBar, { backgroundColor: '#3B82F6', width: '80%' }]} />
-                <Text style={styles.comparisonLabel}>Income: {formatCurrencyAmount(3100, currency)}</Text>
+                <View style={[styles.comparisonBar, { backgroundColor: '#3B82F6', width: `${Math.min(100, totals.income === 0 ? 0 : 80)}%` }]} />
+                <Text style={styles.comparisonLabel}>Income: {formatCurrencyAmount(totals.income, currency)}</Text>
               </View>
               <View style={styles.comparisonItem}>
-                <View style={[styles.comparisonBar, { backgroundColor: '#10B981', width: '45%' }]} />
-                <Text style={styles.comparisonLabel}>Expenses: {formatCurrencyAmount(1400, currency)}</Text>
+                <View style={[styles.comparisonBar, { backgroundColor: '#10B981', width: `${Math.min(100, totals.expenses === 0 ? 0 : 45)}%` }]} />
+                <Text style={styles.comparisonLabel}>Expenses: {formatCurrencyAmount(totals.expenses, currency)}</Text>
               </View>
             </View>
           </GlassmorphCard>
@@ -162,7 +220,7 @@ export default function AnalyticsScreen() {
           <GlassmorphCard style={styles.chartContainer}>
             <Text style={styles.chartTitle}>Expense Categories</Text>
             <View style={styles.categoriesList}>
-              {expenseCategories.map((category, index) => (
+              {(fetching ? [] : expenseCategories).map((category, index) => (
                 <View key={index} style={styles.categoryItem}>
                   <View style={[styles.categoryColor, { backgroundColor: category.color }]} />
                   <Text style={styles.categoryName}>{category.name}</Text>

@@ -2,7 +2,7 @@ export interface Account {
   id: string;
   user_id: string;
   name: string;
-  type: 'bank' | 'card' | 'wallet' | 'cash' | 'goals_savings';
+  type: 'bank' | 'card' | 'wallet' | 'cash' | 'goals_savings' | 'liability';
   balance: number;
   currency: string;
   color: string;
@@ -10,6 +10,7 @@ export interface Account {
   description?: string;
   include_in_totals?: boolean;
   is_active: boolean;
+  linked_liability_id?: string; // For liability accounts
   created_at: string;
   updated_at: string;
 }
@@ -26,6 +27,8 @@ export interface Transaction {
   date: string;
   created_at: string;
   updated_at: string;
+  balance_before?: number;
+  balance_after?: number;
 }
 
 export interface Goal {
@@ -229,4 +232,138 @@ export interface BudgetEvent {
     [key: string]: any;
   };
   created_at: string;
+}
+
+export interface Liability {
+  id: string;
+  user_id: string;
+  title: string;
+  description?: string;
+  liability_type: 'credit_card' | 'personal_loan' | 'auto_loan' | 'student_loan' | 'medical' | 'mortgage' | 'other';
+  currency: string;
+
+  // Financial Details
+  disbursed_amount?: number;
+  original_amount?: number;
+  current_balance: number;
+  interest_rate_apy: number;
+  interest_type: 'reducing' | 'fixed' | 'none';
+  minimum_payment?: number;
+  periodical_payment?: number;
+  periodical_frequency?: 'daily' | 'weekly' | 'monthly' | 'custom';
+
+  // Credit Card specific
+  credit_limit?: number;
+  due_day_of_month?: number;
+
+  // Loan specific
+  loan_term_months?: number;
+  loan_term_years?: number;
+
+  // Dates
+  start_date: string;
+  targeted_payoff_date?: string;
+  next_due_date?: string;
+  last_payment_date?: string;
+  paid_off_date?: string;
+
+  // Links
+  linked_account_id?: string;
+  category_id?: string;
+
+  // Import tracking
+  is_imported: boolean;
+  import_snapshot_date?: string;
+  import_snapshot_balance?: number;
+
+  // Status & Visual
+  status: 'active' | 'paid_off' | 'paused' | 'overdue';
+  color: string;
+  icon: string;
+
+  notes?: string;
+  metadata: any;
+  is_active: boolean;
+  is_deleted: boolean;
+  deleted_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LiabilityPayment {
+  id: string;
+  user_id: string;
+  liability_id: string;
+  account_id?: string;
+  category_id?: string;
+  payment_type: 'scheduled' | 'manual' | 'prepayment' | 'mock' | 'historical';
+  amount: number;
+  interest_component: number;
+  principal_component: number;
+  payment_date: string;
+  description?: string;
+  reference_number?: string;
+  is_mock: boolean;
+  method?: 'import_snapshot' | 'historical_import' | 'manual' | 'auto_pay';
+  transaction_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LiabilitySchedule {
+  id: string;
+  user_id: string;
+  liability_id: string;
+  account_id?: string;
+  due_date: string;
+  amount: number;
+  auto_pay: boolean;
+  reminder_days: number[];
+  status: 'pending' | 'completed' | 'cancelled' | 'overdue';
+  completed_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LiabilityAdjustment {
+  id: string;
+  user_id: string;
+  liability_id: string;
+  adjustment_type: 'extend' | 'reduce' | 'restructure' | 'top_up' | 'interest_capitalization' | 'fee';
+  amount: number;
+  reason?: string;
+  effective_date: string;
+  schedule_impact?: 'recalculate' | 'keep_emi_extend_term' | 'keep_term_increase_emi';
+  old_values?: any;
+  new_values?: any;
+  created_at: string;
+}
+
+export interface LiabilityCalculations {
+  id: string;
+  liability_id: string;
+  monthly_interest: number;
+  total_interest_paid: number;
+  total_principal_paid: number;
+  payoff_months?: number;
+  payoff_date?: string;
+  days_until_due?: number;
+  calculated_at: string;
+}
+
+export interface AccountLiabilityPortion {
+  id: string;
+  account_id: string;
+  liability_id: string;
+  liability_account_id: string;
+  amount: number;
+  notes?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AccountWithLiabilityBreakdown extends Account {
+  liability_portions?: AccountLiabilityPortion[];
+  own_funds?: number;
+  liability_funds?: number;
 }

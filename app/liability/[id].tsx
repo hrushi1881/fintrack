@@ -1,51 +1,121 @@
-import React, { useState } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, TextInput, Modal } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, ActivityIndicator, Alert } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router } from 'expo-router';
+import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/contexts/AuthContext';
+import { useSettings } from '@/contexts/SettingsContext';
+import { useLiabilities } from '@/contexts/LiabilitiesContext';
+import { useRealtimeData } from '@/hooks/useRealtimeData';
+import { formatCurrencyAmount } from '@/utils/currency';
+import DrawLiabilityFundsModal from '@/app/modals/draw-liability-funds';
+import PayLiabilityModal from '@/app/modals/pay-liability';
+
+type LiabilityData = {
+  id: string;
+  title: string;
+  description?: string;
+  liability_type: string;
+  current_balance: number;
+  interest_rate_apy?: number;
+  periodical_payment?: number;
+  start_date?: string;
+  targeted_payoff_date?: string;
+  next_due_date?: string;
+  status: string;
+  color?: string;
+  icon?: string;
+  metadata?: any;
+};
+
+type LiabilityPayment = {
+  id: string;
+  amount: number;
+  payment_date: string;
+  description?: string;
+  account_id?: string;
+  is_mock?: boolean;
+  payment_type?: string;
+};
 
 export default function LiabilityDetailScreen() {
-  const { id } = useLocalSearchParams();
+  const { id } = useLocalSearchParams<{ id: string }>();
+  const { user } = useAuth();
+  const { currency } = useSettings();
+  const { accounts } = useRealtimeData();
+  const { getAccountBreakdown, fetchLiabilityAllocations } = useLiabilities();
   const [activeTab, setActiveTab] = useState('overview');
-  const [showPaymentModal, setShowPaymentModal] = useState(false);
-  const [paymentAmount, setPaymentAmount] = useState('');
-  const [showCalculator, setShowCalculator] = useState(false);
+  const [liability, setLiability] = useState<LiabilityData | null>(null);
+  const [paymentHistory, setPaymentHistory] = useState<LiabilityPayment[]>([]);
+  const [allocations, setAllocations] = useState<any[]>([]);
+  const [activityLog, setActivityLog] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showDrawFunds, setShowDrawFunds] = useState(false);
+  const [showPayLiability, setShowPayLiability] = useState(false);
 
-  // Mock liability data
-  const liability = {
-    id: id as string,
-    title: 'Credit Card Debt',
-    amount: 2500,
-    interestRate: 18.5,
-    minimumPayment: 75,
-    dueDate: '2024-02-15',
-    color: '#EF4444',
-    icon: 'card',
-    type: 'credit_card',
-    description: 'High-interest credit card debt from emergency expenses',
-    monthlyInterest: 38.54,
-    payoffMonths: 42,
-    totalInterest: 650,
-    payments: [
-      { id: 1, amount: 100, date: '2024-01-15', type: 'payment', description: 'Extra payment' },
-      { id: 2, amount: 75, date: '2024-01-01', type: 'minimum', description: 'Minimum payment' },
-      { id: 3, amount: 150, date: '2023-12-15', type: 'payment', description: 'Bonus payment' },
-    ],
-    payoffStrategies: [
-      { id: 1, name: 'Debt Snowball', description: 'Pay minimums, extra to smallest debt', months: 38, totalInterest: 580 },
-      { id: 2, name: 'Debt Avalanche', description: 'Pay minimums, extra to highest interest', months: 35, totalInterest: 520 },
-      { id: 3, name: 'Aggressive Payoff', description: 'Pay ₹200/month consistently', months: 28, totalInterest: 420 },
-    ],
+  useEffect(() => {
+    if (id && user) {
+      loadLiabilityData();
+    }
+  }, [id, user]);
+
+  const loadLiabilityData = async () => {
+    if (!user || !id) return;
+    
+    try {
+      setLoading(true);
+      
+      // Fetch liability
+      const { data: liabilityData, error: liabilityError } = await supabase
+        .from('liabilities')
+        .select('*')
+        .eq('id', id)
+        .eq('user_id', user.id)
+        .single();
+
+      if (liabilityError) throw liabilityError;
+      setLiability(liabilityData);
+
+      // Fetch payment history
+      const { data: payments, error: paymentsError } = await supabase
+        .from('liability_payments')
+        .select('*')
+        .eq('liability_id', id)
+        .order('payment_date', { ascending: false });
+
+      if (!paymentsError) {
+        setPaymentHistory(payments || []);
+      }
+
+      // Fetch allocations
+      const allocationsData = await fetchLiabilityAllocations(id);
+      setAllocations(allocationsData);
+
+      // Fetch activity log
+      const { data: activityData, error: activityError } = await supabase
+        .from('liability_activity_log')
+        .select('*')
+        .eq('liability_id', id)
+        .order('created_at', { ascending: false });
+
+      if (!activityError && activityData) {
+        setActivityLog(activityData);
+      }
+    } catch (error) {
+      console.error('Error loading liability data:', error);
+      Alert.alert('Error', 'Failed to load liability details');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-    }).format(amount);
+    return formatCurrencyAmount(amount, currency);
   };
 
-  const formatDate = (dateString: string) => {
+  const formatDate = (dateString?: string) => {
+    if (!dateString) return 'N/A';
     return new Date(dateString).toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
@@ -53,201 +123,101 @@ export default function LiabilityDetailScreen() {
     });
   };
 
-  const getDaysUntilDue = (dueDate: string) => {
-    const today = new Date();
-    const due = new Date(dueDate);
-    const diffTime = due.getTime() - today.getTime();
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    return diffDays;
-  };
-
-  const getLiabilityType = (type: string) => {
-    const types = {
-      credit_card: 'Credit Card',
-      student_loan: 'Student Loan',
-      auto_loan: 'Auto Loan',
-      personal_loan: 'Personal Loan',
-      medical: 'Medical Bill',
-    };
-    return types[type as keyof typeof types] || 'Other';
-  };
-
-  const handlePayment = () => {
-    if (paymentAmount && parseFloat(paymentAmount) > 0) {
-      console.log('Making payment:', paymentAmount);
-      setShowPaymentModal(false);
-      setPaymentAmount('');
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'paid_off': return '#10B981';
+      case 'active': return '#3B82F6';
+      case 'overdue': return '#EF4444';
+      case 'paused': return '#6B7280';
+      default: return '#6B7280';
     }
   };
 
-  const renderOverview = () => (
-    <View style={styles.tabContent}>
-      {/* Liability Info Card */}
-      <View style={styles.infoCard}>
-        <View style={styles.infoHeader}>
-          <View style={[styles.liabilityIcon, { backgroundColor: liability.color }]}>
-            <Ionicons name={liability.icon as any} size={32} color="white" />
-          </View>
-          <View style={styles.liabilityInfo}>
-            <Text style={styles.liabilityTitle}>{liability.title}</Text>
-            <Text style={styles.liabilityType}>{getLiabilityType(liability.type)}</Text>
-          </View>
-        </View>
+  const getStatusText = (status: string) => {
+    switch (status) {
+      case 'paid_off': return 'Paid Off';
+      case 'active': return 'Active';
+      case 'overdue': return 'Overdue';
+      case 'paused': return 'Paused';
+      default: return 'Unknown';
+    }
+  };
 
-        <Text style={styles.liabilityDescription}>{liability.description}</Text>
+  const detectLiabilityType = (liabilityType: string): 'loan' | 'emi' | 'one_time' => {
+    if (['personal_loan', 'student_loan', 'auto_loan', 'mortgage'].includes(liabilityType)) {
+      return 'loan';
+    }
+    if (liability?.periodical_payment) {
+      return 'emi';
+    }
+    return 'one_time';
+  };
 
-        <View style={styles.liabilityStats}>
-          <View style={styles.statItem}>
-            <Text style={styles.statLabel}>Current Balance</Text>
-            <Text style={styles.statValue}>{formatCurrency(liability.amount)}</Text>
-          </View>
-          <View style={styles.statItem}>
-            <Text style={styles.statLabel}>Interest Rate</Text>
-            <Text style={styles.statValue}>{liability.interestRate}% APR</Text>
-          </View>
-          <View style={styles.statItem}>
-            <Text style={styles.statLabel}>Minimum Payment</Text>
-            <Text style={styles.statValue}>{formatCurrency(liability.minimumPayment)}</Text>
-          </View>
-        </View>
-      </View>
+  const handlePayLiability = () => {
+    setShowPayLiability(true);
+  };
 
-      {/* Payment Timeline */}
-      <View style={styles.timelineCard}>
-        <Text style={styles.sectionTitle}>Payment Timeline</Text>
-        <View style={styles.timelineItem}>
-          <View style={styles.timelineIcon}>
-            <Ionicons name="calendar" size={20} color="#EF4444" />
+  if (loading) {
+    return (
+      <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
+        <SafeAreaView style={styles.safeArea}>
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#10B981" />
+            <Text style={styles.loadingText}>Loading liability details...</Text>
           </View>
-          <View style={styles.timelineContent}>
-            <Text style={styles.timelineTitle}>Due Date</Text>
-            <Text style={styles.timelineValue}>
-              {formatDate(liability.dueDate)} ({getDaysUntilDue(liability.dueDate)} days)
-            </Text>
-          </View>
-        </View>
-        <View style={styles.timelineItem}>
-          <View style={styles.timelineIcon}>
-            <Ionicons name="calculator" size={20} color="#F59E0B" />
-          </View>
-          <View style={styles.timelineContent}>
-            <Text style={styles.timelineTitle}>Payoff Time</Text>
-            <Text style={styles.timelineValue}>{liability.payoffMonths} months</Text>
-          </View>
-        </View>
-        <View style={styles.timelineItem}>
-          <View style={styles.timelineIcon}>
-            <Ionicons name="trending-up" size={20} color="#3B82F6" />
-          </View>
-          <View style={styles.timelineContent}>
-            <Text style={styles.timelineTitle}>Monthly Interest</Text>
-            <Text style={styles.timelineValue}>{formatCurrency(liability.monthlyInterest)}</Text>
-          </View>
-        </View>
-      </View>
+        </SafeAreaView>
+      </LinearGradient>
+    );
+  }
 
-      {/* Quick Actions */}
-      <View style={styles.actionsCard}>
-        <Text style={styles.sectionTitle}>Quick Actions</Text>
-        <View style={styles.actionButtons}>
-          <TouchableOpacity
-            style={styles.actionButton}
-            onPress={() => setShowPaymentModal(true)}
-          >
-            <Ionicons name="card" size={20} color="white" />
-            <Text style={styles.actionButtonText}>Make Payment</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.actionButton, { backgroundColor: '#3B82F6' }]}
-            onPress={() => setShowCalculator(true)}
-          >
-            <Ionicons name="calculator" size={20} color="white" />
-            <Text style={styles.actionButtonText}>Calculator</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    </View>
-  );
-
-  const renderPayments = () => (
-    <View style={styles.tabContent}>
-      <View style={styles.addPaymentButton}>
-        <TouchableOpacity
-          style={styles.addButton}
-          onPress={() => setShowPaymentModal(true)}
-        >
-          <Ionicons name="add" size={20} color="white" />
-          <Text style={styles.addButtonText}>Record Payment</Text>
-        </TouchableOpacity>
-      </View>
-
-      <View style={styles.paymentsList}>
-        {liability.payments.map((payment) => (
-          <View key={payment.id} style={styles.paymentCard}>
-            <View style={styles.paymentHeader}>
-              <View style={styles.paymentIcon}>
-                <Ionicons
-                  name={payment.type === 'minimum' ? 'card' : 'checkmark-circle'}
-                  size={20}
-                  color={payment.type === 'minimum' ? '#F59E0B' : '#10B981'}
-                />
-              </View>
-              <View style={styles.paymentInfo}>
-                <Text style={styles.paymentDescription}>
-                  {payment.description}
-                </Text>
-                <Text style={styles.paymentDate}>
-                  {formatDate(payment.date)}
-                </Text>
-              </View>
-              <Text style={styles.paymentAmount}>
-                -{formatCurrency(payment.amount)}
-              </Text>
-            </View>
-          </View>
-        ))}
-      </View>
-    </View>
-  );
-
-  const renderStrategies = () => (
-    <View style={styles.tabContent}>
-      <View style={styles.strategiesList}>
-        {liability.payoffStrategies.map((strategy) => (
-          <View key={strategy.id} style={styles.strategyCard}>
-            <View style={styles.strategyHeader}>
-              <Text style={styles.strategyName}>{strategy.name}</Text>
-              <Text style={styles.strategyMonths}>{strategy.months} months</Text>
-            </View>
-            <Text style={styles.strategyDescription}>{strategy.description}</Text>
-            <View style={styles.strategyStats}>
-              <View style={styles.strategyStat}>
-                <Text style={styles.strategyStatLabel}>Total Interest</Text>
-                <Text style={styles.strategyStatValue}>
-                  {formatCurrency(strategy.totalInterest)}
-                </Text>
-              </View>
-              <View style={styles.strategyStat}>
-                <Text style={styles.strategyStatLabel}>Savings</Text>
-                <Text style={[styles.strategyStatValue, { color: '#10B981' }]}>
-                  {formatCurrency(liability.totalInterest - strategy.totalInterest)}
-                </Text>
-              </View>
-            </View>
-            <TouchableOpacity style={styles.strategyButton}>
-              <Text style={styles.strategyButtonText}>Use This Strategy</Text>
+  if (!liability) {
+    return (
+      <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
+        <SafeAreaView style={styles.safeArea}>
+          <View style={styles.errorContainer}>
+            <Ionicons name="alert-circle" size={48} color="rgba(255, 255, 255, 0.7)" />
+            <Text style={styles.errorText}>Liability not found</Text>
+            <TouchableOpacity 
+              style={styles.backButton}
+              onPress={() => router.back()}
+            >
+              <Text style={styles.backButtonText}>Go Back</Text>
             </TouchableOpacity>
           </View>
-        ))}
-      </View>
-    </View>
-  );
+        </SafeAreaView>
+      </LinearGradient>
+    );
+  }
+
+  const liabilityType = detectLiabilityType(liability.liability_type);
+  const tabs = [
+    { key: 'overview', label: 'Overview', icon: 'home' },
+    { key: 'payments', label: 'Payments', icon: 'time' },
+    { key: 'allocations', label: 'Allocations', icon: 'location' },
+    { key: 'activity', label: 'Activity', icon: 'list' },
+  ];
+
+  const calculateAvailableToDraw = () => {
+    const original = parseFloat(liability.original_amount || '0');
+    const disbursed = parseFloat(liability.disbursed_amount || '0');
+    return Math.max(0, original - disbursed);
+  };
+
+  const formatActivityType = (activityType: string, amount: number) => {
+    switch (activityType) {
+      case 'draw':
+        return `Drawn ${formatCurrency(amount)}`;
+      case 'limit_increase':
+        return `Limit increased by ${formatCurrency(amount)}`;
+      case 'repayment':
+        return `Repayment of ${formatCurrency(amount)}`;
+      default:
+        return activityType.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
+    }
+  };
 
   return (
-    <LinearGradient
-      colors={['#99D795', '#99D795', '#99D795']}
-      style={styles.container}
-    >
+    <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <ScrollView style={styles.scrollView}>
           {/* Header */}
@@ -261,116 +231,338 @@ export default function LiabilityDetailScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* Tab Selector */}
+          {/* Liability Info Card */}
+          <View style={styles.liabilityInfoCard}>
+            <View style={styles.liabilityHeader}>
+              <View style={[styles.liabilityIcon, { backgroundColor: (liability.color || '#EF4444') + '20' }]}>
+                <Ionicons name={(liability.icon || 'card') as any} size={32} color={liability.color || '#EF4444'} />
+              </View>
+              <View style={styles.liabilityDetails}>
+                <Text style={styles.liabilityName}>{liability.title}</Text>
+                <Text style={styles.liabilityType}>
+                  {liability.liability_type.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.amountSection}>
+              <Text style={styles.amountLabel}>Current Balance</Text>
+              <Text style={styles.amountValue}>
+                {formatCurrency(parseFloat(liability.current_balance || '0'))}
+              </Text>
+              <View style={[styles.statusBadge, { backgroundColor: getStatusColor(liability.status) + '20' }]}>
+                <Text style={[styles.statusText, { color: getStatusColor(liability.status) }]}>
+                  {getStatusText(liability.status)}
+                </Text>
+              </View>
+            </View>
+
+            {/* Liability Summary */}
+            <View style={styles.summarySection}>
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Total Owed:</Text>
+                <Text style={styles.summaryValue}>
+                  {formatCurrency(parseFloat(liability.original_amount || '0'))}
+                </Text>
+              </View>
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Remaining:</Text>
+                <Text style={styles.summaryValue}>
+                  {formatCurrency(parseFloat(liability.current_balance || '0'))}
+                </Text>
+              </View>
+              <View style={[styles.summaryRow, styles.availableRow]}>
+                <Text style={styles.summaryLabel}>Available to Draw:</Text>
+                <View style={[
+                  styles.availableBadge,
+                  calculateAvailableToDraw() === 0 && styles.availableBadgeEmpty
+                ]}>
+                  <Text style={[
+                    styles.availableValue,
+                    calculateAvailableToDraw() === 0 && styles.availableValueEmpty
+                  ]}>
+                    {formatCurrency(calculateAvailableToDraw())}
+                  </Text>
+                </View>
+              </View>
+            </View>
+
+            {(liability.next_due_date || liability.targeted_payoff_date) && (
+              <View style={styles.dueDateSection}>
+                {liability.next_due_date && (
+                  <>
+                    <Text style={styles.dueDateLabel}>Next Due Date</Text>
+                    <Text style={styles.dueDateValue}>{formatDate(liability.next_due_date)}</Text>
+                  </>
+                )}
+                {liability.targeted_payoff_date && (
+                  <>
+                    <Text style={styles.targetLabel}>Target Payoff Date</Text>
+                    <Text style={styles.targetValue}>{formatDate(liability.targeted_payoff_date)}</Text>
+                  </>
+                )}
+              </View>
+            )}
+          </View>
+
+          {/* Tab Navigation */}
           <View style={styles.tabContainer}>
-            <TouchableOpacity
-              style={[
-                styles.tabButton,
-                activeTab === 'overview' && styles.activeTab,
-              ]}
-              onPress={() => setActiveTab('overview')}
-            >
-              <Ionicons 
-                name={activeTab === 'overview' ? 'home' : 'home-outline'} 
-                size={20} 
-                color={activeTab === 'overview' ? '#EF4444' : 'rgba(255, 255, 255, 0.7)'} 
-              />
-              <Text
-                style={[
-                  styles.tabText,
-                  activeTab === 'overview' && styles.activeTabText,
-                ]}
+            {tabs.map((tab) => (
+              <TouchableOpacity
+                key={tab.key}
+                style={[styles.tab, activeTab === tab.key && styles.activeTab]}
+                onPress={() => setActiveTab(tab.key)}
               >
-                Overview
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.tabButton,
-                activeTab === 'payments' && styles.activeTab,
-              ]}
-              onPress={() => setActiveTab('payments')}
-            >
-              <Ionicons 
-                name={activeTab === 'payments' ? 'card' : 'card-outline'} 
-                size={20} 
-                color={activeTab === 'payments' ? '#EF4444' : 'rgba(255, 255, 255, 0.7)'} 
-              />
-              <Text
-                style={[
+                <Ionicons 
+                  name={tab.icon as any} 
+                  size={20} 
+                  color={activeTab === tab.key ? '#10B981' : '#6B7280'} 
+                />
+                <Text style={[
                   styles.tabText,
-                  activeTab === 'payments' && styles.activeTabText,
-                ]}
-              >
-                Payments
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.tabButton,
-                activeTab === 'strategies' && styles.activeTab,
-              ]}
-              onPress={() => setActiveTab('strategies')}
-            >
-              <Ionicons 
-                name={activeTab === 'strategies' ? 'calculator' : 'calculator-outline'} 
-                size={20} 
-                color={activeTab === 'strategies' ? '#EF4444' : 'rgba(255, 255, 255, 0.7)'} 
-              />
-              <Text
-                style={[
-                  styles.tabText,
-                  activeTab === 'strategies' && styles.activeTabText,
-                ]}
-              >
-                Strategies
-              </Text>
-            </TouchableOpacity>
+                  activeTab === tab.key && styles.activeTabText
+                ]}>
+                  {tab.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
           </View>
 
           {/* Tab Content */}
-          {activeTab === 'overview' && renderOverview()}
-          {activeTab === 'payments' && renderPayments()}
-          {activeTab === 'strategies' && renderStrategies()}
-        </ScrollView>
+          {activeTab === 'overview' && (
+            <View style={styles.tabContent}>
+              {/* Payment Actions */}
+              {liability.status !== 'paid_off' && (
+                <View style={styles.sectionCard}>
+                  <Text style={styles.sectionTitle}>Payment Actions</Text>
+                  <TouchableOpacity 
+                    style={[styles.actionButton, { backgroundColor: '#10B981' }]}
+                    onPress={handlePayLiability}
+                  >
+                    <Ionicons name="card" size={24} color="white" />
+                    <Text style={styles.actionText}>Pay Liability</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity 
+                    style={[styles.actionButton, { backgroundColor: '#6366F1' }]}
+                    onPress={() => setShowDrawFunds(true)}
+                  >
+                    <Ionicons name="download" size={24} color="white" />
+                    <Text style={styles.actionText}>Draw Funds</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
 
-        {/* Payment Modal */}
-        <Modal
-          visible={showPaymentModal}
-          transparent={true}
-          animationType="slide"
-        >
-          <View style={styles.modalOverlay}>
-            <View style={styles.modalContent}>
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Make Payment</Text>
-                <TouchableOpacity
-                  onPress={() => setShowPaymentModal(false)}
-                >
-                  <Ionicons name="close" size={24} color="white" />
-                </TouchableOpacity>
+              {/* Liability Information */}
+              <View style={styles.sectionCard}>
+                <Text style={styles.sectionTitle}>Liability Information</Text>
+                {liability.description && (
+                  <View style={styles.infoRow}>
+                    <Text style={styles.infoLabel}>Description:</Text>
+                    <Text style={styles.infoValue}>{liability.description}</Text>
+                  </View>
+                )}
+                <View style={styles.infoRow}>
+                  <Text style={styles.infoLabel}>Type:</Text>
+                  <Text style={styles.infoValue}>
+                    {liability.liability_type.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                  </Text>
+                </View>
+                {liability.interest_rate_apy && (
+                  <View style={styles.infoRow}>
+                    <Text style={styles.infoLabel}>Interest Rate (APY):</Text>
+                    <Text style={styles.infoValue}>{liability.interest_rate_apy}%</Text>
+                  </View>
+                )}
+                {liability.periodical_payment && (
+                  <View style={styles.infoRow}>
+                    <Text style={styles.infoLabel}>Periodical Payment:</Text>
+                    <Text style={styles.infoValue}>{formatCurrency(liability.periodical_payment)}</Text>
+                  </View>
+                )}
+                {liability.start_date && (
+                  <View style={styles.infoRow}>
+                    <Text style={styles.infoLabel}>Start Date:</Text>
+                    <Text style={styles.infoValue}>{formatDate(liability.start_date)}</Text>
+                  </View>
+                )}
               </View>
-              <View style={styles.modalBody}>
-                <Text style={styles.inputLabel}>Payment Amount</Text>
-                <TextInput
-                  style={styles.amountInput}
-                  value={paymentAmount}
-                  onChangeText={setPaymentAmount}
-                  placeholder="Enter amount"
-                  placeholderTextColor="#9CA3AF"
-                  keyboardType="numeric"
-                />
-                <TouchableOpacity
-                  style={styles.paymentButton}
-                  onPress={handlePayment}
-                >
-                  <Text style={styles.paymentButtonText}>Make Payment</Text>
-                </TouchableOpacity>
+
+              {/* Recent Payments */}
+              <View style={styles.sectionCard}>
+                <Text style={styles.sectionTitle}>Recent Payments</Text>
+                {paymentHistory.slice(0, 3).map((payment) => (
+                  <View key={payment.id} style={styles.paymentItem}>
+                    <View style={styles.paymentInfo}>
+                      <Text style={styles.paymentAmount}>{formatCurrency(payment.amount)}</Text>
+                      <Text style={styles.paymentDate}>{formatDate(payment.payment_date)}</Text>
+                      {payment.is_mock && (
+                        <Text style={styles.mockBadge}>Mock Payment</Text>
+                      )}
+                    </View>
+                    {payment.description && (
+                      <Text style={styles.paymentDescription}>{payment.description}</Text>
+                    )}
+                  </View>
+                ))}
+                {paymentHistory.length === 0 && (
+                  <Text style={styles.noPaymentsText}>No payments recorded yet</Text>
+                )}
               </View>
             </View>
-          </View>
-        </Modal>
+          )}
+
+          {activeTab === 'payments' && (
+            <View style={styles.tabContent}>
+              <View style={styles.sectionCard}>
+                <Text style={styles.sectionTitle}>Payment History</Text>
+                {paymentHistory.map((payment) => (
+                  <View key={payment.id} style={styles.historyItem}>
+                    <View style={styles.historyIcon}>
+                      <Ionicons name="receipt" size={20} color="#10B981" />
+                    </View>
+                    <View style={styles.historyInfo}>
+                      <Text style={styles.historyAmount}>{formatCurrency(payment.amount)}</Text>
+                      <Text style={styles.historyDate}>{formatDate(payment.payment_date)}</Text>
+                      {payment.description && (
+                        <Text style={styles.historyDescription}>{payment.description}</Text>
+                      )}
+                      {payment.is_mock && (
+                        <View style={styles.mockBadgeContainer}>
+                          <Text style={styles.mockBadgeText}>Mock/Historical</Text>
+                        </View>
+                      )}
+                    </View>
+                  </View>
+                ))}
+                {paymentHistory.length === 0 && (
+                  <Text style={styles.noPaymentsText}>No payment history available</Text>
+                )}
+              </View>
+
+              {/* Payment Statistics */}
+              {paymentHistory.length > 0 && (
+                <View style={styles.sectionCard}>
+                  <Text style={styles.sectionTitle}>Payment Statistics</Text>
+                  <View style={styles.statsGrid}>
+                    <View style={styles.statCard}>
+                      <Text style={styles.statLabel}>Total Paid</Text>
+                      <Text style={styles.statValue}>
+                        {formatCurrency(paymentHistory.reduce((sum, p) => sum + p.amount, 0))}
+                      </Text>
+                    </View>
+                    <View style={styles.statCard}>
+                      <Text style={styles.statLabel}>Average</Text>
+                      <Text style={styles.statValue}>
+                        {formatCurrency(
+                          paymentHistory.reduce((sum, p) => sum + p.amount, 0) / paymentHistory.length
+                        )}
+                      </Text>
+                    </View>
+                    <View style={styles.statCard}>
+                      <Text style={styles.statLabel}>Payments</Text>
+                      <Text style={styles.statValue}>{paymentHistory.length}</Text>
+                    </View>
+                  </View>
+                </View>
+              )}
+            </View>
+          )}
+
+          {activeTab === 'allocations' && (
+            <View style={styles.tabContent}>
+              <View style={styles.sectionCard}>
+                <Text style={styles.sectionTitle}>Fund Allocations</Text>
+                {allocations.length > 0 ? (
+                  allocations.map((alloc) => {
+                    const account = accounts.find((a) => a.id === alloc.accountId);
+                    return (
+                      <View key={alloc.accountId} style={styles.allocationItem}>
+                        <View style={styles.allocationInfo}>
+                          <View style={styles.allocationDetails}>
+                            <Text style={styles.allocationAccount}>
+                              {account?.name || 'Unknown Account'}
+                            </Text>
+                            {alloc.liabilityName && (
+                              <Text style={styles.allocationLiability}>{alloc.liabilityName}</Text>
+                            )}
+                          </View>
+                          <Text style={styles.allocationAmount}>{formatCurrency(alloc.amount)}</Text>
+                        </View>
+                      </View>
+                    );
+                  })
+                ) : (
+                  <Text style={styles.noPaymentsText}>No fund allocations recorded</Text>
+                )}
+              </View>
+            </View>
+          )}
+
+          {activeTab === 'activity' && (
+            <View style={styles.tabContent}>
+              <View style={styles.sectionCard}>
+                <Text style={styles.sectionTitle}>Activity Log</Text>
+                {activityLog.length > 0 ? (
+                  activityLog.map((activity) => (
+                    <View key={activity.id} style={styles.activityItem}>
+                      <View style={styles.activityIcon}>
+                        <Ionicons 
+                          name={
+                            activity.activity_type === 'draw' ? 'download' :
+                            activity.activity_type === 'limit_increase' ? 'trending-up' :
+                            activity.activity_type === 'repayment' ? 'arrow-back' :
+                            'document-text'
+                          } 
+                          size={20} 
+                          color={
+                            activity.activity_type === 'draw' ? '#6366F1' :
+                            activity.activity_type === 'limit_increase' ? '#F59E0B' :
+                            activity.activity_type === 'repayment' ? '#10B981' :
+                            '#6B7280'
+                          } 
+                        />
+                      </View>
+                      <View style={styles.activityInfo}>
+                        <Text style={styles.activityDescription}>
+                          {formatActivityType(activity.activity_type, parseFloat(activity.amount || '0'))}
+                        </Text>
+                        <Text style={styles.activityDate}>
+                          {formatDate(activity.created_at)}
+                        </Text>
+                        {activity.notes && (
+                          <Text style={styles.activityNotes}>{activity.notes}</Text>
+                        )}
+                      </View>
+                    </View>
+                  ))
+                ) : (
+                  <Text style={styles.noPaymentsText}>No activity recorded yet</Text>
+                )}
+              </View>
+            </View>
+          )}
+        </ScrollView>
       </SafeAreaView>
+
+      {/* Modals */}
+      <DrawLiabilityFundsModal
+        visible={showDrawFunds}
+        onClose={() => setShowDrawFunds(false)}
+        liability={liability}
+        onSuccess={() => {
+          loadLiabilityData();
+        }}
+      />
+      {liability && (
+        <PayLiabilityModal
+          visible={showPayLiability}
+          onClose={() => setShowPayLiability(false)}
+          liabilityId={liability.id}
+          onSuccess={() => {
+            loadLiabilityData();
+          }}
+        />
+      )}
     </LinearGradient>
   );
 }
@@ -388,73 +580,66 @@ const styles = StyleSheet.create({
   },
   header: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
+    alignItems: 'center',
     paddingTop: 20,
     paddingBottom: 30,
   },
   backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
     backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
+    borderRadius: 12,
+    padding: 12,
   },
   headerTitle: {
     fontSize: 20,
-    fontWeight: 'bold',
     color: 'white',
+    fontWeight: 'bold',
   },
   editButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  tabContainer: {
-    flexDirection: 'row',
     backgroundColor: 'rgba(255, 255, 255, 0.1)',
     borderRadius: 12,
-    padding: 4,
-    marginBottom: 20,
+    padding: 12,
   },
-  tabButton: {
+  loadingContainer: {
     flex: 1,
-    flexDirection: 'row',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 8,
+    alignItems: 'center',
+    gap: 16,
   },
-  activeTab: {
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-  },
-  tabText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: 'rgba(255, 255, 255, 0.7)',
-    marginLeft: 6,
-  },
-  activeTabText: {
+  loadingText: {
     color: 'white',
+    fontSize: 16,
   },
-  tabContent: {
-    marginBottom: 20,
-  },
-  infoCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
+  errorContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 16,
     padding: 20,
-    marginBottom: 20,
   },
-  infoHeader: {
+  errorText: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: '600',
+  },
+  backButtonText: {
+    color: '#10B981',
+    fontSize: 16,
+    fontWeight: '600',
+    padding: 12,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 12,
+  },
+  liabilityInfoCard: {
+    backgroundColor: '#000000',
+    borderRadius: 20,
+    padding: 24,
+    marginBottom: 30,
+  },
+  liabilityHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 20,
   },
   liabilityIcon: {
     width: 60,
@@ -464,47 +649,105 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginRight: 16,
   },
-  liabilityInfo: {
+  liabilityDetails: {
     flex: 1,
   },
-  liabilityTitle: {
-    fontSize: 20,
+  liabilityName: {
+    fontSize: 24,
     fontWeight: 'bold',
     color: 'white',
     marginBottom: 4,
   },
   liabilityType: {
     fontSize: 14,
-    color: '#9CA3AF',
+    color: 'rgba(255, 255, 255, 0.7)',
   },
-  liabilityDescription: {
-    fontSize: 14,
-    color: '#9CA3AF',
+  amountSection: {
     marginBottom: 20,
-    lineHeight: 20,
   },
-  liabilityStats: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+  amountLabel: {
+    fontSize: 14,
+    color: 'rgba(255, 255, 255, 0.7)',
+    marginBottom: 8,
   },
-  statItem: {
-    alignItems: 'center',
+  amountValue: {
+    fontSize: 36,
+    fontWeight: 'bold',
+    color: 'white',
+    marginBottom: 12,
   },
-  statLabel: {
+  statusBadge: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  statusText: {
     fontSize: 12,
-    color: '#9CA3AF',
+    fontWeight: '600',
+  },
+  dueDateSection: {
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.1)',
+    paddingTop: 16,
+  },
+  dueDateLabel: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.7)',
     marginBottom: 4,
   },
-  statValue: {
+  dueDateValue: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: 'white',
+    marginBottom: 12,
+  },
+  targetLabel: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.7)',
+    marginBottom: 4,
+  },
+  targetValue: {
     fontSize: 16,
     fontWeight: '600',
     color: 'white',
   },
-  timelineCard: {
+  tabContainer: {
+    flexDirection: 'row',
+    backgroundColor: '#000000',
+    borderRadius: 16,
+    padding: 4,
+    marginBottom: 24,
+  },
+  tab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+    gap: 6,
+  },
+  activeTab: {
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+  },
+  tabText: {
+    fontSize: 14,
+    color: '#6B7280',
+    fontWeight: '600',
+  },
+  activeTabText: {
+    color: '#10B981',
+  },
+  tabContent: {
+    marginBottom: 24,
+  },
+  sectionCard: {
     backgroundColor: '#000000',
     borderRadius: 16,
     padding: 20,
-    marginBottom: 20,
+    marginBottom: 16,
   },
   sectionTitle: {
     fontSize: 18,
@@ -512,222 +755,253 @@ const styles = StyleSheet.create({
     color: 'white',
     marginBottom: 16,
   },
-  timelineItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  timelineIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  timelineContent: {
-    flex: 1,
-  },
-  timelineTitle: {
-    fontSize: 14,
-    color: '#9CA3AF',
-    marginBottom: 2,
-  },
-  timelineValue: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-  },
-  actionsCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 20,
-  },
-  actionButtons: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
   actionButton: {
-    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#EF4444',
-    borderRadius: 12,
     padding: 16,
-    marginHorizontal: 4,
-  },
-  actionButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: 'white',
-    marginLeft: 8,
-  },
-  addPaymentButton: {
-    marginBottom: 20,
-  },
-  addButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#EF4444',
     borderRadius: 12,
-    padding: 16,
-  },
-  addButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginLeft: 8,
-  },
-  paymentsList: {
-    marginBottom: 20,
-  },
-  paymentCard: {
-    backgroundColor: '#000000',
-    borderRadius: 12,
-    padding: 16,
+    gap: 8,
     marginBottom: 12,
   },
-  paymentHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  paymentIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  paymentInfo: {
-    flex: 1,
-  },
-  paymentDescription: {
+  actionText: {
+    color: 'white',
     fontSize: 16,
     fontWeight: '600',
-    color: 'white',
-    marginBottom: 2,
   },
-  paymentDate: {
+  infoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  infoLabel: {
     fontSize: 14,
-    color: '#9CA3AF',
+    color: 'rgba(255, 255, 255, 0.7)',
+    flex: 1,
+  },
+  infoValue: {
+    fontSize: 14,
+    color: 'white',
+    fontWeight: '600',
+    flex: 1,
+    textAlign: 'right',
+  },
+  paymentItem: {
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  paymentInfo: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
   },
   paymentAmount: {
     fontSize: 16,
     fontWeight: 'bold',
-    color: '#10B981',
+    color: 'white',
   },
-  strategiesList: {
-    marginBottom: 20,
+  paymentDate: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.7)',
   },
-  strategyCard: {
-    backgroundColor: '#000000',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
+  paymentDescription: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.6)',
+    marginTop: 4,
   },
-  strategyHeader: {
+  mockBadge: {
+    fontSize: 10,
+    color: '#F59E0B',
+    backgroundColor: '#F59E0B20',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  noPaymentsText: {
+    fontSize: 14,
+    color: 'rgba(255, 255, 255, 0.6)',
+    textAlign: 'center',
+    paddingVertical: 20,
+  },
+  historyItem: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
   },
-  strategyName: {
-    fontSize: 16,
+  historyIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  historyInfo: {
+    flex: 1,
+  },
+  historyAmount: {
+    fontSize: 18,
     fontWeight: 'bold',
     color: 'white',
-  },
-  strategyMonths: {
-    fontSize: 14,
-    color: '#10B981',
-    fontWeight: '600',
-  },
-  strategyDescription: {
-    fontSize: 14,
-    color: '#9CA3AF',
-    marginBottom: 16,
-  },
-  strategyStats: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 16,
-  },
-  strategyStat: {
-    alignItems: 'center',
-  },
-  strategyStatLabel: {
-    fontSize: 12,
-    color: '#9CA3AF',
     marginBottom: 4,
   },
-  strategyStatValue: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: 'white',
+  historyDate: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.7)',
+    marginBottom: 4,
   },
-  strategyButton: {
-    backgroundColor: '#10B981',
-    borderRadius: 8,
-    padding: 12,
-    alignItems: 'center',
+  historyDescription: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.6)',
   },
-  strategyButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: 'white',
+  mockBadgeContainer: {
+    alignSelf: 'flex-start',
+    marginTop: 8,
   },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'flex-end',
+  mockBadgeText: {
+    fontSize: 10,
+    color: '#F59E0B',
+    backgroundColor: '#F59E0B20',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
   },
-  modalContent: {
-    backgroundColor: '#000000',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
-  },
-  modalHeader: {
+  statsGrid: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 20,
+    gap: 12,
+    marginTop: 12,
   },
-  modalTitle: {
+  statCard: {
+    flex: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+  },
+  statLabel: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.7)',
+    marginBottom: 8,
+  },
+  statValue: {
     fontSize: 18,
     fontWeight: 'bold',
     color: 'white',
   },
-  modalBody: {
-    marginBottom: 20,
+  allocationItem: {
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
   },
-  inputLabel: {
-    fontSize: 14,
-    color: '#9CA3AF',
-    marginBottom: 8,
-  },
-  amountInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    fontSize: 16,
-    color: 'white',
-    marginBottom: 20,
-  },
-  paymentButton: {
-    backgroundColor: '#EF4444',
-    borderRadius: 12,
-    padding: 16,
+  allocationInfo: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
   },
-  paymentButtonText: {
+  allocationDetails: {
+    flex: 1,
+  },
+  allocationAccount: {
     fontSize: 16,
     fontWeight: '600',
     color: 'white',
+    marginBottom: 4,
+  },
+  allocationLiability: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.6)',
+  },
+  allocationAmount: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: 'white',
+  },
+  summarySection: {
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.1)',
+    paddingTop: 16,
+    marginTop: 16,
+  },
+  summaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  summaryLabel: {
+    fontSize: 14,
+    color: 'rgba(255, 255, 255, 0.7)',
+  },
+  summaryValue: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: 'white',
+  },
+  availableRow: {
+    marginTop: 8,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  availableBadge: {
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#10B981',
+  },
+  availableBadgeEmpty: {
+    backgroundColor: 'rgba(107, 114, 128, 0.2)',
+    borderColor: '#6B7280',
+  },
+  availableValue: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#10B981',
+  },
+  availableValueEmpty: {
+    color: '#6B7280',
+  },
+  activityItem: {
+    flexDirection: 'row',
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  activityIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  activityInfo: {
+    flex: 1,
+  },
+  activityDescription: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: 'white',
+    marginBottom: 4,
+  },
+  activityDate: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.7)',
+    marginBottom: 4,
+  },
+  activityNotes: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.6)',
+    fontStyle: 'italic',
   },
 });

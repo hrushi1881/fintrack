@@ -16,6 +16,8 @@ interface CardData {
   icon: 'card' | 'wallet' | 'bank' | 'cash';
   backgroundColor?: string;
   iconBackgroundColor?: string;
+  liabilityFunds?: number;
+  ownFunds?: number;
 }
 
 interface FinancialCardProps {
@@ -125,6 +127,14 @@ const FinancialCard: React.FC<FinancialCardProps> = ({
           <Text style={[styles.cardAmount, { color: amountColor }]}>
             ₹{data.amount.toLocaleString('en-IN')}
           </Text>
+          {data.liabilityFunds && data.liabilityFunds > 0 && (
+            <View style={styles.liabilityBadge}>
+              <Ionicons name="alert-circle" size={12} color="#F59E0B" />
+              <Text style={styles.liabilityText}>
+                ₹{data.liabilityFunds.toLocaleString('en-IN')} from loans
+              </Text>
+            </View>
+          )}
         </View>
 
         {/* Arrow Button */}
@@ -306,5 +316,21 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginLeft: 12,
+  },
+  liabilityBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    alignSelf: 'flex-start',
+  },
+  liabilityText: {
+    fontSize: 10,
+    color: '#F59E0B',
+    fontWeight: '600',
+    marginLeft: 4,
   },
 });

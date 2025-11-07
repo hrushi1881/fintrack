@@ -309,8 +309,52 @@ export async function markBillAsPaid(billId: string, paymentData: PaymentData): 
     const bill = await fetchBillById(billId);
     if (!bill) throw new Error('Bill not found');
 
-    // Create bill payment record
-    const { data: payment, error: paymentError } = await supabase
+    // Use unified fund-bucket RPC to create the expense transaction and adjust balances
+    // Default to personal funds when called from utility (UI flow uses FundPicker directly)
+    const bucketParam = { type: 'personal', id: null } as const;
+
+    // Ensure category id (can be null)
+    const categoryId = bill.category_id && typeof bill.category_id === 'string'
+      ? bill.category_id.trim()
+      : null;
+
+    const { data: rpcResult, error: rpcError } = await supabase.rpc('spend_from_account_bucket', {
+      p_user_id: user.user.id,
+      p_account_id: paymentData.account_id,
+      p_bucket: bucketParam,
+      p_amount: paymentData.amount,
+      p_category: categoryId,
+      p_description: `Payment for ${bill.title}`,
+      p_date: paymentData.payment_date,
+      p_currency: paymentData.currency,
+    });
+
+    if (rpcError) {
+      console.error('Bucket RPC error (spend_from_account_bucket):', rpcError);
+      throw rpcError;
+    }
+
+    const createdTransactionId = (rpcResult as any)?.id || (rpcResult as any)?.transaction_id || null;
+
+    // If we got a transaction id, attach bill metadata for richer context
+    if (createdTransactionId) {
+      const { error: metaErr } = await supabase
+        .from('transactions')
+        .update({
+          metadata: {
+            bill_id: billId,
+            bucket: 'personal',
+          },
+        })
+        .eq('id', createdTransactionId);
+      if (metaErr) {
+        // Non-fatal: continue but log
+        console.warn('Failed to attach bill metadata to transaction:', metaErr);
+      }
+    }
+
+    // Create bill payment record (linking transaction if present)
+    const { error: paymentError } = await supabase
       .from('bill_payments')
       .insert({
         bill_id: billId,
@@ -319,72 +363,15 @@ export async function markBillAsPaid(billId: string, paymentData: PaymentData): 
         currency: paymentData.currency,
         payment_date: paymentData.payment_date,
         actual_due_date: paymentData.actual_due_date,
-        account_id: paymentData.account_id, // Required now
+        account_id: paymentData.account_id,
         payment_status: paymentData.payment_status,
         notes: paymentData.notes,
-      })
-      .select()
-      .single();
+        transaction_id: createdTransactionId,
+      });
 
     if (paymentError) {
       console.error('Error creating bill payment:', paymentError);
       throw paymentError;
-    }
-
-    // Always create transaction when paying a bill
-    const { data: transaction, error: transactionError } = await supabase
-      .from('transactions')
-      .insert({
-        user_id: user.user.id,
-        account_id: paymentData.account_id,
-        category_id: bill.category_id,
-        amount: paymentData.amount,
-        currency: paymentData.currency,
-        type: 'expense',
-        description: `Payment for ${bill.title}`,
-        date: paymentData.payment_date,
-      })
-      .select()
-      .single();
-
-    if (transactionError) {
-      console.error('Error creating transaction:', transactionError);
-      throw transactionError;
-    }
-
-    // Update payment with transaction ID
-    await supabase
-      .from('bill_payments')
-      .update({ transaction_id: transaction.id })
-      .eq('id', payment.id);
-
-    // Deduct amount from account balance
-    // First get current balance
-    const { data: account, error: accountFetchError } = await supabase
-      .from('accounts')
-      .select('balance')
-      .eq('id', paymentData.account_id)
-      .eq('user_id', user.user.id)
-      .single();
-
-    if (accountFetchError) {
-      console.error('Error fetching account balance:', accountFetchError);
-      throw accountFetchError;
-    }
-
-    // Update balance
-    const { error: accountError } = await supabase
-      .from('accounts')
-      .update({
-        balance: account.balance - paymentData.amount,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', paymentData.account_id)
-      .eq('user_id', user.user.id);
-
-    if (accountError) {
-      console.error('Error updating account balance:', accountError);
-      throw accountError;
     }
 
     // Update bill status

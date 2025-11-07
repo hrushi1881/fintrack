@@ -4,6 +4,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { Goal, Budget, Category, Bill } from '@/types';
 import { fetchCategories } from '@/utils/categories';
 import { fetchBills } from '@/utils/bills';
+ 
 
 interface Account {
   id: string;
@@ -13,7 +14,7 @@ interface Account {
   description?: string;
   color: string;
   icon: string;
-  include_in_totals: boolean;
+  include_in_totals?: boolean;
   is_active: boolean;
   user_id: string;
   created_at: string;
@@ -49,6 +50,7 @@ export const useRealtimeData = () => {
   const [budgets, setBudgets] = useState<Budget[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [bills, setBills] = useState<Bill[]>([]);
+  
   const [loading, setLoading] = useState(true);
 
   // Fetch initial data
@@ -61,13 +63,8 @@ export const useRealtimeData = () => {
         .select('*')
         .eq('user_id', user.id)
         .eq('is_active', true)
-        .order('created_at', { ascending: false });
-
-      if (error) {
-        console.error('Error fetching accounts:', error);
-        return;
-      }
-
+        .order('name');
+      if (error) throw error;
       setAccounts(data || []);
     } catch (error) {
       console.error('Error fetching accounts:', error);
@@ -86,7 +83,8 @@ export const useRealtimeData = () => {
           account:accounts!transactions_account_id_fkey(name, color, icon)
         `)
         .eq('user_id', user.id)
-        .order('date', { ascending: false });
+        .order('date', { ascending: false })
+        .order('created_at', { ascending: false });
 
       if (error) {
         console.error('Error fetching transactions:', error);
@@ -170,8 +168,8 @@ export const useRealtimeData = () => {
     }
   }, [user]);
 
-  // Calculate total balance
-  const totalBalance = accounts.reduce((sum, account) => sum + (account.balance || 0), 0);
+  
+
 
   // Set up real-time subscriptions
   useEffect(() => {
@@ -296,6 +294,8 @@ export const useRealtimeData = () => {
       )
       .subscribe();
 
+    
+
     // Cleanup subscriptions
     return () => {
       supabase.removeChannel(accountsSubscription);
@@ -304,33 +304,36 @@ export const useRealtimeData = () => {
       supabase.removeChannel(budgetsSubscription);
       supabase.removeChannel(categoriesSubscription);
       supabase.removeChannel(billsSubscription);
+      
     };
   }, [user, fetchAccounts, fetchTransactions, fetchGoals, fetchBudgets, fetchCategoriesData, fetchBillsData]);
 
-  // Manual refresh functions
-  const refreshAccounts = useCallback(() => {
-    fetchAccounts();
+  // Manual refresh functions - return promises so they can be awaited
+  const refreshAccounts = useCallback(async () => {
+    await fetchAccounts();
   }, [fetchAccounts]);
 
-  const refreshTransactions = useCallback(() => {
-    fetchTransactions();
+  const refreshTransactions = useCallback(async () => {
+    await fetchTransactions();
   }, [fetchTransactions]);
 
-  const refreshGoals = useCallback(() => {
-    fetchGoals();
+  const refreshGoals = useCallback(async () => {
+    await fetchGoals();
   }, [fetchGoals]);
 
-  const refreshBudgets = useCallback(() => {
-    fetchBudgets();
+  const refreshBudgets = useCallback(async () => {
+    await fetchBudgets();
   }, [fetchBudgets]);
 
-  const refreshCategories = useCallback(() => {
-    fetchCategoriesData();
+  const refreshCategories = useCallback(async () => {
+    await fetchCategoriesData();
   }, [fetchCategoriesData]);
 
-  const refreshBills = useCallback(() => {
-    fetchBillsData();
+  const refreshBills = useCallback(async () => {
+    await fetchBillsData();
   }, [fetchBillsData]);
+
+  
 
   const refreshAll = useCallback(async () => {
     await Promise.all([
@@ -354,9 +357,23 @@ export const useRealtimeData = () => {
   // Get budgets by account
   const getBudgetsByAccount = useCallback((accountId: string) => {
     return budgets.filter(budget => 
-      budget.budget_accounts?.some(ba => ba.account_id === accountId)
+      (budget as any).budget_accounts?.some((ba: any) => ba.account_id === accountId)
     );
   }, [budgets]);
+
+  // Calculate total balance (assets only, excluding liability accounts)
+  const totalBalance = accounts
+    .filter(account => account.type !== 'liability' && account.include_in_totals)
+    .reduce((sum, account) => sum + account.balance, 0);
+
+  // Calculate net worth (assets - liabilities)
+  const totalAssets = accounts
+    .filter(account => account.type !== 'liability' && account.include_in_totals)
+    .reduce((sum, account) => sum + account.balance, 0);
+
+  const totalLiabilities = 0;
+
+  const netWorth = totalAssets - totalLiabilities;
 
   return {
     accounts,
@@ -366,6 +383,9 @@ export const useRealtimeData = () => {
     categories,
     bills,
     totalBalance,
+    totalAssets,
+    totalLiabilities,
+    netWorth,
     loading,
     refreshAccounts,
     refreshTransactions,

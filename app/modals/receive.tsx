@@ -9,6 +9,7 @@ import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { supabase } from '@/lib/supabase';
 import { formatCurrencyAmount } from '@/utils/currency';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import FundPicker, { FundBucket } from '@/components/FundPicker';
 
 interface ReceiveModalProps {
   visible: boolean;
@@ -21,7 +22,7 @@ export default function ReceiveModal({ visible, onClose, onSuccess, preselectedA
   const { user } = useAuth();
   const { showNotification } = useNotification();
   const { currency } = useSettings();
-  const { globalRefresh } = useRealtimeData();
+  const { globalRefresh, refreshAccounts } = useRealtimeData();
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState('');
@@ -32,6 +33,11 @@ export default function ReceiveModal({ visible, onClose, onSuccess, preselectedA
   const [categories, setCategories] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [errors, setErrors] = useState<{[key: string]: string}>({});
+  
+  // Fund destination selection (optional - for allocating to goals)
+  const [selectedFundDestination, setSelectedFundDestination] = useState<FundBucket | null>(null);
+  const [showFundDestinationPicker, setShowFundDestinationPicker] = useState(false);
+  const [allocateToGoal, setAllocateToGoal] = useState(false);
 
   // Fetch user accounts and income categories
   useEffect(() => {
@@ -114,27 +120,67 @@ export default function ReceiveModal({ visible, onClose, onSuccess, preselectedA
     try {
       const amountValue = parseFloat(amount);
       
-      // Create transaction using our helper function
-      const { data, error } = await supabase.rpc('create_transaction', {
+      // Get category name from category ID (RPC expects category name, not ID)
+      const selectedCategory = categories.find(cat => cat.id === category);
+      const categoryName = selectedCategory?.name || '';
+      
+      // Determine fund destination
+      let bucketType = 'personal';
+      let bucketId: string | null = null;
+      
+      if (allocateToGoal && selectedFundDestination && selectedFundDestination.type === 'goal') {
+        bucketType = 'goal';
+        bucketId = selectedFundDestination.id;
+      }
+      
+      // Use receive_to_account_bucket RPC for bucket-aware receiving
+      // Note: This RPC expects category name (TEXT), not category ID
+      console.log('📤 Calling receive_to_account_bucket RPC:', {
         p_user_id: user?.id,
         p_account_id: account,
+        p_bucket_type: bucketType,
+        p_bucket_id: bucketId,
         p_amount: amountValue,
-        p_type: 'income',
-        p_category: category,
-        p_description: description.trim(),
-        p_date: date.toISOString().split('T')[0],
-        p_notes: `Income received on ${date}`
+        p_category: categoryName,
       });
 
-      if (error) throw error;
+      const { data: rpcData, error } = await supabase.rpc('receive_to_account_bucket', {
+        p_user_id: user?.id,
+        p_account_id: account,
+        p_bucket_type: bucketType,
+        p_bucket_id: bucketId,
+        p_amount: amountValue,
+        p_category: categoryName, // Category name, not ID
+        p_description: description.trim(),
+        p_date: date.toISOString().split('T')[0],
+        p_notes: `Income received on ${date.toLocaleDateString()}`,
+        p_currency: currency
+      });
 
-      // Get account name for notification
-      const selectedAccount = accounts.find(acc => acc.id === account);
-      const accountName = selectedAccount?.name || 'Account';
+      if (error) {
+        console.error('❌ RPC Error:', error);
+        throw error;
+      }
 
-      // Get category name for notification
-      const selectedCategory = categories.find(cat => cat.id === category);
-      const categoryName = selectedCategory?.name || 'Other';
+      console.log('✅ RPC Success, refreshing account data...');
+      
+      // Force immediate account refresh to get updated balance
+      await refreshAccounts();
+      
+      // Small delay to ensure database has committed and state has updated
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      // Get account name for notification (fetch fresh account data directly from DB)
+      const { data: freshAccountData } = await supabase
+        .from('accounts')
+        .select('name, balance')
+        .eq('id', account)
+        .single();
+      
+      const accountName = freshAccountData?.name || 'Account';
+
+      // Category name already retrieved above
+      const displayCategoryName = categoryName || 'Other';
 
       // Show success notification
       showNotification({
@@ -142,13 +188,16 @@ export default function ReceiveModal({ visible, onClose, onSuccess, preselectedA
         title: 'Received',
         amount: amountValue,
         currency: currency,
-        description: categoryName,
+        description: displayCategoryName,
         account: accountName,
         date: date.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }),
       });
 
-      // Global refresh to update all data
+      // Global refresh to update all data (accounts already refreshed above)
       await globalRefresh();
+
+      // Additional delay to ensure all UI components have refreshed
+      await new Promise(resolve => setTimeout(resolve, 200));
 
       onSuccess?.(); // Call success callback for immediate UI update
       
@@ -245,13 +294,13 @@ export default function ReceiveModal({ visible, onClose, onSuccess, preselectedA
                     key={cat.id}
                     style={[
                       styles.categoryButton,
-                      category === cat.name && styles.selectedCategory
+                      category === cat.id && styles.selectedCategory
                     ]}
-                    onPress={() => setCategory(cat.name)}
+                    onPress={() => setCategory(cat.id)}
                   >
                     <Text style={[
                       styles.categoryText,
-                      category === cat.name && styles.selectedCategoryText
+                      category === cat.id && styles.selectedCategoryText
                     ]}>
                       {cat.name}
                     </Text>
@@ -294,6 +343,54 @@ export default function ReceiveModal({ visible, onClose, onSuccess, preselectedA
                 ))}
               </View>
             </View>
+
+            {/* Optional: Allocate to Goal */}
+            {account && (
+              <View style={styles.inputCard}>
+                <View style={styles.toggleRow}>
+                  <Text style={styles.inputLabel}>Allocate to Goal (Optional)</Text>
+                  <TouchableOpacity
+                    style={[styles.toggle, allocateToGoal && styles.toggleActive]}
+                    onPress={() => {
+                      setAllocateToGoal(!allocateToGoal);
+                      if (!allocateToGoal) {
+                        setShowFundDestinationPicker(true);
+                      } else {
+                        setSelectedFundDestination(null);
+                      }
+                    }}
+                  >
+                    <Text style={[styles.toggleText, allocateToGoal && styles.toggleTextActive]}>
+                      {allocateToGoal ? 'Yes' : 'No'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+                {allocateToGoal && account && (
+                  <>
+                    {selectedFundDestination ? (
+                      <TouchableOpacity
+                        style={styles.fundDestinationButton}
+                        onPress={() => setShowFundDestinationPicker(true)}
+                      >
+                        <View style={styles.fundDestinationInfo}>
+                          <Ionicons name="flag" size={20} color={selectedFundDestination.color || '#6366F1'} />
+                          <Text style={styles.fundDestinationText}>{selectedFundDestination.name}</Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={20} color="rgba(255,255,255,0.7)" />
+                      </TouchableOpacity>
+                    ) : (
+                      <TouchableOpacity
+                        style={styles.selectFundButton}
+                        onPress={() => setShowFundDestinationPicker(true)}
+                      >
+                        <Ionicons name="flag-outline" size={20} color="#10B981" />
+                        <Text style={styles.selectFundText}>Select Goal</Text>
+                      </TouchableOpacity>
+                    )}
+                  </>
+                )}
+              </View>
+            )}
 
             {/* Date Input */}
             <View style={styles.inputCard}>
@@ -353,6 +450,23 @@ export default function ReceiveModal({ visible, onClose, onSuccess, preselectedA
           </ScrollView>
         </SafeAreaView>
       </LinearGradient>
+      
+      {/* Fund Destination Picker (for goals only) */}
+      {account && (
+        <FundPicker
+          visible={showFundDestinationPicker}
+          onClose={() => setShowFundDestinationPicker(false)}
+          accountId={account}
+          onSelect={(bucket) => {
+            // Only allow goal buckets for receiving
+            if (bucket.type === 'goal') {
+              setSelectedFundDestination(bucket);
+              setShowFundDestinationPicker(false);
+            }
+          }}
+          amount={parseFloat(amount) || 0}
+        />
+      )}
     </Modal>
   );
 }
@@ -556,5 +670,69 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 4,
     marginLeft: 4,
+  },
+  toggleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  toggle: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  toggleActive: {
+    backgroundColor: '#10B981',
+    borderColor: '#10B981',
+  },
+  toggleText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  toggleTextActive: {
+    color: 'white',
+    fontWeight: 'bold',
+  },
+  fundDestinationButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 12,
+    padding: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 8,
+  },
+  fundDestinationInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  fundDestinationText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: '500',
+  },
+  selectFundButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 12,
+    padding: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.3)',
+    borderStyle: 'dashed',
+  },
+  selectFundText: {
+    color: '#10B981',
+    fontSize: 16,
+    fontWeight: '500',
   },
 });

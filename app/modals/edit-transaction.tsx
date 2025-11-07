@@ -5,8 +5,11 @@ import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useAuth } from '@/contexts/AuthContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
+import { useLiabilities } from '@/contexts/LiabilitiesContext';
+import { useSettings } from '@/contexts/SettingsContext';
 import { supabase } from '@/lib/supabase';
 import { formatCurrencyAmount } from '@/utils/currency';
+import FundPicker, { FundBucket } from '@/components/FundPicker';
 
 interface Transaction {
   id: string;
@@ -20,6 +23,7 @@ interface Transaction {
   location?: string;
   reference_number?: string;
   tags?: string[];
+  metadata?: any;
   account?: {
     name: string;
     color: string;
@@ -54,7 +58,9 @@ interface EditTransactionModalProps {
 
 export default function EditTransactionModal({ visible, onClose, transaction, onSuccess }: EditTransactionModalProps) {
   const { user } = useAuth();
+  const { currency } = useSettings();
   const { globalRefresh } = useRealtimeData();
+  const { getAccountBreakdown } = useLiabilities();
   const [formData, setFormData] = useState({
     amount: '',
     type: 'expense',
@@ -71,6 +77,11 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
   const [isLoading, setIsLoading] = useState(false);
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [errors, setErrors] = useState<{[key: string]: string}>({});
+  
+  // Fund bucket state (for expenses that were bucket-based)
+  const [originalBucketInfo, setOriginalBucketInfo] = useState<{type: string, id?: string} | null>(null);
+  const [selectedFundBucket, setSelectedFundBucket] = useState<FundBucket | null>(null);
+  const [showFundPicker, setShowFundPicker] = useState(false);
 
   useEffect(() => {
     if (transaction && visible) {
@@ -85,8 +96,41 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
         location: transaction.location || '',
         reference_number: transaction.reference_number || '',
       });
+      
+      // Extract bucket info from metadata if available (for expenses)
+      if (transaction.type === 'expense' && transaction.metadata) {
+        const bucketType = transaction.metadata.bucket_type || transaction.metadata.bucket;
+        const bucketId = transaction.metadata.bucket_id || transaction.metadata.liability_id || transaction.metadata.goal_id;
+        if (bucketType) {
+          setOriginalBucketInfo({ type: bucketType, id: bucketId });
+        }
+      } else if (transaction.type === 'income' && transaction.metadata) {
+        const bucketType = transaction.metadata.bucket_type;
+        const bucketId = transaction.metadata.bucket_id;
+        if (bucketType && bucketType !== 'personal') {
+          setOriginalBucketInfo({ type: bucketType, id: bucketId });
+        }
+      }
+      
+      // Reset fund bucket selection
+      setSelectedFundBucket(null);
     }
   }, [transaction, visible]);
+  
+  // Auto-show fund picker for expenses when account is selected and no bucket info exists
+  useEffect(() => {
+    if (visible && formData.type === 'expense' && formData.account_id && !selectedFundBucket && !originalBucketInfo) {
+      // Only auto-show if transaction wasn't originally bucket-based
+      setShowFundPicker(true);
+    }
+  }, [visible, formData.account_id, formData.type]);
+  
+  // Reset fund bucket when account changes
+  useEffect(() => {
+    if (formData.account_id && selectedFundBucket) {
+      setSelectedFundBucket(null);
+    }
+  }, [formData.account_id]);
 
   useEffect(() => {
     if (visible && user) {
@@ -155,12 +199,42 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
 
   const handleSave = async () => {
     if (!validateForm() || !transaction) return;
+    
+    // Warn if editing bucket-based transaction (balance changes would need reversal)
+    if (originalBucketInfo) {
+      const proceed = await new Promise<boolean>((resolve) => {
+        Alert.alert(
+          'Bucket-Based Transaction',
+          'This transaction affects fund buckets. Editing basic fields is safe, but changing amount or account may require manual balance adjustments. Continue?',
+          [
+            { text: 'Cancel', onPress: () => resolve(false), style: 'cancel' },
+            { text: 'Continue', onPress: () => resolve(true) },
+          ]
+        );
+      });
+      if (!proceed) {
+        setIsLoading(false);
+        return;
+      }
+    }
 
     setIsLoading(true);
 
     try {
       const amount = parseFloat(formData.amount);
       const finalAmount = formData.type === 'expense' ? -amount : amount;
+      
+      // Update metadata with bucket info if a new bucket is selected
+      let metadata = transaction.metadata || {};
+      if (selectedFundBucket) {
+        metadata = {
+          ...metadata,
+          bucket_type: selectedFundBucket.type,
+          bucket_id: selectedFundBucket.type !== 'personal' ? selectedFundBucket.id : null,
+          ...(selectedFundBucket.type === 'liability' && { liability_id: selectedFundBucket.id }),
+          ...(selectedFundBucket.type === 'goal' && { goal_id: selectedFundBucket.id }),
+        };
+      }
 
       const { error } = await supabase
         .from('transactions')
@@ -174,6 +248,7 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
           notes: formData.notes.trim() || null,
           location: formData.location.trim() || null,
           reference_number: formData.reference_number.trim() || null,
+          metadata: Object.keys(metadata).length > 0 ? metadata : (transaction.metadata || null),
           updated_at: new Date().toISOString(),
         })
         .eq('id', transaction.id)
@@ -382,6 +457,64 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
               {errors.account_id && <Text style={styles.errorText}>{errors.account_id}</Text>}
             </View>
 
+            {/* Fund Source Selection (for expenses) */}
+            {formData.type === 'expense' && formData.account_id && (
+              <View style={styles.inputCard}>
+                <Text style={styles.inputLabel}>Fund Source {originalBucketInfo && '(Original: ' + originalBucketInfo.type + ')'}</Text>
+                {selectedFundBucket ? (
+                  <TouchableOpacity
+                    style={styles.fundBucketButton}
+                    onPress={() => setShowFundPicker(true)}
+                  >
+                    <View style={styles.fundBucketInfo}>
+                      <View style={[styles.fundBucketIcon, { backgroundColor: (selectedFundBucket.color || '#6366F1') + '20' }]}>
+                        <Ionicons
+                          name={
+                            selectedFundBucket.type === 'personal'
+                              ? 'person'
+                              : selectedFundBucket.type === 'liability'
+                              ? 'card'
+                              : 'flag'
+                          }
+                          size={20}
+                          color={selectedFundBucket.color || '#6366F1'}
+                        />
+                      </View>
+                      <View style={styles.fundBucketDetails}>
+                        <Text style={styles.fundBucketName}>{selectedFundBucket.name}</Text>
+                        <Text style={styles.fundBucketAmount}>
+                          Available: {formatCurrencyAmount(selectedFundBucket.amount, currency)}
+                        </Text>
+                      </View>
+                    </View>
+                    <Ionicons name="chevron-forward" size={20} color="rgba(255,255,255,0.7)" />
+                  </TouchableOpacity>
+                ) : originalBucketInfo ? (
+                  <View style={styles.bucketInfoDisplay}>
+                    <Ionicons 
+                      name={originalBucketInfo.type === 'liability' ? 'card' : 'flag'} 
+                      size={20} 
+                      color="#6366F1" 
+                    />
+                    <Text style={styles.bucketInfoText}>
+                      Originally paid from {originalBucketInfo.type} bucket
+                    </Text>
+                    <TouchableOpacity onPress={() => setShowFundPicker(true)}>
+                      <Text style={styles.changeBucketText}>Change</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={styles.selectFundButton}
+                    onPress={() => setShowFundPicker(true)}
+                  >
+                    <Ionicons name="wallet-outline" size={20} color="#10B981" />
+                    <Text style={styles.selectFundText}>Select Fund Source (Optional)</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            )}
+
             {/* Category Selection */}
             <View style={styles.inputCard}>
               <Text style={styles.inputLabel}>Category</Text>
@@ -474,6 +607,20 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
             </View>
           </ScrollView>
         </SafeAreaView>
+        
+        {/* Fund Picker Modal */}
+        {formData.account_id && formData.type === 'expense' && (
+          <FundPicker
+            visible={showFundPicker}
+            onClose={() => setShowFundPicker(false)}
+            accountId={formData.account_id}
+            onSelect={(bucket) => {
+              setSelectedFundBucket(bucket);
+              setShowFundPicker(false);
+            }}
+            amount={parseFloat(formData.amount) || 0}
+          />
+        )}
       </LinearGradient>
     </Modal>
   );
@@ -656,6 +803,78 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     marginLeft: 8,
+  },
+  fundBucketButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 12,
+    padding: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 8,
+  },
+  fundBucketInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  fundBucketIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  fundBucketDetails: {
+    flex: 1,
+  },
+  fundBucketName: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  fundBucketAmount: {
+    color: '#9CA3AF',
+    fontSize: 12,
+  },
+  bucketInfoDisplay: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(99, 102, 241, 0.1)',
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 8,
+    gap: 8,
+  },
+  bucketInfoText: {
+    color: 'white',
+    fontSize: 14,
+    flex: 1,
+  },
+  changeBucketText: {
+    color: '#6366F1',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  selectFundButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 12,
+    padding: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.3)',
+    borderStyle: 'dashed',
+  },
+  selectFundText: {
+    color: '#10B981',
+    fontSize: 16,
+    fontWeight: '500',
   },
 });
 

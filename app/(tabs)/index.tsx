@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
 import { useBackgroundMode } from '@/contexts/BackgroundModeContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
@@ -39,6 +39,13 @@ export default function HomeScreen() {
   const formatCurrency = (amount: number) => {
     return formatCurrencyAmount(amount, currency);
   };
+
+  // Refresh accounts when screen comes into focus to ensure latest balances
+  useFocusEffect(
+    React.useCallback(() => {
+      refreshAccounts().catch(console.error);
+    }, [refreshAccounts])
+  );
 
   // Load bills alerts
   useEffect(() => {
@@ -185,6 +192,8 @@ export default function HomeScreen() {
                         icon: iconType,
                         backgroundColor: 'rgba(153, 215, 149, 1)',
                         iconBackgroundColor: '#000',
+                        liabilityFunds: (account as any).liability_funds,
+                        ownFunds: (account as any).own_funds,
                       }}
                       onPress={(id) => router.push(`/account/${id}`)}
                       style={{ marginBottom: index === accounts.length - 1 ? 0 : 12 }}
@@ -297,8 +306,12 @@ export default function HomeScreen() {
            onClose={() => {
              setPayModalVisible(false);
            }}
-           onSuccess={() => {
-             refreshAccounts(); // Refresh accounts after transaction
+           onSuccess={async () => {
+             // Refresh accounts and transactions to update balances immediately
+             await Promise.all([
+               refreshAccounts(),
+               // Transactions refresh is handled by the modal, but we ensure accounts refresh
+             ]);
            }}
          />
          <ReceiveModal 
@@ -306,8 +319,12 @@ export default function HomeScreen() {
            onClose={() => {
              setReceiveModalVisible(false);
            }}
-           onSuccess={() => {
-             refreshAccounts(); // Refresh accounts after transaction
+           onSuccess={async () => {
+             // Refresh accounts and transactions to update balances immediately
+             await Promise.all([
+               refreshAccounts(),
+               // Transactions refresh is handled by the modal, but we ensure accounts refresh
+             ]);
            }}
          />
          <TransferModal 
@@ -315,8 +332,12 @@ export default function HomeScreen() {
            onClose={() => {
              setTransferModalVisible(false);
            }}
-           onSuccess={() => {
-             refreshAccounts(); // Refresh accounts after transaction
+           onSuccess={async () => {
+             // Refresh accounts and transactions to update balances immediately
+             await Promise.all([
+               refreshAccounts(),
+               // Transactions refresh is handled by the modal, but we ensure accounts refresh
+             ]);
            }}
          />
          <AddAccountModal 

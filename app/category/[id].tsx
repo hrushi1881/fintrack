@@ -205,6 +205,40 @@ export default function CategoryDetailScreen() {
 
   const renderConnected = () => (
     <View style={styles.tabContent}>
+      {/* Subcategories (frontend scaffold) */}
+      <View style={styles.connectedSection}>
+        <Text style={styles.connectedTitle}>Subcategories</Text>
+        {(() => {
+          const subs = (categories as any[]).filter((c: any) => c.parent_id === category?.id);
+          if (subs.length === 0) {
+            return (
+              <View>
+                <Text style={styles.noItemsText}>No subcategories yet</Text>
+                <TouchableOpacity
+                  style={[styles.actionButton, { marginTop: 12 }]}
+                  onPress={() => router.push(`/modals/add-subcategory?id=${category?.id}` as any)}
+                >
+                  <Ionicons name="add" size={20} color="#3B82F6" />
+                  <Text style={styles.actionText}>Add Subcategory</Text>
+                </TouchableOpacity>
+              </View>
+            );
+          }
+          return subs.map((sub: any) => (
+            <TouchableOpacity
+              key={sub.id}
+              style={styles.connectedItem}
+              onPress={() => router.push(`/category/${sub.id}` as any)}
+            >
+              <View style={styles.connectedItemInfo}>
+                <Text style={styles.connectedItemName}>{sub.name}</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
+            </TouchableOpacity>
+          ));
+        })()}
+      </View>
+
       {/* Budgets */}
       <View style={styles.connectedSection}>
         <Text style={styles.connectedTitle}>Budgets ({connectedItems.budgets?.length || 0})</Text>
