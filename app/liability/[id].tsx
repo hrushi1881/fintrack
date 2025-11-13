@@ -1,8 +1,17 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, ActivityIndicator, Alert } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router } from 'expo-router';
+
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
@@ -11,13 +20,43 @@ import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { formatCurrencyAmount } from '@/utils/currency';
 import DrawLiabilityFundsModal from '@/app/modals/draw-liability-funds';
 import PayLiabilityModal from '@/app/modals/pay-liability';
+import LiabilitySettlementModal from '@/app/modals/liability-settlement';
+import EditLiabilityScheduleModal from '@/app/modals/edit-liability-schedule';
+import EditLiabilityModal from '@/app/modals/edit-liability';
+import PayBillModal from '@/app/modals/pay-bill';
+import AddLiabilityBillModal from '@/app/modals/add-liability-bill';
+import { checkLiabilitySettlementStatus } from '@/utils/liabilities';
+import GlassCard from '@/components/GlassCard';
+import { fetchLiabilitySchedules, LiabilitySchedule } from '@/utils/liabilitySchedules';
+import { fetchBills, calculateBillStatus } from '@/utils/bills';
+import { Bill } from '@/types';
 
-type LiabilityData = {
+interface LiabilityPayment {
+  id: string;
+  amount: number;
+  payment_date: string;
+  description?: string;
+  is_mock?: boolean;
+  principal_component?: number;
+  interest_component?: number;
+}
+
+interface LiabilityActivity {
+  id: string;
+  activity_type: string;
+  created_at: string;
+  amount?: number;
+  notes?: string;
+}
+
+interface LiabilityRecord {
   id: string;
   title: string;
   description?: string;
   liability_type: string;
   current_balance: number;
+  original_amount?: number;
+  disbursed_amount?: number;
   interest_rate_apy?: number;
   periodical_payment?: number;
   start_date?: string;
@@ -26,48 +65,46 @@ type LiabilityData = {
   status: string;
   color?: string;
   icon?: string;
-  metadata?: any;
-};
+}
 
-type LiabilityPayment = {
-  id: string;
-  amount: number;
-  payment_date: string;
-  description?: string;
-  account_id?: string;
-  is_mock?: boolean;
-  payment_type?: string;
-};
-
-export default function LiabilityDetailScreen() {
+const LiabilityDetailScreen: React.FC = () => {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
   const { currency } = useSettings();
   const { accounts } = useRealtimeData();
-  const { getAccountBreakdown, fetchLiabilityAllocations } = useLiabilities();
-  const [activeTab, setActiveTab] = useState('overview');
-  const [liability, setLiability] = useState<LiabilityData | null>(null);
+  const { fetchLiabilityAllocations } = useLiabilities();
+
+  const [liability, setLiability] = useState<LiabilityRecord | null>(null);
   const [paymentHistory, setPaymentHistory] = useState<LiabilityPayment[]>([]);
   const [allocations, setAllocations] = useState<any[]>([]);
-  const [activityLog, setActivityLog] = useState<any[]>([]);
+  const [activityLog, setActivityLog] = useState<LiabilityActivity[]>([]);
+  const [schedules, setSchedules] = useState<LiabilitySchedule[]>([]);
+  const [bills, setBills] = useState<Bill[]>([]);
   const [loading, setLoading] = useState(true);
   const [showDrawFunds, setShowDrawFunds] = useState(false);
-  const [showPayLiability, setShowPayLiability] = useState(false);
+  const [showPayModal, setShowPayModal] = useState(false);
+  const [showSettlementModal, setShowSettlementModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [checkingSettlement, setCheckingSettlement] = useState(false);
+  const [showAmortization, setShowAmortization] = useState(false);
+  const [editingSchedule, setEditingSchedule] = useState<LiabilitySchedule | null>(null);
+  const [selectedBill, setSelectedBill] = useState<Bill | null>(null);
+  const [showPayBillModal, setShowPayBillModal] = useState(false);
+  const [showAddBillModal, setShowAddBillModal] = useState(false);
 
   useEffect(() => {
     if (id && user) {
-      loadLiabilityData();
+      loadLiability();
     }
   }, [id, user]);
 
-  const loadLiabilityData = async () => {
-    if (!user || !id) return;
-    
+  const loadLiability = async () => {
+    if (!id || !user) return;
+
     try {
       setLoading(true);
-      
-      // Fetch liability
-      const { data: liabilityData, error: liabilityError } = await supabase
+
+      const { data: record, error: liabilityError } = await supabase
         .from('liabilities')
         .select('*')
         .eq('id', id)
@@ -75,530 +112,728 @@ export default function LiabilityDetailScreen() {
         .single();
 
       if (liabilityError) throw liabilityError;
-      setLiability(liabilityData);
+      setLiability(record as LiabilityRecord);
 
-      // Fetch payment history
-      const { data: payments, error: paymentsError } = await supabase
+      const { data: payments } = await supabase
         .from('liability_payments')
         .select('*')
         .eq('liability_id', id)
         .order('payment_date', { ascending: false });
+      setPaymentHistory((payments as LiabilityPayment[]) || []);
 
-      if (!paymentsError) {
-        setPaymentHistory(payments || []);
+      const allocationRows = await fetchLiabilityAllocations(id);
+      setAllocations(allocationRows || []);
+
+      try {
+        const { data: activityRows } = await supabase
+          .from('liability_activity_log')
+          .select('*')
+          .eq('liability_id', id)
+          .order('created_at', { ascending: false });
+        setActivityLog((activityRows as LiabilityActivity[]) || []);
+      } catch (error) {
+        setActivityLog([]);
       }
 
-      // Fetch allocations
-      const allocationsData = await fetchLiabilityAllocations(id);
-      setAllocations(allocationsData);
+      // Fetch liability schedules (bills)
+      try {
+        const schedulesData = await fetchLiabilitySchedules(id);
+        setSchedules(schedulesData || []);
+      } catch (error) {
+        console.error('Error fetching schedules:', error);
+        setSchedules([]);
+      }
 
-      // Fetch activity log
-      const { data: activityData, error: activityError } = await supabase
-        .from('liability_activity_log')
-        .select('*')
-        .eq('liability_id', id)
-        .order('created_at', { ascending: false });
-
-      if (!activityError && activityData) {
-        setActivityLog(activityData);
+      // Fetch bills linked to this liability
+      try {
+        const billsData = await fetchBills(user.id, {
+          // @ts-ignore - billType filter may not be in type yet
+          billType: 'liability_linked',
+        });
+        // Filter bills for this liability
+        const liabilityBills = billsData.filter(b => b.liability_id === id);
+        // Calculate status for each bill
+        const billsWithStatus = liabilityBills.map(bill => ({
+          ...bill,
+          status: calculateBillStatus(bill),
+        }));
+        setBills(billsWithStatus);
+      } catch (error) {
+        console.error('Error fetching bills:', error);
+        setBills([]);
       }
     } catch (error) {
-      console.error('Error loading liability data:', error);
-      Alert.alert('Error', 'Failed to load liability details');
+      console.error('Failed to load liability details', error);
+      Alert.alert('Error', 'Could not load liability details.');
     } finally {
       setLoading(false);
     }
   };
 
-  const formatCurrency = (amount: number) => {
-    return formatCurrencyAmount(amount, currency);
-  };
+  const formatCurrency = (value: number) => formatCurrencyAmount(value, currency);
 
-  const formatDate = (dateString?: string) => {
-    if (!dateString) return 'N/A';
-    return new Date(dateString).toLocaleDateString('en-US', {
+  const formatDate = (value?: string) => {
+    if (!value) return '—';
+    return new Date(value).toLocaleDateString(undefined, {
       month: 'short',
       day: 'numeric',
       year: 'numeric',
     });
   };
 
-  const getStatusColor = (status: string) => {
+  const outstanding = useMemo(() => Number(liability?.current_balance ?? 0), [liability]);
+  const totalOwed = useMemo(
+    () => Number(liability?.original_amount ?? liability?.current_balance ?? 0),
+    [liability]
+  );
+  const minPayment = useMemo(
+    () => Number(liability?.periodical_payment ?? 0),
+    [liability]
+  );
+  const paidAmount = useMemo(() => totalOwed - outstanding, [totalOwed, outstanding]);
+  const paidProgress = useMemo(() => {
+    if (totalOwed === 0) return 0;
+    return Math.max(0, Math.min(1, paidAmount / totalOwed));
+  }, [paidAmount, totalOwed]);
+
+  const totalInterestPaid = useMemo(() => {
+    return paymentHistory.reduce((sum, payment) => sum + Number(payment.interest_component ?? 0), 0);
+  }, [paymentHistory]);
+
+  const totalPrincipalPaid = useMemo(() => {
+    return paymentHistory.reduce((sum, payment) => sum + Number(payment.principal_component ?? 0), 0);
+  }, [paymentHistory]);
+
+  const handlePayBill = (bill: Bill) => {
+    setSelectedBill(bill);
+    setShowPayBillModal(true);
+  };
+
+  // No separate edit function - clicking bill opens pay modal which allows editing
+  const handleEditBill = (bill: Bill) => {
+    // Same as pay bill - one modal for both editing and paying
+    setSelectedBill(bill);
+    setShowPayBillModal(true);
+  };
+
+  const getStatusColor = (status: string): string => {
     switch (status) {
-      case 'paid_off': return '#10B981';
-      case 'active': return '#3B82F6';
-      case 'overdue': return '#EF4444';
-      case 'paused': return '#6B7280';
-      default: return '#6B7280';
+      case 'paid':
+        return '#10B981';
+      case 'overdue':
+        return '#EF4444';
+      case 'due_today':
+        return '#F59E0B';
+      case 'upcoming':
+        return '#3B82F6';
+      case 'pending':
+        return '#F59E0B';
+      case 'skipped':
+        return '#6B7280';
+      case 'cancelled':
+        return '#9CA3AF';
+      default:
+        return '#6B7280';
     }
   };
 
-  const getStatusText = (status: string) => {
+  const getStatusIcon = (status: string): any => {
     switch (status) {
-      case 'paid_off': return 'Paid Off';
-      case 'active': return 'Active';
-      case 'overdue': return 'Overdue';
-      case 'paused': return 'Paused';
-      default: return 'Unknown';
+      case 'paid':
+        return 'checkmark-circle';
+      case 'overdue':
+        return 'alert-circle';
+      case 'due_today':
+        return 'time';
+      case 'upcoming':
+        return 'time-outline';
+      case 'pending':
+        return 'hourglass-outline';
+      case 'skipped':
+        return 'close-circle-outline';
+      case 'cancelled':
+        return 'ban-outline';
+      default:
+        return 'ellipse-outline';
     }
   };
 
-  const detectLiabilityType = (liabilityType: string): 'loan' | 'emi' | 'one_time' => {
-    if (['personal_loan', 'student_loan', 'auto_loan', 'mortgage'].includes(liabilityType)) {
-      return 'loan';
-    }
-    if (liability?.periodical_payment) {
-      return 'emi';
-    }
-    return 'one_time';
+  const handleMenuPress = () => {
+    if (!liability) return;
+    
+    Alert.alert(
+      liability.title,
+      'Choose an action',
+      [
+        {
+          text: 'Edit Liability',
+          onPress: () => setShowEditModal(true),
+        },
+        {
+          text: 'Delete Liability',
+          style: 'destructive',
+          onPress: handleDeleteLiability,
+        },
+        {
+          text: 'Cancel',
+          style: 'cancel',
+        },
+      ]
+    );
   };
 
-  const handlePayLiability = () => {
-    setShowPayLiability(true);
+  const handleDeleteLiability = async () => {
+    if (!liability || !user) return;
+
+    setCheckingSettlement(true);
+    try {
+      const settlementStatus = await checkLiabilitySettlementStatus(liability.id, user.id);
+
+      if (settlementStatus.needsSettlement) {
+        setShowSettlementModal(true);
+      } else {
+        Alert.alert(
+          'Delete liability?',
+          'This liability is already settled. This action cannot be undone.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Delete',
+              style: 'destructive',
+              onPress: async () => {
+                try {
+                  await supabase
+                    .from('liabilities')
+                    .update({
+                      is_deleted: true,
+                      deleted_at: new Date().toISOString(),
+                      is_active: false,
+                    })
+                    .eq('id', liability.id);
+                  router.back();
+                } catch (error) {
+                  console.error('Failed to delete liability', error);
+                  Alert.alert('Error', 'Could not delete liability.');
+                }
+              },
+            },
+          ]
+        );
+      }
+    } catch (error: any) {
+      console.error('Error checking settlement status:', error);
+      Alert.alert('Error', error.message || 'Could not check settlement status.');
+    } finally {
+      setCheckingSettlement(false);
+    }
+  };
+
+  const handleSettlementComplete = () => {
+    setShowSettlementModal(false);
+    router.back();
   };
 
   if (loading) {
     return (
-      <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
-        <SafeAreaView style={styles.safeArea}>
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color="#10B981" />
-            <Text style={styles.loadingText}>Loading liability details...</Text>
-          </View>
-        </SafeAreaView>
-      </LinearGradient>
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#000000" />
+          <Text style={styles.loadingText}>Loading liability details...</Text>
+        </View>
+      </SafeAreaView>
     );
   }
 
   if (!liability) {
     return (
-      <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
-        <SafeAreaView style={styles.safeArea}>
-          <View style={styles.errorContainer}>
-            <Ionicons name="alert-circle" size={48} color="rgba(255, 255, 255, 0.7)" />
-            <Text style={styles.errorText}>Liability not found</Text>
-            <TouchableOpacity 
-              style={styles.backButton}
-              onPress={() => router.back()}
-            >
-              <Text style={styles.backButtonText}>Go Back</Text>
-            </TouchableOpacity>
-          </View>
-        </SafeAreaView>
-      </LinearGradient>
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.emptyContainer}>
+          <Ionicons name="alert-circle-outline" size={64} color="rgba(0, 0, 0, 0.3)" />
+          <Text style={styles.emptyTitle}>Liability not found</Text>
+          <Text style={styles.emptyMessage}>
+            This liability may have been deleted or is no longer accessible.
+          </Text>
+          <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+            <Text style={styles.backButtonText}>Go Back</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
     );
   }
 
-  const liabilityType = detectLiabilityType(liability.liability_type);
-  const tabs = [
-    { key: 'overview', label: 'Overview', icon: 'home' },
-    { key: 'payments', label: 'Payments', icon: 'time' },
-    { key: 'allocations', label: 'Allocations', icon: 'location' },
-    { key: 'activity', label: 'Activity', icon: 'list' },
-  ];
-
-  const calculateAvailableToDraw = () => {
-    const original = parseFloat(liability.original_amount || '0');
-    const disbursed = parseFloat(liability.disbursed_amount || '0');
-    return Math.max(0, original - disbursed);
-  };
-
-  const formatActivityType = (activityType: string, amount: number) => {
-    switch (activityType) {
-      case 'draw':
-        return `Drawn ${formatCurrency(amount)}`;
-      case 'limit_increase':
-        return `Limit increased by ${formatCurrency(amount)}`;
-      case 'repayment':
-        return `Repayment of ${formatCurrency(amount)}`;
-      default:
-        return activityType.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
-    }
-  };
-
   return (
-    <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
-      <SafeAreaView style={styles.safeArea}>
-        <ScrollView style={styles.scrollView}>
+    <SafeAreaView style={styles.safeArea}>
+      <View style={styles.container}>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scrollContent}
+        >
           {/* Header */}
-          <View style={styles.header}>
-            <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-              <Ionicons name="arrow-back" size={24} color="white" />
+          <View style={styles.headerRow}>
+            <TouchableOpacity style={styles.headerButton} onPress={() => router.back()}>
+              <Ionicons name="arrow-back" size={24} color="#000000" />
             </TouchableOpacity>
-            <Text style={styles.headerTitle}>Liability Details</Text>
-            <TouchableOpacity style={styles.editButton}>
-              <Ionicons name="create" size={24} color="white" />
-            </TouchableOpacity>
-          </View>
-
-          {/* Liability Info Card */}
-          <View style={styles.liabilityInfoCard}>
-            <View style={styles.liabilityHeader}>
-              <View style={[styles.liabilityIcon, { backgroundColor: (liability.color || '#EF4444') + '20' }]}>
-                <Ionicons name={(liability.icon || 'card') as any} size={32} color={liability.color || '#EF4444'} />
-              </View>
-              <View style={styles.liabilityDetails}>
-                <Text style={styles.liabilityName}>{liability.title}</Text>
-                <Text style={styles.liabilityType}>
-                  {liability.liability_type.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.amountSection}>
-              <Text style={styles.amountLabel}>Current Balance</Text>
-              <Text style={styles.amountValue}>
-                {formatCurrency(parseFloat(liability.current_balance || '0'))}
-              </Text>
-              <View style={[styles.statusBadge, { backgroundColor: getStatusColor(liability.status) + '20' }]}>
-                <Text style={[styles.statusText, { color: getStatusColor(liability.status) }]}>
-                  {getStatusText(liability.status)}
-                </Text>
-              </View>
-            </View>
-
-            {/* Liability Summary */}
-            <View style={styles.summarySection}>
-              <View style={styles.summaryRow}>
-                <Text style={styles.summaryLabel}>Total Owed:</Text>
-                <Text style={styles.summaryValue}>
-                  {formatCurrency(parseFloat(liability.original_amount || '0'))}
-                </Text>
-              </View>
-              <View style={styles.summaryRow}>
-                <Text style={styles.summaryLabel}>Remaining:</Text>
-                <Text style={styles.summaryValue}>
-                  {formatCurrency(parseFloat(liability.current_balance || '0'))}
-                </Text>
-              </View>
-              <View style={[styles.summaryRow, styles.availableRow]}>
-                <Text style={styles.summaryLabel}>Available to Draw:</Text>
-                <View style={[
-                  styles.availableBadge,
-                  calculateAvailableToDraw() === 0 && styles.availableBadgeEmpty
-                ]}>
-                  <Text style={[
-                    styles.availableValue,
-                    calculateAvailableToDraw() === 0 && styles.availableValueEmpty
-                  ]}>
-                    {formatCurrency(calculateAvailableToDraw())}
-                  </Text>
-                </View>
-              </View>
-            </View>
-
-            {(liability.next_due_date || liability.targeted_payoff_date) && (
-              <View style={styles.dueDateSection}>
-                {liability.next_due_date && (
-                  <>
-                    <Text style={styles.dueDateLabel}>Next Due Date</Text>
-                    <Text style={styles.dueDateValue}>{formatDate(liability.next_due_date)}</Text>
-                  </>
-                )}
-                {liability.targeted_payoff_date && (
-                  <>
-                    <Text style={styles.targetLabel}>Target Payoff Date</Text>
-                    <Text style={styles.targetValue}>{formatDate(liability.targeted_payoff_date)}</Text>
-                  </>
-                )}
-              </View>
+            <Text style={styles.pageTitle} numberOfLines={1}>
+              {liability.title}
+            </Text>
+          <TouchableOpacity
+            style={styles.headerButton}
+            onPress={handleMenuPress}
+            disabled={checkingSettlement}
+          >
+            {checkingSettlement ? (
+              <ActivityIndicator size="small" color="#000000" />
+            ) : (
+              <Ionicons name="ellipsis-horizontal" size={24} color="#000000" />
             )}
+          </TouchableOpacity>
           </View>
 
-          {/* Tab Navigation */}
-          <View style={styles.tabContainer}>
-            {tabs.map((tab) => (
-              <TouchableOpacity
-                key={tab.key}
-                style={[styles.tab, activeTab === tab.key && styles.activeTab]}
-                onPress={() => setActiveTab(tab.key)}
-              >
-                <Ionicons 
-                  name={tab.icon as any} 
-                  size={20} 
-                  color={activeTab === tab.key ? '#10B981' : '#6B7280'} 
-                />
-                <Text style={[
-                  styles.tabText,
-                  activeTab === tab.key && styles.activeTabText
-                ]}>
-                  {tab.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
+          {/* Hero Section - Current Balance */}
+          <GlassCard padding={24} marginVertical={20}>
+            <Text style={styles.heroLabel}>Current Outstanding Balance</Text>
+            <Text style={styles.heroAmount}>{formatCurrency(outstanding)}</Text>
+            <View style={styles.progressSection}>
+              <View style={styles.progressBarContainer}>
+                <View style={[styles.progressBarFill, { width: `${paidProgress * 100}%` }]} />
+            </View>
+              <Text style={styles.progressText}>
+                {Math.round(paidProgress * 100)}% paid ({formatCurrency(paidAmount)} of {formatCurrency(totalOwed)})
+              </Text>
+            </View>
+          </GlassCard>
+
+          {/* Key Metrics */}
+          <View style={styles.metricsGrid}>
+            <GlassCard padding={20}>
+              <Text style={styles.metricLabel}>Monthly Payment</Text>
+              <Text style={styles.metricValue}>
+                {minPayment ? formatCurrency(minPayment) : '—'}
+              </Text>
+            </GlassCard>
+            <GlassCard padding={20}>
+              <Text style={styles.metricLabel}>Interest Rate</Text>
+              <Text style={styles.metricValue}>
+                {liability.interest_rate_apy ? `${liability.interest_rate_apy}%` : '—'}
+              </Text>
+            </GlassCard>
+            <GlassCard padding={20}>
+              <Text style={styles.metricLabel}>Next Payment Due</Text>
+              <Text style={styles.metricValue}>
+                {formatDate(liability.next_due_date)}
+              </Text>
+            </GlassCard>
+            <GlassCard padding={20}>
+              <Text style={styles.metricLabel}>Total Interest Paid</Text>
+              <Text style={styles.metricValue}>{formatCurrency(totalInterestPaid)}</Text>
+            </GlassCard>
           </View>
 
-          {/* Tab Content */}
-          {activeTab === 'overview' && (
-            <View style={styles.tabContent}>
-              {/* Payment Actions */}
-              {liability.status !== 'paid_off' && (
-                <View style={styles.sectionCard}>
-                  <Text style={styles.sectionTitle}>Payment Actions</Text>
-                  <TouchableOpacity 
-                    style={[styles.actionButton, { backgroundColor: '#10B981' }]}
-                    onPress={handlePayLiability}
-                  >
-                    <Ionicons name="card" size={24} color="white" />
-                    <Text style={styles.actionText}>Pay Liability</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity 
-                    style={[styles.actionButton, { backgroundColor: '#6366F1' }]}
-                    onPress={() => setShowDrawFunds(true)}
-                  >
-                    <Ionicons name="download" size={24} color="white" />
-                    <Text style={styles.actionText}>Draw Funds</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-
-              {/* Liability Information */}
-              <View style={styles.sectionCard}>
-                <Text style={styles.sectionTitle}>Liability Information</Text>
-                {liability.description && (
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Description:</Text>
-                    <Text style={styles.infoValue}>{liability.description}</Text>
-                  </View>
-                )}
-                <View style={styles.infoRow}>
-                  <Text style={styles.infoLabel}>Type:</Text>
-                  <Text style={styles.infoValue}>
-                    {liability.liability_type.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
-                  </Text>
-                </View>
-                {liability.interest_rate_apy && (
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Interest Rate (APY):</Text>
-                    <Text style={styles.infoValue}>{liability.interest_rate_apy}%</Text>
-                  </View>
-                )}
-                {liability.periodical_payment && (
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Periodical Payment:</Text>
-                    <Text style={styles.infoValue}>{formatCurrency(liability.periodical_payment)}</Text>
-                  </View>
-                )}
-                {liability.start_date && (
-                  <View style={styles.infoRow}>
-                    <Text style={styles.infoLabel}>Start Date:</Text>
-                    <Text style={styles.infoValue}>{formatDate(liability.start_date)}</Text>
-                  </View>
-                )}
+          {/* Payment Breakdown */}
+          {paymentHistory.length > 0 && (
+            <GlassCard padding={24} marginVertical={12}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>Payment Breakdown</Text>
               </View>
+              <View style={styles.breakdownRow}>
+                <View style={styles.breakdownItem}>
+                  <Text style={styles.breakdownLabel}>Principal Paid</Text>
+                  <Text style={styles.breakdownValue}>{formatCurrency(totalPrincipalPaid)}</Text>
+                </View>
+                <View style={styles.breakdownDivider} />
+                <View style={styles.breakdownItem}>
+                  <Text style={styles.breakdownLabel}>Interest Paid</Text>
+                  <Text style={styles.breakdownValue}>{formatCurrency(totalInterestPaid)}</Text>
+                </View>
+              </View>
+            </GlassCard>
+          )}
 
-              {/* Recent Payments */}
-              <View style={styles.sectionCard}>
-                <Text style={styles.sectionTitle}>Recent Payments</Text>
-                {paymentHistory.slice(0, 3).map((payment) => (
+          {/* Payment History */}
+          <GlassCard padding={24} marginVertical={12}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Payment History</Text>
+              {paymentHistory.length > 5 && (
+              <TouchableOpacity>
+                  <Text style={styles.sectionAction}>View All</Text>
+              </TouchableOpacity>
+              )}
+            </View>
+            {paymentHistory.length === 0 ? (
+              <Text style={styles.emptyText}>No payments recorded yet.</Text>
+            ) : (
+              <View style={styles.paymentList}>
+                {paymentHistory.slice(0, 5).map((payment) => (
                   <View key={payment.id} style={styles.paymentItem}>
+                    <View style={styles.paymentIcon}>
+                      <Ionicons name="checkmark-circle" size={20} color="rgba(0, 0, 0, 0.6)" />
+                    </View>
                     <View style={styles.paymentInfo}>
                       <Text style={styles.paymentAmount}>{formatCurrency(payment.amount)}</Text>
                       <Text style={styles.paymentDate}>{formatDate(payment.payment_date)}</Text>
-                      {payment.is_mock && (
-                        <Text style={styles.mockBadge}>Mock Payment</Text>
+                      {payment.principal_component && payment.interest_component && (
+                        <Text style={styles.paymentBreakdown}>
+                          Principal: {formatCurrency(payment.principal_component)} • Interest: {formatCurrency(payment.interest_component)}
+                        </Text>
                       )}
-                    </View>
-                    {payment.description && (
-                      <Text style={styles.paymentDescription}>{payment.description}</Text>
-                    )}
-                  </View>
-                ))}
-                {paymentHistory.length === 0 && (
-                  <Text style={styles.noPaymentsText}>No payments recorded yet</Text>
-                )}
-              </View>
+                      {payment.description && (
+                        <Text style={styles.paymentDescription}>{payment.description}</Text>
+                      )}
             </View>
+          </View>
+                ))}
+              </View>
+            )}
+          </GlassCard>
+
+          {/* Linked Accounts */}
+          {allocations.length > 0 && (
+            <GlassCard padding={24} marginVertical={12}>
+              <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Linked Accounts</Text>
+              </View>
+              <View style={styles.allocationList}>
+                {allocations.map((allocation) => {
+                  const account = accounts.find((acct) => acct.id === allocation.accountId);
+                  return (
+                    <View key={allocation.accountId} style={styles.allocationItem}>
+                      <View style={styles.allocationIcon}>
+                        <Ionicons name="wallet-outline" size={20} color="rgba(0, 0, 0, 0.6)" />
+                      </View>
+                      <View style={styles.allocationInfo}>
+                        <Text style={styles.allocationName}>{account?.name || 'Account'}</Text>
+                        {allocation.liabilityName && (
+                          <Text style={styles.allocationSubtext}>{allocation.liabilityName}</Text>
+            )}
+          </View>
+                      <Text style={styles.allocationAmount}>
+                        {formatCurrency(Number(allocation.amount ?? 0))}
+                      </Text>
+                    </View>
+                  );
+                })}
+              </View>
+            </GlassCard>
           )}
 
-          {activeTab === 'payments' && (
-            <View style={styles.tabContent}>
-              <View style={styles.sectionCard}>
-                <Text style={styles.sectionTitle}>Payment History</Text>
-                {paymentHistory.map((payment) => (
-                  <View key={payment.id} style={styles.historyItem}>
-                    <View style={styles.historyIcon}>
-                      <Ionicons name="receipt" size={20} color="#10B981" />
-                    </View>
-                    <View style={styles.historyInfo}>
-                      <Text style={styles.historyAmount}>{formatCurrency(payment.amount)}</Text>
-                      <Text style={styles.historyDate}>{formatDate(payment.payment_date)}</Text>
-                      {payment.description && (
-                        <Text style={styles.historyDescription}>{payment.description}</Text>
-                      )}
-                      {payment.is_mock && (
-                        <View style={styles.mockBadgeContainer}>
-                          <Text style={styles.mockBadgeText}>Mock/Historical</Text>
-                        </View>
-                      )}
-                    </View>
+          {/* Bills Section (New Payment System) */}
+          <GlassCard padding={24} marginVertical={12}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Payment Schedule</Text>
+              <TouchableOpacity 
+                style={styles.createBillButton}
+                onPress={() => setShowAddBillModal(true)}
+              >
+                <Ionicons name="add-circle-outline" size={20} color="#10B981" />
+                <Text style={styles.createBillButtonText}>Create Bill</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.sectionSubtitle}>
+              {bills.length > 0 
+                ? `${bills.filter(b => b.status !== 'paid' && b.status !== 'cancelled').length} upcoming bills`
+                : 'No bills yet. Create your first bill to start tracking payments.'
+              }
+            </Text>
+              
+              {/* Interest Summary */}
+              {bills.some(b => b.interest_amount && b.interest_amount > 0) && (
+                <View style={styles.interestSummary}>
+                  <View style={styles.interestItem}>
+                    <Text style={styles.interestLabel}>Total Interest</Text>
+                    <Text style={styles.interestValue}>
+                      {formatCurrency(bills.reduce((sum, b) => sum + (b.interest_amount || 0), 0))}
+                    </Text>
+                    <Text style={styles.interestSubtext}>Over life of loan</Text>
                   </View>
-                ))}
-                {paymentHistory.length === 0 && (
-                  <Text style={styles.noPaymentsText}>No payment history available</Text>
-                )}
-              </View>
-
-              {/* Payment Statistics */}
-              {paymentHistory.length > 0 && (
-                <View style={styles.sectionCard}>
-                  <Text style={styles.sectionTitle}>Payment Statistics</Text>
-                  <View style={styles.statsGrid}>
-                    <View style={styles.statCard}>
-                      <Text style={styles.statLabel}>Total Paid</Text>
-                      <Text style={styles.statValue}>
-                        {formatCurrency(paymentHistory.reduce((sum, p) => sum + p.amount, 0))}
-                      </Text>
-                    </View>
-                    <View style={styles.statCard}>
-                      <Text style={styles.statLabel}>Average</Text>
-                      <Text style={styles.statValue}>
-                        {formatCurrency(
-                          paymentHistory.reduce((sum, p) => sum + p.amount, 0) / paymentHistory.length
-                        )}
-                      </Text>
-                    </View>
-                    <View style={styles.statCard}>
-                      <Text style={styles.statLabel}>Payments</Text>
-                      <Text style={styles.statValue}>{paymentHistory.length}</Text>
-                    </View>
+                  <View style={styles.interestItem}>
+                    <Text style={styles.interestLabel}>Interest Paid</Text>
+                    <Text style={styles.interestValuePaid}>
+                      {formatCurrency(bills.filter(b => b.status === 'paid').reduce((sum, b) => sum + (b.interest_amount || 0), 0))}
+                    </Text>
+                    <Text style={styles.interestSubtext}>So far</Text>
+                  </View>
+                  <View style={styles.interestItem}>
+                    <Text style={styles.interestLabel}>Interest Remaining</Text>
+                    <Text style={styles.interestValue}>
+                      {formatCurrency(bills.filter(b => b.status !== 'paid').reduce((sum, b) => sum + (b.interest_amount || 0), 0))}
+                    </Text>
+                    <Text style={styles.interestSubtext}>To be paid</Text>
                   </View>
                 </View>
               )}
-            </View>
-          )}
 
-          {activeTab === 'allocations' && (
-            <View style={styles.tabContent}>
-              <View style={styles.sectionCard}>
-                <Text style={styles.sectionTitle}>Fund Allocations</Text>
-                {allocations.length > 0 ? (
-                  allocations.map((alloc) => {
-                    const account = accounts.find((a) => a.id === alloc.accountId);
-                    return (
-                      <View key={alloc.accountId} style={styles.allocationItem}>
-                        <View style={styles.allocationInfo}>
-                          <View style={styles.allocationDetails}>
-                            <Text style={styles.allocationAccount}>
-                              {account?.name || 'Unknown Account'}
-                            </Text>
-                            {alloc.liabilityName && (
-                              <Text style={styles.allocationLiability}>{alloc.liabilityName}</Text>
-                            )}
-                          </View>
-                          <Text style={styles.allocationAmount}>{formatCurrency(alloc.amount)}</Text>
-                        </View>
+              {/* Bills List */}
+              <View style={styles.billsList}>
+                {bills.length === 0 ? (
+                  <View style={styles.emptyBills}>
+                    <Ionicons name="receipt-outline" size={48} color="rgba(0, 0, 0, 0.3)" />
+                    <Text style={styles.emptyBillsText}>No bills created yet</Text>
+                    <Text style={styles.emptyBillsSubtext}>Create your first bill to start tracking payments</Text>
+                    <TouchableOpacity 
+                      style={styles.createFirstBillButton}
+                      onPress={() => setShowAddBillModal(true)}
+                    >
+                      <Ionicons name="add-circle" size={20} color="#FFFFFF" />
+                      <Text style={styles.createFirstBillButtonText}>Create First Bill</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <>
+                    {/* Show paid bills count if any */}
+                    {bills.filter((b) => b.status === 'paid').length > 0 && (
+                      <View style={styles.paidBillsSummary}>
+                        <Ionicons name="checkmark-circle" size={16} color="#10B981" />
+                        <Text style={styles.paidBillsText}>
+                          {bills.filter((b) => b.status === 'paid').length} paid
+                        </Text>
                       </View>
+                    )}
+                    
+                    {bills
+                      .sort((a, b) => {
+                        // Sort by due date, then by status (overdue first)
+                        const dateA = new Date(a.due_date).getTime();
+                        const dateB = new Date(b.due_date).getTime();
+                        if (dateA !== dateB) return dateA - dateB;
+                        if (a.status === 'overdue') return -1;
+                        if (b.status === 'overdue') return 1;
+                        if (a.status === 'due_today') return -1;
+                        if (b.status === 'due_today') return 1;
+                        return 0;
+                      })
+                      .filter((bill) => bill.status !== 'paid' && bill.status !== 'cancelled')
+                      .slice(0, 10)
+                      .map((bill) => {
+                        const statusColor = getStatusColor(bill.status);
+                        const statusIcon = getStatusIcon(bill.status);
+                        const isOverdue = bill.status === 'overdue';
+                        const isDueToday = bill.status === 'due_today';
+                        
+                        return (
+                    <TouchableOpacity
+                      key={bill.id}
+                      style={[
+                        styles.billCard,
+                        isOverdue && styles.billCardOverdue,
+                        isDueToday && styles.billCardDueToday,
+                      ]}
+                      onPress={() => handlePayBill(bill)}
+                    >
+                            <View style={styles.billCardLeft}>
+                              <View style={[styles.billStatus, { backgroundColor: statusColor }]}>
+                                <Ionicons 
+                                  name={statusIcon} 
+                                  size={20} 
+                                  color="#FFFFFF" 
+                                />
+                              </View>
+                              <View style={styles.billInfo}>
+                                {bill.payment_number && (
+                                  <Text style={styles.billPaymentNumber}>Payment #{bill.payment_number}</Text>
+                                )}
+                                <Text style={styles.billDate}>
+                                  {formatDate(bill.due_date)}
+                                  {isOverdue && <Text style={styles.overdueText}> • Overdue</Text>}
+                                  {isDueToday && <Text style={styles.dueTodayText}> • Due Today</Text>}
+                                </Text>
+                                {bill.principal_amount && bill.interest_amount && bill.interest_amount > 0 ? (
+                                  <Text style={styles.billBreakdown}>
+                                    {formatCurrency(bill.principal_amount)} principal + {formatCurrency(bill.interest_amount)} interest
+                                  </Text>
+                                ) : bill.principal_amount ? (
+                                  <Text style={styles.billBreakdown}>
+                                    Principal: {formatCurrency(bill.principal_amount)}
+                                  </Text>
+                                ) : (
+                                  bill.description && <Text style={styles.billDescription}>{bill.description}</Text>
+                                )}
+                              </View>
+                            </View>
+                            <View style={styles.billCardRight}>
+                              <Text style={styles.billAmount}>{formatCurrency(bill.amount || 0)}</Text>
+                              <TouchableOpacity 
+                                style={[styles.payButton, isOverdue && styles.payButtonOverdue]} 
+                                onPress={(e) => {
+                                  e.stopPropagation();
+                                  handlePayBill(bill);
+                                }}
+                              >
+                                <Text style={[styles.payButtonText, isOverdue && styles.payButtonTextOverdue]}>Pay</Text>
+                              </TouchableOpacity>
+                            </View>
+                          </TouchableOpacity>
+                        );
+                      })}
+                
+                    {/* Show "All Paid" message if all are paid but bills exist */}
+                    {bills.filter((b) => b.status !== 'paid' && b.status !== 'cancelled').length === 0 && bills.length > 0 && (
+                      <View style={styles.emptyBills}>
+                        <Ionicons name="checkmark-circle-outline" size={48} color="#10B981" />
+                        <Text style={styles.emptyBillsText}>All payments completed! 🎉</Text>
+                        <Text style={styles.emptyBillsSubtext}>All bills have been paid successfully</Text>
+                      </View>
+                    )}
+                  </>
+                )}
+              </View>
+
+              {/* View All Bills Button */}
+              {bills.filter((b) => b.status !== 'paid' && b.status !== 'cancelled').length > 10 && (
+                <TouchableOpacity 
+                  style={styles.viewAllButton} 
+                  onPress={() => {
+                    // Show all bills in an expanded view or modal
+                    const paidCount = bills.filter(b => b.status === 'paid').length;
+                    const upcomingCount = bills.filter(b => b.status !== 'paid' && b.status !== 'cancelled').length;
+                    const overdueCount = bills.filter(b => b.status === 'overdue').length;
+                    
+                    Alert.alert(
+                      'All Bills',
+                      `Total: ${bills.length} bills\n\nPaid: ${paidCount}\nUpcoming: ${upcomingCount}\nOverdue: ${overdueCount}\n\nScroll to see all bills.`,
+                      [{ text: 'OK' }]
                     );
-                  })
-                ) : (
-                  <Text style={styles.noPaymentsText}>No fund allocations recorded</Text>
-                )}
+                  }}
+                >
+                  <Text style={styles.viewAllButtonText}>View All Bills</Text>
+                  <Ionicons name="chevron-forward" size={20} color="#000000" />
+                </TouchableOpacity>
+              )}
+            </GlassCard>
+
+          {/* Recent Activity */}
+          {activityLog.length > 0 && (
+            <GlassCard padding={24} marginVertical={12}>
+              <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Recent Activity</Text>
               </View>
+              <View style={styles.activityList}>
+              {activityLog.slice(0, 4).map((activity) => (
+                  <View key={activity.id} style={styles.activityItem}>
+                    <View style={styles.activityIcon}>
+                      <Ionicons name="document-text-outline" size={20} color="rgba(0, 0, 0, 0.6)" />
+                  </View>
+                    <View style={styles.activityInfo}>
+                      <Text style={styles.activityTitle}>
+                      {activity.activity_type.replace(/_/g, ' ').replace(/\b\w/g, (char: string) => char.toUpperCase())}
+                    </Text>
+                      <Text style={styles.activityDate}>{formatDate(activity.created_at)}</Text>
+                      {activity.notes && (
+                        <Text style={styles.activityNotes}>{activity.notes}</Text>
+                      )}
+                  </View>
+                </View>
+              ))}
             </View>
+            </GlassCard>
           )}
 
-          {activeTab === 'activity' && (
-            <View style={styles.tabContent}>
-              <View style={styles.sectionCard}>
-                <Text style={styles.sectionTitle}>Activity Log</Text>
-                {activityLog.length > 0 ? (
-                  activityLog.map((activity) => (
-                    <View key={activity.id} style={styles.activityItem}>
-                      <View style={styles.activityIcon}>
-                        <Ionicons 
-                          name={
-                            activity.activity_type === 'draw' ? 'download' :
-                            activity.activity_type === 'limit_increase' ? 'trending-up' :
-                            activity.activity_type === 'repayment' ? 'arrow-back' :
-                            'document-text'
-                          } 
-                          size={20} 
-                          color={
-                            activity.activity_type === 'draw' ? '#6366F1' :
-                            activity.activity_type === 'limit_increase' ? '#F59E0B' :
-                            activity.activity_type === 'repayment' ? '#10B981' :
-                            '#6B7280'
-                          } 
-                        />
-                      </View>
-                      <View style={styles.activityInfo}>
-                        <Text style={styles.activityDescription}>
-                          {formatActivityType(activity.activity_type, parseFloat(activity.amount || '0'))}
-                        </Text>
-                        <Text style={styles.activityDate}>
-                          {formatDate(activity.created_at)}
-                        </Text>
-                        {activity.notes && (
-                          <Text style={styles.activityNotes}>{activity.notes}</Text>
-                        )}
-                      </View>
-                    </View>
-                  ))
-                ) : (
-                  <Text style={styles.noPaymentsText}>No activity recorded yet</Text>
-                )}
-              </View>
-            </View>
-          )}
+          <View style={{ height: 100 }} />
         </ScrollView>
-      </SafeAreaView>
 
-      {/* Modals */}
-      <DrawLiabilityFundsModal
-        visible={showDrawFunds}
-        onClose={() => setShowDrawFunds(false)}
-        liability={liability}
-        onSuccess={() => {
-          loadLiabilityData();
-        }}
-      />
-      {liability && (
-        <PayLiabilityModal
-          visible={showPayLiability}
-          onClose={() => setShowPayLiability(false)}
+        {/* Bottom Action Bar */}
+        <View style={styles.bottomBar}>
+          <TouchableOpacity
+            style={styles.actionButton}
+            onPress={() => setShowDrawFunds(true)}
+          >
+            <Ionicons name="download-outline" size={22} color="#000000" />
+            <Text style={styles.actionButtonText}>Draw Funds</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.primaryButton}
+            onPress={() => setShowPayModal(true)}
+          >
+            <Text style={styles.primaryButtonText}>Make Payment</Text>
+          </TouchableOpacity>
+        </View>
+
+        <DrawLiabilityFundsModal
+          visible={showDrawFunds}
+          onClose={() => setShowDrawFunds(false)}
           liabilityId={liability.id}
+          onSuccess={loadLiability}
+        />
+        <PayLiabilityModal
+          visible={showPayModal}
+          onClose={() => setShowPayModal(false)}
+          liabilityId={liability.id}
+          onSuccess={loadLiability}
+        />
+        <LiabilitySettlementModal
+          visible={showSettlementModal}
+          liability={liability}
+          onClose={() => setShowSettlementModal(false)}
+          onComplete={handleSettlementComplete}
+        />
+        <EditLiabilityScheduleModal
+          visible={editingSchedule !== null}
+          onClose={() => setEditingSchedule(null)}
+          schedule={editingSchedule}
+          liabilityId={liability.id}
+          liabilityStartDate={liability.start_date || undefined}
+          liabilityEndDate={liability.targeted_payoff_date || undefined}
           onSuccess={() => {
-            loadLiabilityData();
+            loadLiability();
+            setEditingSchedule(null);
           }}
         />
-      )}
-    </LinearGradient>
+        <EditLiabilityModal
+          visible={showEditModal}
+          onClose={() => setShowEditModal(false)}
+          liability={liability}
+          onSuccess={() => {
+            loadLiability();
+            setShowEditModal(false);
+          }}
+        />
+
+        {/* Pay/Edit Bill Modal (One modal for both) */}
+        <PayBillModal
+          visible={showPayBillModal}
+          bill={selectedBill}
+          onClose={() => {
+            setShowPayBillModal(false);
+            setSelectedBill(null);
+          }}
+          onSuccess={() => {
+            setShowPayBillModal(false);
+            setSelectedBill(null);
+            loadLiability();
+          }}
+        />
+
+        {/* Add Liability Bill Modal */}
+        {liability && (
+          <AddLiabilityBillModal
+            visible={showAddBillModal}
+            liabilityId={liability.id}
+            liabilityName={liability.title}
+            liabilityStartDate={liability.start_date || ''}
+            liabilityEndDate={liability.targeted_payoff_date || undefined}
+            onClose={() => setShowAddBillModal(false)}
+            onSuccess={() => {
+              setShowAddBillModal(false);
+              loadLiability();
+            }}
+          />
+        )}
+      </View>
+    </SafeAreaView>
   );
-}
+};
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
-  scrollView: {
+  container: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
+  scrollContent: {
     paddingHorizontal: 20,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingTop: 20,
-    paddingBottom: 30,
-  },
-  backButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 12,
-  },
-  headerTitle: {
-    fontSize: 20,
-    color: 'white',
-    fontWeight: 'bold',
-  },
-  editButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 12,
+    paddingBottom: 24,
   },
   loadingContainer: {
     flex: 1,
@@ -607,401 +842,617 @@ const styles = StyleSheet.create({
     gap: 16,
   },
   loadingText: {
-    color: 'white',
     fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
   },
-  errorContainer: {
+  emptyContainer: {
     flex: 1,
-    justifyContent: 'center',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 16,
-    padding: 20,
+    paddingHorizontal: 32,
   },
-  errorText: {
-    color: 'white',
-    fontSize: 18,
-    fontWeight: '600',
+  emptyTitle: {
+    fontSize: 24,
+    fontFamily: 'HelveticaNeue-Bold',
+    fontWeight: '700',
+    color: '#000000',
+  },
+  emptyMessage: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    textAlign: 'center',
+    lineHeight: 24,
+  },
+  backButton: {
+    marginTop: 8,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: '#000000',
   },
   backButtonText: {
-    color: '#10B981',
-    fontSize: 16,
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
-    padding: 12,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 12,
+    color: '#FFFFFF',
   },
-  liabilityInfoCard: {
-    backgroundColor: '#000000',
-    borderRadius: 20,
-    padding: 24,
-    marginBottom: 30,
-  },
-  liabilityHeader: {
+  headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 20,
+    justifyContent: 'space-between',
+    paddingTop: 16,
+    paddingBottom: 8,
   },
-  liabilityIcon: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    justifyContent: 'center',
+  headerButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
     alignItems: 'center',
-    marginRight: 16,
+    justifyContent: 'center',
   },
-  liabilityDetails: {
+  pageTitle: {
     flex: 1,
+    fontSize: 32,
+    fontFamily: 'HelveticaNeue-Bold',
+    fontWeight: '700',
+    color: '#000000',
+    textAlign: 'center',
+    marginHorizontal: 12,
+    letterSpacing: -0.5,
   },
-  liabilityName: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: 'white',
-    marginBottom: 4,
-  },
-  liabilityType: {
+  heroLabel: {
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
-  },
-  amountSection: {
-    marginBottom: 20,
-  },
-  amountLabel: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
     marginBottom: 8,
   },
-  amountValue: {
-    fontSize: 36,
-    fontWeight: 'bold',
-    color: 'white',
-    marginBottom: 12,
+  heroAmount: {
+    fontSize: 40,
+    fontFamily: 'HelveticaNeue-Bold',
+    fontWeight: '700',
+    color: '#000000',
+    marginBottom: 16,
+    letterSpacing: -1,
   },
-  statusBadge: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
+  progressSection: {
+    gap: 8,
   },
-  statusText: {
-    fontSize: 12,
-    fontWeight: '600',
+  progressBarContainer: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: 'rgba(0, 0, 0, 0.08)',
+    overflow: 'hidden',
   },
-  dueDateSection: {
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.1)',
-    paddingTop: 16,
-  },
-  dueDateLabel: {
-    fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.7)',
-    marginBottom: 4,
-  },
-  dueDateValue: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginBottom: 12,
-  },
-  targetLabel: {
-    fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.7)',
-    marginBottom: 4,
-  },
-  targetValue: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-  },
-  tabContainer: {
-    flexDirection: 'row',
+  progressBarFill: {
+    height: '100%',
+    borderRadius: 4,
     backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 4,
-    marginBottom: 24,
   },
-  tab: {
-    flex: 1,
+  progressText: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  metricsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    marginBottom: 12,
+  },
+  metricLabel: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    marginBottom: 8,
+  },
+  metricValue: {
+    fontSize: 18,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderRadius: 12,
-    gap: 6,
-  },
-  activeTab: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-  },
-  tabText: {
-    fontSize: 14,
-    color: '#6B7280',
-    fontWeight: '600',
-  },
-  activeTabText: {
-    color: '#10B981',
-  },
-  tabContent: {
-    marginBottom: 24,
-  },
-  sectionCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
+    justifyContent: 'space-between',
     marginBottom: 16,
   },
   sectionTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
-    marginBottom: 16,
+    fontSize: 20,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
   },
-  actionButton: {
+  sectionAction: {
+    fontSize: 14,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  breakdownRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    padding: 16,
-    borderRadius: 12,
-    gap: 8,
-    marginBottom: 12,
+    gap: 16,
   },
-  actionText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  infoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
-  },
-  infoLabel: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
+  breakdownItem: {
     flex: 1,
   },
-  infoValue: {
-    fontSize: 14,
-    color: 'white',
-    fontWeight: '600',
-    flex: 1,
-    textAlign: 'right',
-  },
-  paymentItem: {
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
-  },
-  paymentInfo: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+  breakdownLabel: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
     marginBottom: 4,
   },
-  paymentAmount: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: 'white',
+  breakdownValue: {
+    fontSize: 20,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
   },
-  paymentDate: {
-    fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.7)',
+  breakdownDivider: {
+    width: 1,
+    height: 40,
+    backgroundColor: 'rgba(0, 0, 0, 0.1)',
   },
-  paymentDescription: {
-    fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.6)',
-    marginTop: 4,
+  paymentList: {
+    gap: 16,
   },
-  mockBadge: {
-    fontSize: 10,
-    color: '#F59E0B',
-    backgroundColor: '#F59E0B20',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  noPaymentsText: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.6)',
-    textAlign: 'center',
-    paddingVertical: 20,
-  },
-  historyItem: {
+  paymentItem: {
     flexDirection: 'row',
-    paddingVertical: 16,
+    gap: 12,
+    paddingBottom: 16,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
   },
-  historyIcon: {
+  paymentIcon: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    alignItems: 'center',
     justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
   },
-  historyInfo: {
+  paymentInfo: {
     flex: 1,
+    gap: 4,
   },
-  historyAmount: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
-    marginBottom: 4,
+  paymentAmount: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
   },
-  historyDate: {
+  paymentDate: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  paymentBreakdown: {
     fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.7)',
-    marginBottom: 4,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginTop: 2,
   },
-  historyDescription: {
+  paymentDescription: {
     fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.6)',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginTop: 2,
   },
-  mockBadgeContainer: {
-    alignSelf: 'flex-start',
-    marginTop: 8,
-  },
-  mockBadgeText: {
-    fontSize: 10,
-    color: '#F59E0B',
-    backgroundColor: '#F59E0B20',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 4,
-  },
-  statsGrid: {
-    flexDirection: 'row',
+  allocationList: {
     gap: 12,
-    marginTop: 12,
-  },
-  statCard: {
-    flex: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
-    padding: 16,
-    alignItems: 'center',
-  },
-  statLabel: {
-    fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.7)',
-    marginBottom: 8,
-  },
-  statValue: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
   },
   allocationItem: {
-    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  allocationIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   allocationInfo: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  allocationDetails: {
     flex: 1,
+    gap: 2,
   },
-  allocationAccount: {
-    fontSize: 16,
+  allocationName: {
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
-    color: 'white',
-    marginBottom: 4,
+    color: '#000000',
   },
-  allocationLiability: {
+  allocationSubtext: {
     fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.6)',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
   },
   allocationAmount: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
-  },
-  summarySection: {
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.1)',
-    paddingTop: 16,
-    marginTop: 16,
-  },
-  summaryRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  summaryLabel: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
-  },
-  summaryValue: {
     fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
-    color: 'white',
+    color: '#000000',
   },
-  availableRow: {
-    marginTop: 8,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.1)',
-  },
-  availableBadge: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#10B981',
-  },
-  availableBadgeEmpty: {
-    backgroundColor: 'rgba(107, 114, 128, 0.2)',
-    borderColor: '#6B7280',
-  },
-  availableValue: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#10B981',
-  },
-  availableValueEmpty: {
-    color: '#6B7280',
+  activityList: {
+    gap: 12,
   },
   activityItem: {
     flexDirection: 'row',
-    paddingVertical: 16,
+    gap: 12,
+    paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
   },
   activityIcon: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
     alignItems: 'center',
-    marginRight: 12,
+    justifyContent: 'center',
   },
   activityInfo: {
     flex: 1,
+    gap: 4,
   },
-  activityDescription: {
-    fontSize: 16,
+  activityTitle: {
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
-    color: 'white',
-    marginBottom: 4,
+    color: '#000000',
   },
   activityDate: {
     fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.7)',
-    marginBottom: 4,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
   },
   activityNotes: {
     fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.6)',
-    fontStyle: 'italic',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginTop: 2,
+  },
+  scheduleList: {
+    gap: 12,
+  },
+  scheduleItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.03)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  scheduleInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    gap: 12,
+  },
+  scheduleIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  scheduleDetails: {
+    flex: 1,
+    gap: 4,
+  },
+  scheduleDate: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  scheduleAmount: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  scheduleBreakdown: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+  },
+  emptyText: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    textAlign: 'center',
+    paddingVertical: 24,
+  },
+  // Bills Section Styles
+  interestSummary: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginVertical: 16,
+    paddingVertical: 16,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+  },
+  interestItem: {
+    flex: 1,
+    alignItems: 'center',
+    gap: 4,
+  },
+  interestLabel: {
+    fontSize: 11,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  interestValue: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#EF4444',
+  },
+  interestValuePaid: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#10B981',
+  },
+  interestSubtext: {
+    fontSize: 10,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.4)',
+  },
+  billsList: {
+    gap: 12,
+    marginTop: 16,
+  },
+  billCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 16,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.08)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  billCardOverdue: {
+    borderColor: '#EF4444',
+    borderWidth: 2,
+    backgroundColor: 'rgba(239, 68, 68, 0.05)',
+  },
+  billCardDueToday: {
+    borderColor: '#F59E0B',
+    borderWidth: 1.5,
+    backgroundColor: 'rgba(245, 158, 11, 0.05)',
+  },
+  billCardLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    gap: 12,
+  },
+  billStatus: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  billInfo: {
+    flex: 1,
+    gap: 4,
+  },
+  billDate: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  overdueText: {
+    color: '#EF4444',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+  },
+  dueTodayText: {
+    color: '#F59E0B',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+  },
+  billBreakdown: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  billDescription: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+  },
+  billCardRight: {
+    alignItems: 'flex-end',
+    gap: 8,
+  },
+  billAmount: {
+    fontSize: 18,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  payButton: {
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+    backgroundColor: '#000000',
+    borderRadius: 12,
+  },
+  payButtonOverdue: {
+    backgroundColor: '#EF4444',
+  },
+  payButtonText: {
+    fontSize: 13,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  payButtonTextOverdue: {
+    color: '#FFFFFF',
+  },
+  emptyBills: {
+    alignItems: 'center',
+    paddingVertical: 32,
+    gap: 12,
+  },
+  emptyBillsText: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+  },
+  viewAllButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 16,
+    paddingVertical: 12,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0, 0, 0, 0.1)',
+    gap: 8,
+  },
+  viewAllButtonText: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  bottomBar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 20,
+    paddingBottom: 24,
+    paddingTop: 12,
+    backgroundColor: '#FFFFFF',
+    flexDirection: 'row',
+    gap: 12,
+    alignItems: 'center',
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  actionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  actionButtonText: {
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  primaryButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: '#000000',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  primaryButtonText: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  createBillButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+  },
+  createBillButtonText: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#10B981',
+  },
+  sectionSubtitle: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    marginBottom: 12,
+  },
+  billPaymentNumber: {
+    fontSize: 11,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginBottom: 4,
+  },
+  emptyBillsSubtext: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.4)',
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  createFirstBillButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    backgroundColor: '#10B981',
+    borderRadius: 12,
+  },
+  createFirstBillButtonText: {
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  paidBillsSummary: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    borderRadius: 12,
+    marginBottom: 12,
+  },
+  paidBillsText: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#10B981',
   },
 });
+
+export default LiabilityDetailScreen;

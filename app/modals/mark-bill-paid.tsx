@@ -26,7 +26,7 @@ import FundPicker, { FundBucket } from '../../components/FundPicker';
 export default function MarkBillPaidModal() {
   const { id } = useLocalSearchParams();
   const { user } = useAuth();
-  const { accounts, globalRefresh, refreshAccounts } = useRealtimeData();
+  const { accounts, globalRefresh, refreshAccounts, refreshAccountFunds, refreshTransactions, recalculateAllBalances } = useRealtimeData();
   const { currency } = useSettings();
   const { getAccountBreakdown } = useLiabilities();
   const [bill, setBill] = useState<Bill | null>(null);
@@ -138,12 +138,19 @@ export default function MarkBillPaidModal() {
         throw bucketError;
       }
 
-      console.log('✅ Bill payment RPC success, refreshing accounts...');
-      // Force immediate account refresh
-      await refreshAccounts();
+      console.log('✅ Bill payment RPC success, refreshing data...');
       
-      // Small delay to ensure database has committed and state has updated
-      await new Promise(resolve => setTimeout(resolve, 200));
+      // Wait for database commit - increased delay for reliability
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Refresh all data in parallel for faster updates
+      await Promise.all([
+        refreshAccounts(),
+        refreshAccountFunds(),
+        refreshTransactions(),
+      ]);
+      
+      console.log('✅ Data refreshed after bill payment');
 
       // Create bill payment record
       const { data: payment, error: paymentError } = await supabase
@@ -352,9 +359,10 @@ export default function MarkBillPaidModal() {
                 <View style={styles.selectedFundInfo}>
                   <Ionicons 
                     name={
-                      selectedFundBucket.type === 'personal' ? 'wallet' :
-                      selectedFundBucket.type === 'liability' ? 'card' :
-                      'flag'
+                      selectedFundBucket.type === 'personal' ? 'wallet-outline' :
+                      selectedFundBucket.type === 'borrowed' ? 'card-outline' :
+                      selectedFundBucket.type === 'goal' ? 'flag-outline' :
+                      'layers-outline'
                     } 
                     size={16} 
                     color="#10B981" 

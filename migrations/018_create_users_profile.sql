@@ -50,3 +50,17 @@ CREATE POLICY users_profile_delete_own ON users_profile
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+

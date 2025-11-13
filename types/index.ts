@@ -10,7 +10,21 @@ export interface Account {
   description?: string;
   include_in_totals?: boolean;
   is_active: boolean;
+  organization_id?: string | null;
+  credit_limit?: number | null;
   linked_liability_id?: string; // For liability accounts
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Organization {
+  id: string;
+  user_id: string;
+  name: string;
+  country?: string | null;
+  currency: string;
+  logo_url?: string;
+  theme_color?: string;
   created_at: string;
   updated_at: string;
 }
@@ -29,6 +43,37 @@ export interface Transaction {
   updated_at: string;
   balance_before?: number;
   balance_after?: number;
+  metadata?: any;
+}
+
+export type FundType =
+  | 'personal'
+  | 'goal'
+  | 'borrowed'
+  | 'liability'
+  | 'reserved'
+  | 'sinking';
+
+export interface AccountFund {
+  id: string;
+  account_id: string;
+  fund_type: FundType;
+  /**
+   * Legacy field kept for backwards compatibility while migrating.
+   * Prefer using `fund_type`.
+   */
+  type?: string;
+  name: string;
+  display_name?: string;
+  balance: number;
+  currency?: string | null;
+  spendable: boolean;
+  reference_id?: string | null;
+  linked_goal_id?: string | null;
+  linked_liability_id?: string | null;
+  metadata?: any;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Goal {
@@ -84,7 +129,7 @@ export interface Bill {
   amount?: number;
   currency: string;
   category_id?: string;
-  bill_type: 'one_time' | 'recurring_fixed' | 'recurring_variable' | 'goal_linked';
+  bill_type: 'one_time' | 'recurring_fixed' | 'recurring_variable' | 'goal_linked' | 'liability_linked';
   recurrence_pattern?: 'daily' | 'weekly' | 'monthly' | 'yearly' | 'custom';
   recurrence_interval: number;
   custom_recurrence_config?: any;
@@ -96,11 +141,21 @@ export interface Bill {
   status: 'upcoming' | 'due_today' | 'overdue' | 'paid' | 'skipped' | 'cancelled' | 'postponed';
   goal_id?: string;
   linked_account_id?: string;
+  liability_id?: string;
+  interest_amount?: number;
+  principal_amount?: number;
+  payment_number?: number;
+  interest_included?: boolean;
   color: string;
   icon: string;
   reminder_days: number[];
   notes?: string;
-  metadata: any;
+  metadata?: {
+    source_type?: 'liability' | 'general' | 'subscription' | 'utility';
+    fund_type?: 'personal' | 'liability';
+    interest_included?: boolean;
+    [key: string]: any;
+  };
   is_active: boolean;
   is_deleted: boolean;
   deleted_at?: string;
@@ -120,19 +175,6 @@ export interface BillPayment {
   account_id?: string;
   payment_status: 'completed' | 'partial' | 'failed';
   notes?: string;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface Budget {
-  id: string;
-  user_id: string;
-  category_id?: string;
-  amount: number;
-  period: 'weekly' | 'monthly' | 'yearly';
-  start_date: string;
-  end_date?: string;
-  is_active: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -171,7 +213,8 @@ export interface Budget {
   amount: number;
   currency: string;
   created_by: string;
-  budget_type: 'monthly' | 'category' | 'goal_based' | 'smart';
+  budget_type: 'monthly' | 'category' | 'goal_based' | 'smart' | 'custom';
+  budget_mode?: 'spend_cap' | 'save_target'; // NEW: Determines what we're tracking
   start_date: string;
   end_date: string;
   recurrence_pattern?: 'monthly' | 'weekly' | 'yearly' | 'custom';
@@ -184,9 +227,15 @@ export interface Budget {
   spent_amount: number;
   remaining_amount: number;
   metadata: {
-    goal_subtype?: 'A' | 'B' | 'C';
+    goal_subtype?: 'A' | 'B' | 'C'; // A: Saving Target, B: Under Budget Saving, C: Category-Linked Goal
+    baseline_category_avg?: number; // For subtype C
+    auto_calculate_amount?: boolean; // For subtype A
     ui_settings?: any;
     template?: any;
+    reflection_ready?: boolean; // For end-of-period ritual
+    period_summary?: BudgetPeriodSummary; // Stored insights for completed period
+    renewed_from_budget_id?: string; // Link to previous budget if repeated/extended
+    rollover_amount?: number; // Amount rolled over from previous period
     [key: string]: any;
   };
   alert_settings: {
@@ -232,6 +281,64 @@ export interface BudgetEvent {
     [key: string]: any;
   };
   created_at: string;
+}
+
+/**
+ * Budget Period Summary - Insights generated when a budget period ends
+ */
+export interface BudgetPeriodSummary {
+  budget_id: string;
+  period_start: string;
+  period_end: string;
+  total_amount: number;
+  spent_amount: number;
+  remaining_amount: number;
+  percentage_used: number;
+  category_breakdown: {
+    category_id: string;
+    category_name: string;
+    amount: number;
+    percentage: number;
+  }[];
+  previous_period_comparison?: {
+    previous_budget_id: string;
+    total_change_percentage: number;
+    category_changes: {
+      category_id: string;
+      category_name: string;
+      change_percentage: number;
+    }[];
+  };
+  daily_pace: {
+    average_daily_spend: number;
+    ideal_daily_pace: number;
+    days_ahead_behind: number;
+    on_track: boolean;
+  };
+  achievements: {
+    streak_count: number;
+    improvement_percentage?: number;
+    savings_achieved: number;
+    consistency_score: number;
+  };
+  generated_at: string;
+}
+
+/**
+ * Renewal Decision - User's choice for how to handle period end
+ */
+export interface RenewalDecision {
+  renewal_type: 'continue' | 'repeat' | 'extend';
+  budget_id: string;
+  new_end_date?: string; // For continue
+  reset_spent?: boolean; // For continue
+  new_amount?: number; // For repeat/extend
+  new_start_date?: string; // For repeat/extend
+  new_end_date?: string; // For repeat/extend
+  recurrence_pattern?: 'monthly' | 'weekly' | 'yearly' | 'custom'; // For extend
+  rollover_enabled?: boolean; // For repeat/extend
+  rollover_amount?: number; // For repeat/extend
+  account_ids?: string[]; // For repeat/extend (if user wants to change accounts)
 }
 
 export interface Liability {

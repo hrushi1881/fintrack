@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, StatusBar, RefreshControl } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { formatCurrencyAmount } from '@/utils/currency';
@@ -34,7 +33,7 @@ export default function BudgetsScreen() {
         <Ionicons 
           name={isActive ? "wallet-outline" : "checkmark-circle-outline"} 
           size={64} 
-          color="rgba(255, 255, 255, 0.5)" 
+          color="#D1D5DB" 
         />
         <Text style={styles.emptyTitle}>
           {isActive ? 'No Active Budgets' : 'No Completed Budgets'}
@@ -55,11 +54,8 @@ export default function BudgetsScreen() {
   };
 
   return (
-    <LinearGradient
-      colors={['#99D795', '#99D795', '#99D795']}
-      style={styles.container}
-    >
-      <StatusBar barStyle="light-content" backgroundColor="#99D795" />
+    <View style={styles.container}>
+      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
       <SafeAreaView style={styles.safeArea}>
         <ScrollView 
           style={styles.scrollView}
@@ -67,7 +63,7 @@ export default function BudgetsScreen() {
             <RefreshControl
               refreshing={loading}
               onRefresh={refreshBudgets}
-              tintColor="white"
+              tintColor="#10B981"
             />
           }
         >
@@ -76,7 +72,7 @@ export default function BudgetsScreen() {
             <View style={styles.headerLeft} />
             <Text style={styles.headerTitle}>Budgets</Text>
             <TouchableOpacity style={styles.addButton} onPress={handleAddBudget}>
-              <Ionicons name="add" size={24} color="white" />
+              <Ionicons name="add" size={24} color="#000000" />
             </TouchableOpacity>
           </View>
 
@@ -146,7 +142,7 @@ export default function BudgetsScreen() {
           </View>
 
           {/* Add Budget Button */}
-          {activeTab === 'active' && (
+          {activeTab === 'active' && activeBudgets.length > 0 && (
             <TouchableOpacity style={styles.addBudgetButton} onPress={handleAddBudget}>
               <Ionicons name="add-circle" size={24} color="#10B981" />
               <Text style={styles.addBudgetText}>Add New Budget</Text>
@@ -159,48 +155,52 @@ export default function BudgetsScreen() {
         visible={showAddBudget}
         onClose={() => setShowAddBudget(false)}
       />
-    </LinearGradient>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#FFFFFF', // White background
   },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   scrollView: {
     flex: 1,
     paddingHorizontal: 20,
+    backgroundColor: '#FFFFFF',
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: 20,
-    paddingBottom: 30,
+    paddingTop: 16,
+    paddingBottom: 20,
+    backgroundColor: '#FFFFFF',
   },
   headerLeft: {
     width: 40,
     height: 40,
   },
   headerTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'white',
+    fontSize: 28,
+    fontFamily: 'Archivo Black', // Archivo Black for page headings
+    fontWeight: '900',
+    color: '#000000', // Black text
   },
   addButton: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
     justifyContent: 'center',
     alignItems: 'center',
   },
   tabContainer: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#F3F4F6',
     borderRadius: 12,
     padding: 4,
     marginBottom: 20,
@@ -212,15 +212,18 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   activeTab: {
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    backgroundColor: '#FFFFFF',
   },
   tabText: {
     fontSize: 16,
-    fontWeight: '600',
-    color: 'rgba(255, 255, 255, 0.7)',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#6B7280',
   },
   activeTabText: {
-    color: 'white',
+    color: '#000000', // Black text
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
   },
   budgetsList: {
     marginBottom: 20,
@@ -313,17 +316,16 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    backgroundColor: '#10B981', // Dark green button
     borderRadius: 12,
     padding: 16,
-    borderWidth: 1,
-    borderColor: '#10B981',
-    borderStyle: 'dashed',
+    marginBottom: 20,
   },
   addBudgetText: {
     fontSize: 16,
+    fontFamily: 'Poppins-SemiBold', // Poppins for headings
     fontWeight: '600',
-    color: '#10B981',
+    color: '#FFFFFF', // White text on button
     marginLeft: 8,
   },
   emptyContainer: {
@@ -333,30 +335,32 @@ const styles = StyleSheet.create({
   },
   emptyTitle: {
     fontSize: 20,
-    fontWeight: '600',
-    color: 'white',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for titles
+    fontWeight: '400',
+    color: '#000000', // Black text
     marginTop: 16,
     marginBottom: 8,
     textAlign: 'center',
   },
   emptyDescription: {
     fontSize: 16,
-    color: 'rgba(255, 255, 255, 0.7)',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#6B7280',
     textAlign: 'center',
     lineHeight: 24,
     marginBottom: 24,
   },
   createButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#10B981', // Dark green button
     paddingHorizontal: 24,
     paddingVertical: 12,
     borderRadius: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
   },
   createButtonText: {
     fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#FFFFFF', // White text on button
   },
 });

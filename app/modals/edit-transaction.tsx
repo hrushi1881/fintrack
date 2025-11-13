@@ -229,9 +229,10 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
       if (selectedFundBucket) {
         metadata = {
           ...metadata,
-          bucket_type: selectedFundBucket.type,
+          bucket_type:
+            selectedFundBucket.type === 'borrowed' ? 'liability' : selectedFundBucket.type,
           bucket_id: selectedFundBucket.type !== 'personal' ? selectedFundBucket.id : null,
-          ...(selectedFundBucket.type === 'liability' && { liability_id: selectedFundBucket.id }),
+          ...(selectedFundBucket.type === 'borrowed' && { liability_id: selectedFundBucket.id }),
           ...(selectedFundBucket.type === 'goal' && { goal_id: selectedFundBucket.id }),
         };
       }
@@ -320,7 +321,7 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
   };
 
   const formatCurrency = (amount: number) => {
-    return formatCurrencyAmount(amount, 'INR'); // TODO: Get from user settings
+    return formatCurrencyAmount(amount, currency);
   };
 
   const selectedAccount = accounts.find(acc => acc.id === formData.account_id);
@@ -404,7 +405,7 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
             <View style={styles.inputCard}>
               <Text style={styles.inputLabel}>Amount</Text>
               <View style={styles.amountInput}>
-                <Text style={styles.currencySymbol}>$</Text>
+                <Text style={styles.currencySymbol}>{formatCurrencyAmount(0, currency).charAt(0)}</Text>
                 <TextInput
                   style={[styles.amountTextInput, errors.amount && styles.errorInput]}
                   value={formData.amount}
@@ -433,27 +434,44 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
             {/* Account Selection */}
             <View style={styles.inputCard}>
               <Text style={styles.inputLabel}>Account</Text>
-              <TouchableOpacity
-                style={[styles.selectorButton, errors.account_id && styles.errorInput]}
-                onPress={() => {
-                  // In a real app, you'd show a modal with account selection
-                  Alert.alert('Select Account', 'Account selection will be implemented');
-                }}
-              >
-                <View style={styles.selectorContent}>
-                  {selectedAccount ? (
-                    <>
-                      <View style={[styles.accountIcon, { backgroundColor: selectedAccount.color }]}>
-                        <Ionicons name={selectedAccount.icon as any} size={20} color="white" />
+              <View style={styles.accountList}>
+                {accounts.map((acc) => (
+                  <TouchableOpacity
+                    key={acc.id}
+                    style={[
+                      styles.accountButton,
+                      formData.account_id === acc.id && styles.selectedAccount
+                    ]}
+                    onPress={() => {
+                      setFormData({ ...formData, account_id: acc.id });
+                      setSelectedFundBucket(null); // Reset fund bucket when account changes
+                    }}
+                  >
+                    <View style={styles.accountInfo}>
+                      <View style={[styles.accountIcon, { backgroundColor: acc.color }]}>
+                        <Ionicons name={acc.icon as any} size={20} color="white" />
                       </View>
-                      <Text style={styles.selectorText}>{selectedAccount.name}</Text>
-                    </>
-                  ) : (
-                    <Text style={styles.selectorPlaceholder}>Select an account</Text>
-                  )}
-                </View>
-                <Ionicons name="chevron-down" size={20} color="#6B7280" />
-              </TouchableOpacity>
+                      <View style={styles.accountDetails}>
+                        <Text style={[
+                          styles.accountName,
+                          formData.account_id === acc.id && styles.selectedAccountText
+                        ]}>
+                          {acc.name}
+                        </Text>
+                        <Text style={[
+                          styles.accountBalance,
+                          formData.account_id === acc.id && styles.selectedAccountText
+                        ]}>
+                          {formatCurrency(acc.balance)}
+                        </Text>
+                      </View>
+                    </View>
+                    {formData.account_id === acc.id && (
+                      <Ionicons name="checkmark-circle" size={20} color="#10B981" />
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </View>
               {errors.account_id && <Text style={styles.errorText}>{errors.account_id}</Text>}
             </View>
 
@@ -471,10 +489,12 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
                         <Ionicons
                           name={
                             selectedFundBucket.type === 'personal'
-                              ? 'person'
-                              : selectedFundBucket.type === 'liability'
-                              ? 'card'
-                              : 'flag'
+                              ? 'wallet-outline'
+                              : selectedFundBucket.type === 'borrowed'
+                              ? 'card-outline'
+                              : selectedFundBucket.type === 'goal'
+                              ? 'flag-outline'
+                              : 'layers-outline'
                           }
                           size={20}
                           color={selectedFundBucket.color || '#6366F1'}
@@ -492,7 +512,13 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
                 ) : originalBucketInfo ? (
                   <View style={styles.bucketInfoDisplay}>
                     <Ionicons 
-                      name={originalBucketInfo.type === 'liability' ? 'card' : 'flag'} 
+                      name={
+                        originalBucketInfo.type === 'liability'
+                          ? 'card-outline'
+                          : originalBucketInfo.type === 'goal'
+                          ? 'flag-outline'
+                          : 'wallet-outline'
+                      } 
                       size={20} 
                       color="#6366F1" 
                     />
@@ -518,22 +544,25 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
             {/* Category Selection */}
             <View style={styles.inputCard}>
               <Text style={styles.inputLabel}>Category</Text>
-              <TouchableOpacity
-                style={[styles.selectorButton, errors.category_id && styles.errorInput]}
-                onPress={() => {
-                  // In a real app, you'd show a modal with category selection
-                  Alert.alert('Select Category', 'Category selection will be implemented');
-                }}
-              >
-                <View style={styles.selectorContent}>
-                  {selectedCategory ? (
-                    <Text style={styles.selectorText}>{selectedCategory.name}</Text>
-                  ) : (
-                    <Text style={styles.selectorPlaceholder}>Select a category</Text>
-                  )}
-                </View>
-                <Ionicons name="chevron-down" size={20} color="#6B7280" />
-              </TouchableOpacity>
+              <View style={styles.categoryGrid}>
+                {categories.map((cat) => (
+                  <TouchableOpacity
+                    key={cat.id}
+                    style={[
+                      styles.categoryButton,
+                      formData.category_id === cat.id && styles.selectedCategory
+                    ]}
+                    onPress={() => setFormData({ ...formData, category_id: cat.id })}
+                  >
+                    <Text style={[
+                      styles.categoryText,
+                      formData.category_id === cat.id && styles.selectedCategoryText
+                    ]}>
+                      {cat.name}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
               {errors.category_id && <Text style={styles.errorText}>{errors.category_id}</Text>}
             </View>
 
@@ -699,21 +728,17 @@ const styles = StyleSheet.create({
   amountInput: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    height: 50,
   },
   currencySymbol: {
-    fontSize: 20,
+    fontSize: 32,
     color: 'white',
-    marginRight: 8,
     fontWeight: 'bold',
+    marginRight: 8,
   },
   amountTextInput: {
     flex: 1,
+    fontSize: 32,
     color: 'white',
-    fontSize: 20,
     fontWeight: 'bold',
   },
   typeRow: {
@@ -740,7 +765,10 @@ const styles = StyleSheet.create({
     color: 'white',
     fontWeight: 'bold',
   },
-  selectorButton: {
+  accountList: {
+    gap: 8,
+  },
+  accountButton: {
     backgroundColor: 'rgba(255, 255, 255, 0.1)',
     borderRadius: 12,
     padding: 16,
@@ -748,28 +776,63 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  selectorContent: {
+  selectedAccount: {
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    borderWidth: 1,
+    borderColor: '#10B981',
+  },
+  accountInfo: {
     flexDirection: 'row',
     alignItems: 'center',
     flex: 1,
   },
   accountIcon: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 12,
   },
-  selectorText: {
-    color: 'white',
-    fontSize: 16,
+  accountDetails: {
     flex: 1,
   },
-  selectorPlaceholder: {
-    color: '#6B7280',
+  accountName: {
+    color: 'white',
     fontSize: 16,
-    flex: 1,
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  accountBalance: {
+    color: '#9CA3AF',
+    fontSize: 14,
+  },
+  selectedAccountText: {
+    color: '#10B981',
+  },
+  categoryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  categoryButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    marginBottom: 8,
+  },
+  selectedCategory: {
+    backgroundColor: '#10B981',
+  },
+  categoryText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  selectedCategoryText: {
+    color: 'white',
+    fontWeight: 'bold',
   },
   dateButton: {
     backgroundColor: 'rgba(255, 255, 255, 0.1)',

@@ -1,11 +1,39 @@
-import { Tabs } from 'expo-router';
-import React from 'react';
+import { Tabs, usePathname } from 'expo-router';
+import React, { useEffect } from 'react';
 import { Ionicons } from '@expo/vector-icons';
 
 import { HapticTab } from '@/components/haptic-tab';
 import AuthGuard from '@/components/AuthGuard';
+import { startAnalyticsSession, trackEvent } from '@/utils/analytics';
+import { useAuth } from '@/contexts/AuthContext';
 
 export default function TabLayout() {
+  const { user } = useAuth();
+  const pathname = usePathname();
+
+  useEffect(() => {
+    // Start a session when tabs mount and user is available
+    if (user?.id) {
+      startAnalyticsSession(user.id).then(() => {
+        trackEvent({
+          eventType: 'app_open',
+          context: { route: pathname },
+        });
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (user?.id && pathname) {
+      trackEvent({
+        eventType: 'screen_view',
+        context: { route: pathname, tab: pathname.split('/').pop() },
+        privacyLevel: 'minimal',
+      });
+    }
+  }, [pathname, user?.id]);
+
   return (
     <AuthGuard>
       <Tabs

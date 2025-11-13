@@ -45,9 +45,9 @@ BEGIN
     END;
   END IF;
 
-  -- Get current balance (this is balance_before)
+  -- Get current balance (this is balance_before) - with user_id check
   SELECT balance INTO v_balance FROM accounts WHERE id = p_account_id AND user_id = p_user_id;
-  IF v_balance IS NULL THEN RAISE EXCEPTION 'Account not found'; END IF;
+  IF v_balance IS NULL THEN RAISE EXCEPTION 'Account not found or access denied'; END IF;
   v_balance_before := v_balance;
 
   -- Sum liability portions for account
@@ -97,11 +97,22 @@ BEGIN
     WHERE account_id = p_account_id AND goal_id = v_id AND amount <= 0;
   END IF;
 
-  -- Decrement account balance
-  UPDATE accounts SET balance = balance - p_amount, updated_at = NOW() WHERE id = p_account_id;
+  -- Decrement account balance (with user_id check for security)
+  UPDATE accounts 
+  SET balance = balance - p_amount, 
+      updated_at = NOW() 
+  WHERE id = p_account_id AND user_id = p_user_id;
+  
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Failed to update account balance - account not found or access denied';
+  END IF;
   
   -- Get balance after (should be balance_before - p_amount)
-  SELECT balance INTO v_balance_after FROM accounts WHERE id = p_account_id;
+  SELECT balance INTO v_balance_after FROM accounts WHERE id = p_account_id AND user_id = p_user_id;
+  
+  IF v_balance_after IS NULL THEN
+    RAISE EXCEPTION 'Failed to retrieve updated account balance';
+  END IF;
   
   -- Insert expense transaction with balance snapshots
   INSERT INTO transactions (
@@ -143,7 +154,11 @@ BEGIN
   -- Get account currency and current balance (balance_before)
   SELECT currency, balance INTO v_account_currency, v_balance_before 
   FROM accounts 
-  WHERE id = p_account_id;
+  WHERE id = p_account_id AND user_id = p_user_id;
+  
+  IF v_account_currency IS NULL OR v_balance_before IS NULL THEN
+    RAISE EXCEPTION 'Account not found or access denied';
+  END IF;
   
   -- Find or create category
   SELECT id INTO v_category_id
@@ -159,14 +174,18 @@ BEGIN
     v_category_id := NULL;
   END IF;
 
-  -- Update account balance
+  -- Update account balance (with user_id check for security)
   UPDATE accounts 
   SET balance = balance + p_amount,
       updated_at = NOW()
-  WHERE id = p_account_id;
+  WHERE id = p_account_id AND user_id = p_user_id;
+  
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Failed to update account balance - account not found or access denied';
+  END IF;
   
   -- Get balance after
-  SELECT balance INTO v_balance_after FROM accounts WHERE id = p_account_id;
+  SELECT balance INTO v_balance_after FROM accounts WHERE id = p_account_id AND user_id = p_user_id;
 
   -- If bucket_type is 'goal', add/update account_goal_portions
   IF p_bucket_type = 'goal' AND p_bucket_id IS NOT NULL THEN
@@ -233,19 +252,46 @@ BEGIN
   IF v_balance < p_amount THEN RAISE EXCEPTION 'Insufficient account balance'; END IF;
 
   v_balance_before := v_balance;
+  v_balance_after := v_balance_before - p_amount;
 
-  -- Deduct from account
-  UPDATE accounts SET balance = balance - p_amount, updated_at = NOW() WHERE id = p_account_id;
+  -- Deduct from account using direct SET for accuracy
+  UPDATE accounts 
+  SET balance = v_balance_after, 
+      updated_at = NOW() 
+  WHERE id = p_account_id AND user_id = p_user_id;
   
-  -- Get balance after
-  SELECT balance INTO v_balance_after FROM accounts WHERE id = p_account_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Failed to update account balance - account not found or access denied';
+  END IF;
+  
+  -- Verify balance was updated correctly
+  DECLARE
+    v_verified_balance DECIMAL(14,2);
+  BEGIN
+    SELECT balance INTO v_verified_balance 
+    FROM accounts 
+    WHERE id = p_account_id AND user_id = p_user_id;
+    
+    IF ABS(v_verified_balance - v_balance_after) > 0.01 THEN
+      RAISE EXCEPTION 'Balance update verification failed: expected %, got %', 
+        v_balance_after, v_verified_balance;
+    END IF;
+  END;
 
   -- Reduce liability owed
   UPDATE liabilities SET current_balance = GREATEST(current_balance - p_amount, 0), updated_at = NOW() WHERE id = p_liability_id;
 
-  -- Log
-  INSERT INTO liability_activity_log(liability_id, user_id, activity_type, amount, notes)
-  VALUES (p_liability_id, p_user_id, 'repay', p_amount, p_notes);
+  -- Log (optional - table may not exist, skip if it doesn't)
+  -- Note: We check if table exists before inserting to avoid errors
+  -- The settlement feature doesn't require this table
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables 
+    WHERE table_schema = 'public' 
+    AND table_name = 'liability_activity_log'
+  ) THEN
+    INSERT INTO liability_activity_log(liability_id, user_id, activity_type, amount, notes)
+    VALUES (p_liability_id, p_user_id, 'repay', p_amount, p_notes);
+  END IF;
 
   -- Transaction record with balance snapshots
   INSERT INTO transactions(user_id, account_id, amount, currency, type, description, date, metadata, balance_before, balance_after)
@@ -298,14 +344,31 @@ BEGIN
   
   IF v_balance_before IS NULL THEN RAISE EXCEPTION 'Account not found'; END IF;
 
-  -- Deduct from account balance
+  v_balance_after := v_balance_before - p_amount;
+
+  -- Deduct from account balance using direct SET for accuracy
   UPDATE accounts 
-  SET balance = balance - p_amount,
+  SET balance = v_balance_after,
       updated_at = now()
-  WHERE id = p_account_id;
+  WHERE id = p_account_id AND user_id = p_user_id;
   
-  -- Get balance after
-  SELECT balance INTO v_balance_after FROM accounts WHERE id = p_account_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Failed to update account balance - account not found or access denied';
+  END IF;
+  
+  -- Verify balance was updated correctly
+  DECLARE
+    v_verified_balance DECIMAL(14,2);
+  BEGIN
+    SELECT balance INTO v_verified_balance 
+    FROM accounts 
+    WHERE id = p_account_id AND user_id = p_user_id;
+    
+    IF ABS(v_verified_balance - v_balance_after) > 0.01 THEN
+      RAISE EXCEPTION 'Balance update verification failed: expected %, got %', 
+        v_balance_after, v_verified_balance;
+    END IF;
+  END;
   
   -- Update liability portion
   UPDATE account_liability_portions
@@ -406,20 +469,40 @@ BEGIN
     v_amount := (v_item->>'amount')::DECIMAL;
     IF v_amount <= 0 THEN CONTINUE; END IF;
 
-    -- Get current balance and currency (balance_before)
+    -- Get current balance and currency (balance_before) - with user_id check
     SELECT balance, currency INTO v_balance_before, v_currency
     FROM accounts
-    WHERE id = v_account_id;
+    WHERE id = v_account_id AND user_id = p_user_id;
     
     IF v_balance_before IS NULL THEN
-      RAISE EXCEPTION 'Account not found: %', v_account_id;
+      RAISE EXCEPTION 'Account not found or access denied: %', v_account_id;
     END IF;
 
-    -- Update account balance
-    UPDATE accounts SET balance = balance + v_amount, updated_at = NOW() WHERE id = v_account_id;
+    v_balance_after := v_balance_before + v_amount;
+
+    -- Update account balance using direct SET for accuracy
+    UPDATE accounts 
+    SET balance = v_balance_after, 
+        updated_at = NOW() 
+    WHERE id = v_account_id AND user_id = p_user_id;
     
-    -- Get balance after
-    SELECT balance INTO v_balance_after FROM accounts WHERE id = v_account_id;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Failed to update account balance for account %', v_account_id;
+    END IF;
+    
+    -- Verify balance was updated correctly
+    DECLARE
+      v_verified_balance DECIMAL(14,2);
+    BEGIN
+      SELECT balance INTO v_verified_balance 
+      FROM accounts 
+      WHERE id = v_account_id AND user_id = p_user_id;
+      
+      IF ABS(v_verified_balance - v_balance_after) > 0.01 THEN
+        RAISE EXCEPTION 'Balance update verification failed for account %: expected %, got %', 
+          v_account_id, v_balance_after, v_verified_balance;
+      END IF;
+    END;
 
     -- upsert into account_liability_portions
     INSERT INTO account_liability_portions(account_id, liability_id, amount)
@@ -470,45 +553,79 @@ DECLARE
   v_to_balance_after DECIMAL(14,2);
   v_currency TEXT;
 BEGIN
-  -- Check if from account has sufficient balance and get balance_before
+  -- Check if from account has sufficient balance and get balance_before (with user_id check)
   SELECT balance, currency INTO v_from_balance_before, v_currency
   FROM accounts 
-  WHERE id = p_from_account_id;
+  WHERE id = p_from_account_id AND user_id = p_user_id;
   
   IF v_from_balance_before IS NULL THEN
-    RAISE EXCEPTION 'Source account not found';
+    RAISE EXCEPTION 'Source account not found or access denied';
   END IF;
   
   IF v_from_balance_before < p_amount THEN
     RAISE EXCEPTION 'Insufficient funds in source account';
   END IF;
   
-  -- Get to account balance_before
+  -- Get to account balance_before (with user_id check)
   SELECT balance INTO v_to_balance_before
   FROM accounts
-  WHERE id = p_to_account_id;
+  WHERE id = p_to_account_id AND user_id = p_user_id;
   
   IF v_to_balance_before IS NULL THEN
-    RAISE EXCEPTION 'Destination account not found';
+    RAISE EXCEPTION 'Destination account not found or access denied';
   END IF;
   
-  -- Update from account balance
+  -- Calculate balances after transfer
+  v_from_balance_after := v_from_balance_before - p_amount;
+  v_to_balance_after := v_to_balance_before + p_amount;
+  
+  -- Update from account balance using direct SET for accuracy
   UPDATE accounts 
-  SET balance = balance - p_amount,
+  SET balance = v_from_balance_after,
       updated_at = now()
-  WHERE id = p_from_account_id;
+  WHERE id = p_from_account_id AND user_id = p_user_id;
   
-  -- Get from account balance_after
-  SELECT balance INTO v_from_balance_after FROM accounts WHERE id = p_from_account_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Failed to update source account balance - account not found or access denied';
+  END IF;
   
-  -- Update to account balance
+  -- Verify from account balance
+  DECLARE
+    v_verified_from_balance DECIMAL(14,2);
+  BEGIN
+    SELECT balance INTO v_verified_from_balance 
+    FROM accounts 
+    WHERE id = p_from_account_id AND user_id = p_user_id;
+    
+    IF ABS(v_verified_from_balance - v_from_balance_after) > 0.01 THEN
+      RAISE EXCEPTION 'Source account balance verification failed: expected %, got %', 
+        v_from_balance_after, v_verified_from_balance;
+    END IF;
+  END;
+  
+  -- Update to account balance using direct SET for accuracy
   UPDATE accounts 
-  SET balance = balance + p_amount,
+  SET balance = v_to_balance_after,
       updated_at = now()
-  WHERE id = p_to_account_id;
+  WHERE id = p_to_account_id AND user_id = p_user_id;
   
-  -- Get to account balance_after
-  SELECT balance INTO v_to_balance_after FROM accounts WHERE id = p_to_account_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Failed to update destination account balance - account not found or access denied';
+  END IF;
+  
+  -- Verify to account balance
+  DECLARE
+    v_verified_to_balance DECIMAL(14,2);
+  BEGIN
+    SELECT balance INTO v_verified_to_balance 
+    FROM accounts 
+    WHERE id = p_to_account_id AND user_id = p_user_id;
+    
+    IF ABS(v_verified_to_balance - v_to_balance_after) > 0.01 THEN
+      RAISE EXCEPTION 'Destination account balance verification failed: expected %, got %', 
+        v_to_balance_after, v_verified_to_balance;
+    END IF;
+  END;
   
   -- Create transfer transaction for source account (expense)
   INSERT INTO transactions (

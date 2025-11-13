@@ -1,347 +1,401 @@
-import React, { useState } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, StatusBar } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import React, { useMemo, useState } from 'react';
+import {
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { formatCurrencyAmount } from '@/utils/currency';
-import GoalCard from '@/components/GoalCard';
 import AddGoalModal from '../modals/add-goal';
 
-export default function GoalsScreen() {
-  const { user } = useAuth();
+const GoalsScreen: React.FC = () => {
   const { currency } = useSettings();
   const { goals, loading, refreshGoals } = useRealtimeData();
-  const [activeTab, setActiveTab] = useState('active');
-  const [addGoalModalVisible, setAddGoalModalVisible] = useState(false);
 
-  // Filter goals based on active tab
-  const activeGoals = goals.filter(goal => !goal.is_achieved);
-  const completedGoals = goals.filter(goal => goal.is_achieved);
+  const [activeSegment, setActiveSegment] = useState<'active' | 'completed'>('active');
+  const [showAddGoalModal, setShowAddGoalModal] = useState(false);
 
-  const formatCurrency = (amount: number) => {
-    return formatCurrencyAmount(amount, currency);
-  };
+  const { activeGoals, completedGoals, totalSaved, totalTarget } = useMemo(() => {
+    const active = goals.filter((goal) => !goal.is_achieved);
+    const completed = goals.filter((goal) => goal.is_achieved);
+
+    const totals = goals.reduce(
+      (acc, goal) => {
+        const saved = Number(goal.current_amount ?? 0);
+        const target = Number(goal.target_amount ?? 0);
+        return {
+          saved: acc.saved + saved,
+          target: acc.target + target,
+        };
+      },
+      { saved: 0, target: 0 }
+    );
+
+    return {
+      activeGoals: active,
+      completedGoals: completed,
+      totalSaved: totals.saved,
+      totalTarget: totals.target,
+    };
+  }, [goals]);
+
+  const formatCurrency = (value: number) => formatCurrencyAmount(value, currency);
+
+  const segmentedGoals = activeSegment === 'active' ? activeGoals : completedGoals;
 
   const handleGoalPress = (goalId: string) => {
     router.push(`/goal/${goalId}` as any);
   };
 
-  const handleAddGoalSuccess = () => {
-    refreshGoals();
-  };
-
   return (
-    <LinearGradient
-      colors={['#99D795', '#99D795', '#99D795']}
-      style={styles.container}
-    >
-      <StatusBar barStyle="light-content" backgroundColor="#99D795" />
-      <SafeAreaView style={styles.safeArea}>
-        <ScrollView style={styles.scrollView}>
-          {/* Header */}
-          <View style={styles.header}>
-            <View style={styles.headerLeft} />
-            <Text style={styles.headerTitle}>Financial Goals</Text>
+    <SafeAreaView style={styles.safeArea}>
+      <View style={styles.container}>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scrollContent}
+        >
+          <View style={styles.headerRow}>
+            <Text style={styles.headerTitle}>Goals</Text>
             <TouchableOpacity 
-              style={styles.addButton}
-              onPress={() => setAddGoalModalVisible(true)}
+              style={styles.iconButton}
+              onPress={() => setShowAddGoalModal(true)}
+              accessibilityLabel="Add goal"
             >
-              <Ionicons name="add" size={24} color="white" />
+              <Ionicons name="add" size={22} color="#0E401C" />
             </TouchableOpacity>
           </View>
 
-          {/* Tab Selector */}
-          <View style={styles.tabContainer}>
+          <View style={styles.summaryCard}>
+            <View style={styles.summaryRow}>
+              <View style={styles.summaryColumn}>
+                <Text style={styles.summaryLabel}>Total Saved</Text>
+                <Text style={styles.summaryValue}>{formatCurrency(totalSaved)}</Text>
+              </View>
+              <View style={styles.summaryColumn}>
+                <Text style={styles.summaryLabel}>Goal Target</Text>
+                <Text style={styles.summaryValue}>{formatCurrency(totalTarget)}</Text>
+              </View>
+            </View>
+            <View style={[styles.summaryRow, styles.summaryRowDivider]}>
+              <View style={styles.summaryColumn}>
+                <Text style={styles.summaryLabel}>Active Goals</Text>
+                <Text style={styles.summaryMetric}>{activeGoals.length}</Text>
+              </View>
+              <View style={styles.summaryColumn}>
+                <Text style={styles.summaryLabel}>Completed</Text>
+                <Text style={styles.summaryMetric}>{completedGoals.length}</Text>
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.segmentedControl}>
             <TouchableOpacity
-              style={[
-                styles.tabButton,
-                activeTab === 'active' && styles.activeTab,
-              ]}
-              onPress={() => setActiveTab('active')}
+              style={[styles.segmentButton, activeSegment === 'active' && styles.segmentButtonActive]}
+              onPress={() => setActiveSegment('active')}
             >
-              <Text
-                style={[
-                  styles.tabText,
-                  activeTab === 'active' && styles.activeTabText,
-                ]}
-              >
+              <Text style={[styles.segmentText, activeSegment === 'active' && styles.segmentTextActive]}>
                 Active ({activeGoals.length})
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[
-                styles.tabButton,
-                activeTab === 'completed' && styles.activeTab,
-              ]}
-              onPress={() => setActiveTab('completed')}
+              style={[styles.segmentButton, activeSegment === 'completed' && styles.segmentButtonActive]}
+              onPress={() => setActiveSegment('completed')}
             >
-              <Text
-                style={[
-                  styles.tabText,
-                  activeTab === 'completed' && styles.activeTabText,
-                ]}
-              >
+              <Text style={[styles.segmentText, activeSegment === 'completed' && styles.segmentTextActive]}>
                 Completed ({completedGoals.length})
               </Text>
             </TouchableOpacity>
           </View>
 
-          {/* Goals List */}
-          <View style={styles.goalsList}>
+          <View style={styles.goalsContainer}>
             {loading ? (
-              <View style={styles.loadingContainer}>
-                <Text style={styles.loadingText}>Loading goals...</Text>
+              <View style={styles.emptyState}>
+                <Ionicons name="hourglass-outline" size={32} color="#8BA17B" />
+                <Text style={styles.emptyText}>Loading goals…</Text>
               </View>
-            ) : activeTab === 'active' ? (
-              activeGoals.length > 0 ? (
-                activeGoals.map((goal) => (
-                  <GoalCard
-                    key={goal.id}
-                    goal={goal}
-                    onPress={() => handleGoalPress(goal.id)}
-                  />
-                ))
-              ) : (
-                <View style={styles.emptyContainer}>
-                  <Ionicons name="flag-outline" size={48} color="rgba(255, 255, 255, 0.5)" />
-                  <Text style={styles.emptyTitle}>No Active Goals</Text>
-                  <Text style={styles.emptyDescription}>
-                    Start saving for what matters! Create your first goal.
+            ) : segmentedGoals.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Ionicons name={activeSegment === 'active' ? 'flag-outline' : 'checkmark-done-outline'} size={36} color="#8BA17B" />
+                <Text style={styles.emptyText}>
+                  {activeSegment === 'active'
+                    ? 'No active goals yet. Start by adding one.'
+                    : 'No completed goals yet. Keep saving!'}
                   </Text>
                 </View>
-              )
             ) : (
-              completedGoals.length > 0 ? (
-                completedGoals.map((goal) => (
-                  <GoalCard
+              segmentedGoals.map((goal) => {
+                const saved = Number(goal.current_amount ?? 0);
+                const target = Number(goal.target_amount ?? 0);
+                const percent = target === 0 ? 0 : Math.min(Math.round((saved / target) * 100), 100);
+
+                return (
+                  <TouchableOpacity
                     key={goal.id}
-                    goal={goal}
+                    style={styles.goalCard}
                     onPress={() => handleGoalPress(goal.id)}
-                  />
-                ))
-              ) : (
-                <View style={styles.emptyContainer}>
-                  <Ionicons name="checkmark-circle-outline" size={48} color="rgba(255, 255, 255, 0.5)" />
-                  <Text style={styles.emptyTitle}>No Completed Goals</Text>
-                  <Text style={styles.emptyDescription}>
-                    Keep saving! Your completed goals will appear here.
+                    activeOpacity={0.85}
+                  >
+                    <View style={styles.goalHeader}>
+                      <View style={styles.goalIcon}>
+                        <Ionicons name="airplane-outline" size={20} color="#0E401C" />
+                      </View>
+                      <View style={styles.goalInfo}>
+                        <Text style={styles.goalTitle}>{goal.title || goal.name}</Text>
+                        {goal.target_date && (
+                          <Text style={styles.goalSubtitle}>
+                            Target date {new Date(goal.target_date).toLocaleDateString()}
                   </Text>
+                        )}
+                      </View>
+                      <Text style={styles.goalPercent}>{percent}%</Text>
+                    </View>
+
+                    <View style={styles.progressBar}>
+                      <View style={[styles.progressFill, { width: `${percent}%` }]} />
+                    </View>
+
+                    <View style={styles.goalAmounts}>
+                      <View style={styles.goalAmountColumn}>
+                        <Text style={styles.goalAmountLabel}>Saved</Text>
+                        <Text style={styles.goalAmountValue}>{formatCurrency(saved)}</Text>
+                      </View>
+                      <View style={styles.goalAmountColumn}>
+                        <Text style={styles.goalAmountLabel}>Target</Text>
+                        <Text style={styles.goalAmountValue}>{formatCurrency(target)}</Text>
+                      </View>
                 </View>
-              )
+                  </TouchableOpacity>
+                );
+              })
             )}
           </View>
 
-          {/* Add Goal Button */}
           <TouchableOpacity 
-            style={styles.addGoalButton}
-            onPress={() => setAddGoalModalVisible(true)}
+            style={styles.addGoalCallout}
+            onPress={() => setShowAddGoalModal(true)}
           >
-            <Ionicons name="add-circle" size={24} color="#10B981" />
-            <Text style={styles.addGoalText}>Add New Goal</Text>
+            <Ionicons name="add-circle" size={20} color="#4F6F3E" />
+            <Text style={styles.addGoalCalloutText}>Create Goal</Text>
           </TouchableOpacity>
         </ScrollView>
-      </SafeAreaView>
 
-      {/* Add Goal Modal */}
       <AddGoalModal
-        visible={addGoalModalVisible}
-        onClose={() => setAddGoalModalVisible(false)}
-        onSuccess={handleAddGoalSuccess}
+          visible={showAddGoalModal}
+          onClose={() => setShowAddGoalModal(false)}
+          onSuccess={refreshGoals}
       />
-    </LinearGradient>
+      </View>
+    </SafeAreaView>
   );
-}
+};
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
-  scrollView: {
+  container: {
     flex: 1,
-    paddingHorizontal: 20,
+    backgroundColor: '#FFFFFF',
   },
-  header: {
+  scrollContent: {
+    paddingHorizontal: 20,
+    paddingBottom: 32,
+  },
+  headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: 20,
-    paddingBottom: 30,
-  },
-  headerLeft: {
-    width: 40,
-    height: 40,
+    paddingTop: 16,
+    paddingBottom: 12,
   },
   headerTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'white',
+    fontSize: 26,
+    fontFamily: 'Archivo Black',
+    color: '#0E401C',
   },
-  addButton: {
+  iconButton: {
     width: 40,
     height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  tabContainer: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
     borderRadius: 12,
-    padding: 4,
-    marginBottom: 20,
-  },
-  tabButton: {
-    flex: 1,
-    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: '#D7DECC',
     alignItems: 'center',
-    borderRadius: 8,
+    justifyContent: 'center',
   },
-  activeTab: {
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+  summaryCard: {
+    backgroundColor: '#F7F9F2',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    padding: 20,
+    marginTop: 8,
   },
-  tabText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'rgba(255, 255, 255, 0.7)',
+  summaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
-  activeTabText: {
-    color: 'white',
+  summaryRowDivider: {
+    marginTop: 16,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#E5ECD6',
   },
-  goalsList: {
-    marginBottom: 20,
+  summaryColumn: {
+    flex: 1,
+  },
+  summaryLabel: {
+    fontSize: 12,
+    color: '#637050',
+    fontFamily: 'InstrumentSerif-Regular',
+    marginBottom: 4,
+  },
+  summaryValue: {
+    fontSize: 18,
+    color: '#0E401C',
+    fontFamily: 'Poppins-SemiBold',
+  },
+  summaryMetric: {
+    fontSize: 20,
+    color: '#0E401C',
+    fontFamily: 'Archivo Black',
+  },
+  segmentedControl: {
+    flexDirection: 'row',
+    backgroundColor: '#F2F5EC',
+    borderRadius: 999,
+    padding: 4,
+    marginTop: 24,
+  },
+  segmentButton: {
+    flex: 1,
+    borderRadius: 999,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  segmentButtonActive: {
+    backgroundColor: '#4F6F3E',
+  },
+  segmentText: {
+    fontSize: 13,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#4F6F3E',
+  },
+  segmentTextActive: {
+    color: '#FFFFFF',
+  },
+  goalsContainer: {
+    marginTop: 20,
+    gap: 14,
   },
   goalCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 16,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    padding: 18,
+    shadowColor: '#1A331F',
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
+    elevation: 2,
   },
   goalHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
   },
   goalIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    justifyContent: 'center',
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: '#E7EDDD',
     alignItems: 'center',
-    marginRight: 16,
+    justifyContent: 'center',
+    marginRight: 12,
   },
   goalInfo: {
     flex: 1,
   },
   goalTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
-    marginBottom: 4,
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#1F3A24',
   },
-  goalDeadline: {
-    fontSize: 14,
-    color: '#9CA3AF',
+  goalSubtitle: {
+    marginTop: 2,
+    fontSize: 12,
+    color: '#7C8C6B',
+    fontFamily: 'InstrumentSerif-Regular',
   },
-  goalAmount: {
-    alignItems: 'flex-end',
-  },
-  goalCurrent: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
-  },
-  goalTarget: {
-    fontSize: 14,
-    color: '#9CA3AF',
-  },
-  progressContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 16,
+  goalPercent: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#4F6F3E',
   },
   progressBar: {
-    flex: 1,
-    height: 8,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 4,
-    marginRight: 12,
+    height: 6,
+    borderRadius: 999,
+    backgroundColor: '#EEF3E4',
+    marginTop: 14,
   },
   progressFill: {
     height: '100%',
-    borderRadius: 4,
+    borderRadius: 999,
+    backgroundColor: '#4F6F3E',
   },
-  progressText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: 'white',
-    minWidth: 40,
-    textAlign: 'right',
-  },
-  goalStats: {
+  goalAmounts: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-  },
-  statItem: {
-    alignItems: 'center',
-  },
-  statLabel: {
-    fontSize: 12,
-    color: '#9CA3AF',
-    marginBottom: 4,
-  },
-  statValue: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: 'white',
-  },
-  addGoalButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: '#10B981',
-    borderStyle: 'dashed',
-  },
-  addGoalText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#10B981',
-    marginLeft: 8,
-  },
-  loadingContainer: {
-    alignItems: 'center',
-    paddingVertical: 40,
-  },
-  loadingText: {
-    fontSize: 16,
-    color: 'rgba(255, 255, 255, 0.7)',
-  },
-  emptyContainer: {
-    alignItems: 'center',
-    paddingVertical: 40,
-    paddingHorizontal: 20,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
     marginTop: 16,
-    marginBottom: 8,
   },
-  emptyDescription: {
+  goalAmountColumn: {
+    flex: 1,
+  },
+  goalAmountLabel: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
+  },
+  goalAmountValue: {
+    marginTop: 4,
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
+    fontFamily: 'Poppins-SemiBold',
+    color: '#1F3A24',
+  },
+  emptyState: {
+    alignItems: 'center',
+    paddingVertical: 40,
+    paddingHorizontal: 24,
+    backgroundColor: '#F7F9F2',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+  },
+  emptyText: {
+    marginTop: 14,
+    fontSize: 13,
+    color: '#637050',
     textAlign: 'center',
-    lineHeight: 20,
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  addGoalCallout: {
+    marginTop: 24,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+  },
+  addGoalCalloutText: {
+    fontSize: 14,
+    color: '#4F6F3E',
+    fontFamily: 'Poppins-SemiBold',
   },
 });
+
+export default GoalsScreen;

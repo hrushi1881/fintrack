@@ -14,21 +14,28 @@ import {
   includeTransactionInBudget,
   calculateDailyPace,
   checkBudgetAlerts,
-  closeBudgetPeriod
+  closeBudgetPeriod,
+  getBudgetAccountIds
 } from '@/utils/budgets';
 import { Budget, BudgetTransaction } from '@/types';
+import { EditBudgetModal } from '@/app/modals/edit-budget';
+import { BudgetReflectionModal } from '@/app/modals/budget-reflection';
+import { useAuth } from '@/contexts/AuthContext';
 
 export default function BudgetDetailScreen() {
   const { id } = useLocalSearchParams();
   const [activeTab, setActiveTab] = useState('overview');
   const [showExcludeModal, setShowExcludeModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [showReflectionModal, setShowReflectionModal] = useState(false);
   const [selectedTransaction, setSelectedTransaction] = useState<BudgetTransaction | null>(null);
   const [excludeReason, setExcludeReason] = useState('');
   const [loading, setLoading] = useState(false);
   
-  const { budgets, accounts, transactions, goals, refreshBudgets } = useRealtimeData();
+  const { budgets, accounts, transactions, goals, categories, refreshBudgets } = useRealtimeData();
   const { currency } = useSettings();
   const { showNotification } = useNotification();
+  const { user } = useAuth();
 
   // Find the current budget and linked goal
   const budget = budgets.find(b => b.id === id);
@@ -36,13 +43,35 @@ export default function BudgetDetailScreen() {
     ? goals.find(g => g.id === budget.goal_id)
     : null;
   
+  // Find the linked category if this is a category budget
+  const linkedCategory = budget?.category_id 
+    ? categories.find(c => c.id === budget.category_id)
+    : null;
+  
   const [budgetTransactions, setBudgetTransactions] = useState<BudgetTransaction[]>([]);
   const [dailyPace, setDailyPace] = useState({ ideal: 0, actual: 0, onTrack: true });
   const [alerts, setAlerts] = useState<string[]>([]);
+  const [budgetAccountIds, setBudgetAccountIds] = useState<string[]>([]);
+  const [loadingAccounts, setLoadingAccounts] = useState(false);
 
   useEffect(() => {
     if (budget) {
       loadBudgetData();
+      
+      // Auto-detect if period has ended and show reflection modal
+      const endDate = new Date(budget.end_date);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      endDate.setHours(0, 0, 0, 0);
+      
+      // Check if period has ended and budget is active but not already marked as reflection_ready
+      if (endDate < today && budget.is_active && !budget.metadata?.reflection_ready) {
+        // Auto-show reflection modal after a short delay
+        const timer = setTimeout(() => {
+          setShowReflectionModal(true);
+        }, 500);
+        return () => clearTimeout(timer);
+      }
     }
   }, [budget]);
 
@@ -69,6 +98,9 @@ export default function BudgetDetailScreen() {
       // Check alerts
       const alertResult = await checkBudgetAlerts(budget.id);
       setAlerts(alertResult.alerts);
+
+      // Load budget accounts
+      await loadBudgetAccounts();
       
     } catch (error) {
       console.error('Error loading budget data:', error);
@@ -79,6 +111,20 @@ export default function BudgetDetailScreen() {
       });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadBudgetAccounts = async () => {
+    if (!budget) return;
+    
+    setLoadingAccounts(true);
+    try {
+      const accountIds = await getBudgetAccountIds(budget.id);
+      setBudgetAccountIds(accountIds);
+    } catch (error) {
+      console.error('Error loading budget accounts:', error);
+    } finally {
+      setLoadingAccounts(false);
     }
   };
 
@@ -99,18 +145,94 @@ export default function BudgetDetailScreen() {
     return { status: 'On Track', color: '#10B981' };
   };
 
-  const getBudgetTypeInfo = (budgetType: string) => {
-    switch (budgetType) {
+  // Helper function to add alpha to hex color
+  const addAlphaToHex = (hex: string, alpha: number): string => {
+    // Remove # if present
+    const cleanHex = hex.replace('#', '');
+    // Convert alpha to hex (0-255)
+    const alphaHex = Math.round(alpha * 255).toString(16).padStart(2, '0');
+    return `#${cleanHex}${alphaHex}`;
+  };
+
+  const getBudgetTypeInfo = () => {
+    if (!budget) return { 
+      name: '', 
+      icon: 'wallet-outline', 
+      color: '#6B7280',
+      focus: '',
+      timeFrame: '',
+      trigger: '',
+      output: '',
+      description: ''
+    };
+    
+    switch (budget.budget_type) {
       case 'monthly':
-        return { icon: 'calendar-outline', color: '#3B82F6', label: 'Monthly' };
+        return { 
+          name: 'Monthly Budget', 
+          icon: 'calendar-outline', 
+          color: '#3B82F6',
+          focus: 'General control',
+          timeFrame: 'Month-based',
+          trigger: 'Expenses',
+          output: '% of total spent',
+          description: 'General control over total spending in a fixed month'
+        };
       case 'category':
-        return { icon: 'pricetag-outline', color: '#8B5CF6', label: 'Category' };
+        return { 
+          name: 'Category Budget', 
+          icon: 'pricetag-outline', 
+          color: '#8B5CF6',
+          focus: 'Spending habits',
+          timeFrame: 'Configurable',
+          trigger: 'Category expenses',
+          output: '% of category cap',
+          description: 'Control spending habits for specific categories'
+        };
       case 'goal_based':
-        return { icon: 'flag-outline', color: '#F59E0B', label: 'Goal-Based' };
+        return { 
+          name: 'Goal-Based Budget', 
+          icon: 'flag-outline', 
+          color: '#F59E0B',
+          focus: 'Saving toward target',
+          timeFrame: 'Configurable',
+          trigger: 'Expenses or savings',
+          output: 'Goal progress + budget',
+          description: 'Save toward a target by linking to your goals'
+        };
       case 'smart':
-        return { icon: 'bulb-outline', color: '#10B981', label: 'Smart' };
+        return { 
+          name: 'Smart Budget', 
+          icon: 'bulb-outline', 
+          color: '#10B981',
+          focus: 'Prediction & automation',
+          timeFrame: 'Dynamic',
+          trigger: 'Spending patterns',
+          output: 'AI-generated caps',
+          description: 'Prediction & automation based on spending patterns'
+        };
+      case 'custom':
+        return { 
+          name: 'Custom Budget', 
+          icon: 'settings-outline', 
+          color: '#6B7280',
+          focus: 'Events & projects',
+          timeFrame: 'Manual',
+          trigger: 'Selected period',
+          output: 'Event expense tracking',
+          description: 'Events & projects with manual time periods'
+        };
       default:
-        return { icon: 'wallet-outline', color: '#6B7280', label: 'Budget' };
+        return { 
+          name: 'Budget', 
+          icon: 'wallet-outline', 
+          color: '#6B7280',
+          focus: '',
+          timeFrame: '',
+          trigger: '',
+          output: '',
+          description: ''
+        };
     }
   };
 
@@ -171,43 +293,33 @@ export default function BudgetDetailScreen() {
   };
 
   const handleEndPeriod = async () => {
-    Alert.alert(
-      'End Budget Period',
-      'What should we do with the remaining amount?',
-      [
-        { text: 'Roll Over', onPress: () => endPeriodWithRollover(true) },
-        { text: 'Start Fresh', onPress: () => endPeriodWithRollover(false) },
-        { text: 'Cancel', style: 'cancel' },
-      ]
-    );
+    // Check if period has ended (end_date is in the past)
+    if (budget && new Date(budget.end_date) <= new Date()) {
+      // Show reflection modal
+      setShowReflectionModal(true);
+    } else {
+      // Period hasn't ended yet, show alert
+      Alert.alert(
+        'End Budget Period',
+        'Are you sure you want to end this budget period early?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'End Period', onPress: () => setShowReflectionModal(true) },
+        ]
+      );
+    }
   };
 
-  const endPeriodWithRollover = async (rollover: boolean) => {
-    try {
-      await closeBudgetPeriod(budget!.id, rollover, 'user'); // TODO: Get actual user ID
-      
-      showNotification({
-        type: 'success',
-        title: 'Period Ended',
-        description: rollover ? 'Budget period ended and rolled over' : 'Budget period ended',
-      });
-      
-      await refreshBudgets();
-      router.back();
-    } catch (error) {
-      console.error('Error ending period:', error);
-      showNotification({
-        type: 'error',
-        title: 'Error',
-        description: 'Failed to end budget period',
-      });
-    }
+  const handleReflectionComplete = async () => {
+    await refreshBudgets();
+    // Optionally navigate back or refresh the current view
+    router.back();
   };
 
 
   if (!budget) {
     return (
-      <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
+      <View style={styles.container}>
         <SafeAreaView style={styles.safeArea}>
           <View style={styles.errorContainer}>
             <Text style={styles.errorTitle}>Budget Not Found</Text>
@@ -219,71 +331,87 @@ export default function BudgetDetailScreen() {
             </TouchableOpacity>
           </View>
         </SafeAreaView>
-      </LinearGradient>
+      </View>
     );
   }
 
   const renderOverview = () => {
     const percentage = budget.amount > 0 ? (budget.spent_amount / budget.amount) * 100 : 0;
     const status = getBudgetStatus(percentage);
-    const typeInfo = getBudgetTypeInfo(budget.budget_type);
+    const isSaveTarget = (budget.budget_mode || 'spend_cap') === 'save_target'; // Default to spend_cap if not set
     
     return (
       <View style={styles.tabContent}>
-        {/* Budget Progress Card */}
-        <View style={styles.progressCard}>
-          <View style={styles.progressHeader}>
-            <View style={[styles.budgetIcon, { backgroundColor: typeInfo.color }]}>
-              <Ionicons name={typeInfo.icon as any} size={32} color="white" />
-            </View>
-            <View style={styles.budgetInfo}>
-              <Text style={styles.budgetTitle}>{budget.name}</Text>
-              <Text style={styles.budgetPeriod}>
-                {budget.start_date ? new Date(budget.start_date).toLocaleDateString() : 'N/A'} - {budget.end_date ? new Date(budget.end_date).toLocaleDateString() : 'N/A'}
-              </Text>
-              <View style={styles.budgetTypeBadge}>
-                <Text style={styles.budgetTypeText}>{typeInfo.label}</Text>
-              </View>
-            </View>
-            <View style={styles.budgetStatus}>
-              <Text style={[styles.statusText, { color: status.color }]}>
-                {status.status}
-              </Text>
-            </View>
+        {/* Budget Summary Cards */}
+        <View style={styles.summaryCards}>
+          <View style={styles.summaryCard}>
+            <Text style={styles.summaryLabel}>Budgeted</Text>
+            <Text style={styles.summaryAmount}>{formatCurrency(budget.amount)}</Text>
           </View>
-
-          <View style={styles.progressContainer}>
-            <View style={styles.progressBar}>
-              <View
-                style={[
-                  styles.progressFill,
-                  {
-                    width: `${Math.min(percentage, 100)}%`,
-                    backgroundColor: status.color,
-                  },
-                ]}
-              />
-            </View>
-            <Text style={styles.progressText}>{Math.round(percentage)}%</Text>
+          <View style={[styles.summaryCard, styles.spentCard]}>
+            <Text style={styles.summaryLabel}>{isSaveTarget ? 'Contributed' : 'Amount Spent'}</Text>
+            <Text style={styles.summaryAmount}>{formatCurrency(budget.spent_amount)}</Text>
           </View>
+          <View style={[styles.summaryCard, styles.remainingCard]}>
+            <Text style={styles.summaryLabel}>Remaining</Text>
+            <Text style={styles.summaryAmount}>{formatCurrency(budget.remaining_amount)}</Text>
+          </View>
+        </View>
 
-          <View style={styles.budgetStats}>
-            <View style={styles.statItem}>
-              <Text style={styles.statLabel}>Budget</Text>
-              <Text style={styles.statValue}>{formatCurrency(budget.amount)}</Text>
+        {/* Progress Bar */}
+        <View style={styles.progressSection}>
+          <View style={styles.progressBarContainer}>
+            <View
+              style={[
+                styles.progressBarFill,
+                {
+                  width: `${Math.min(percentage, 100)}%`,
+                  backgroundColor: percentage >= 100 ? '#EF4444' : percentage >= 80 ? '#F59E0B' : '#10B981',
+                },
+              ]}
+            />
+          </View>
+          <View style={styles.progressTextContainer}>
+            <Text style={styles.progressPercentage}>{Math.round(percentage)}% {isSaveTarget ? 'contributed' : 'spent'}</Text>
+            <Text style={styles.progressRemaining}>{formatCurrency(Math.abs(budget.remaining_amount))} {budget.remaining_amount < 0 ? 'over' : 'left'}</Text>
+          </View>
+        </View>
+
+        {/* Budget Type Info Card */}
+        <View style={styles.budgetTypeInfoCard}>
+          <Text style={styles.budgetTypeInfoTitle}>Budget Type Information</Text>
+          <Text style={styles.budgetTypeInfoDescription}>
+            {getBudgetTypeInfo().description}
+          </Text>
+          <View style={styles.budgetTypeInfoDetails}>
+            <View style={styles.budgetTypeInfoRow}>
+              <Text style={styles.budgetTypeInfoLabel}>Focus:</Text>
+              <Text style={styles.budgetTypeInfoValue}>{getBudgetTypeInfo().focus}</Text>
             </View>
-            <View style={styles.statItem}>
-              <Text style={styles.statLabel}>Spent</Text>
-              <Text style={styles.statValue}>{formatCurrency(budget.spent_amount)}</Text>
+            <View style={styles.budgetTypeInfoRow}>
+              <Text style={styles.budgetTypeInfoLabel}>Time Frame:</Text>
+              <Text style={styles.budgetTypeInfoValue}>{getBudgetTypeInfo().timeFrame}</Text>
             </View>
-            <View style={styles.statItem}>
-              <Text style={styles.statLabel}>Remaining</Text>
-              <Text style={[styles.statValue, { color: budget.remaining_amount < 0 ? '#EF4444' : '#10B981' }]}>
-                {formatCurrency(budget.remaining_amount)}
-              </Text>
+            <View style={styles.budgetTypeInfoRow}>
+              <Text style={styles.budgetTypeInfoLabel}>Trigger:</Text>
+              <Text style={styles.budgetTypeInfoValue}>{getBudgetTypeInfo().trigger}</Text>
+            </View>
+            <View style={[styles.budgetTypeInfoRow, styles.budgetTypeInfoRowLast]}>
+              <Text style={styles.budgetTypeInfoLabel}>Output:</Text>
+              <Text style={styles.budgetTypeInfoValue}>{getBudgetTypeInfo().output}</Text>
             </View>
           </View>
         </View>
+
+        {/* Pace Guidance */}
+        {dailyPace.ideal > 0 && (
+          <View style={styles.paceCard}>
+            <Text style={styles.paceTitle}>Pace Guidance</Text>
+            <Text style={styles.paceText}>
+              You're spending {formatCurrency(dailyPace.actual)}/day - you need {formatCurrency(dailyPace.ideal)}/day to stay on track.
+            </Text>
+          </View>
+        )}
 
         {/* Linked Goal Info for Goal-Based Budgets */}
         {linkedGoal && budget.budget_type === 'goal_based' && (
@@ -328,35 +456,19 @@ export default function BudgetDetailScreen() {
           <View style={styles.alertBanner}>
             <Ionicons name="warning" size={20} color="#F59E0B" />
             <Text style={styles.alertText}>{alerts[0]}</Text>
+            <Text style={styles.alertTime}>3d ago</Text>
           </View>
         )}
 
-        {/* Daily Pace Indicator */}
-        <View style={styles.paceCard}>
-          <Text style={styles.sectionTitle}>Daily Pace</Text>
-          <View style={styles.paceContent}>
-            <View style={styles.paceItem}>
-              <Text style={styles.paceLabel}>Ideal Daily</Text>
-              <Text style={styles.paceValue}>{formatCurrency(dailyPace.ideal)}</Text>
-            </View>
-            <View style={styles.paceItem}>
-              <Text style={styles.paceLabel}>Actual Daily</Text>
-              <Text style={styles.paceValue}>{formatCurrency(dailyPace.actual)}</Text>
-            </View>
-            <View style={styles.paceItem}>
-              <Text style={styles.paceLabel}>Status</Text>
-              <Text style={[styles.paceValue, { color: dailyPace.onTrack ? '#10B981' : '#EF4444' }]}>
-                {dailyPace.onTrack ? 'On Track' : 'Too Fast'}
-              </Text>
-            </View>
-          </View>
-        </View>
-
         {/* Action Buttons */}
         <View style={styles.actionButtons}>
-          <TouchableOpacity style={styles.actionButton} onPress={handleEndPeriod}>
-            <Ionicons name="stop-circle-outline" size={20} color="#F59E0B" />
-            <Text style={styles.actionButtonText}>End Period</Text>
+          <TouchableOpacity style={styles.actionButton}>
+            <Ionicons name="create-outline" size={20} color="#FFFFFF" />
+            <Text style={styles.actionButtonText}>Adjust Budget</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.actionButton}>
+            <Ionicons name="add-circle-outline" size={20} color="#FFFFFF" />
+            <Text style={styles.actionButtonText}>Add Transaction</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -393,15 +505,15 @@ export default function BudgetDetailScreen() {
                       <Text style={styles.transactionAmount}>
                         -{formatCurrency(transaction.amount)}
                       </Text>
-                      <TouchableOpacity
-                        style={styles.excludeButton}
-                        onPress={() => {
-                          setSelectedTransaction(budgetTransaction);
-                          setShowExcludeModal(true);
-                        }}
-                      >
-                        <Ionicons name="eye-off" size={16} color="#6B7280" />
-                      </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.excludeButton}
+                    onPress={() => {
+                      setSelectedTransaction(budgetTransaction);
+                      setShowExcludeModal(true);
+                    }}
+                  >
+                    <Ionicons name="eye-off-outline" size={18} color="#6B7280" />
+                  </TouchableOpacity>
                     </View>
                   </View>
                 </View>
@@ -409,7 +521,7 @@ export default function BudgetDetailScreen() {
             })
           ) : (
             <View style={styles.emptyContainer}>
-              <Ionicons name="receipt-outline" size={64} color="rgba(255, 255, 255, 0.5)" />
+              <Ionicons name="receipt-outline" size={64} color="#D1D5DB" />
               <Text style={styles.emptyTitle}>No Transactions</Text>
               <Text style={styles.emptyDescription}>
                 Transactions will appear here when they're added to this budget
@@ -429,7 +541,7 @@ export default function BudgetDetailScreen() {
                 <View key={budgetTransaction.id} style={[styles.transactionCard, styles.excludedCard]}>
                   <View style={styles.transactionHeader}>
                     <View style={styles.transactionIcon}>
-                      <Ionicons name="eye-off" size={20} color="#6B7280" />
+                      <Ionicons name="eye-off-outline" size={20} color="#6B7280" />
                     </View>
                     <View style={styles.transactionInfo}>
                       <Text style={[styles.transactionDescription, styles.excludedText]}>
@@ -448,12 +560,12 @@ export default function BudgetDetailScreen() {
                       <Text style={[styles.transactionAmount, styles.excludedText]}>
                         -{formatCurrency(transaction.amount)}
                       </Text>
-                      <TouchableOpacity
-                        style={styles.includeButton}
-                        onPress={() => handleIncludeTransaction(budgetTransaction)}
-                      >
-                        <Ionicons name="eye" size={16} color="#10B981" />
-                      </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.includeButton}
+                    onPress={() => handleIncludeTransaction(budgetTransaction)}
+                  >
+                    <Ionicons name="eye-outline" size={18} color="#10B981" />
+                  </TouchableOpacity>
                     </View>
                   </View>
                 </View>
@@ -466,15 +578,95 @@ export default function BudgetDetailScreen() {
   };
 
   const renderAccounts = () => {
-    // For now, show a placeholder since budget_accounts is not implemented yet
+    if (!budget) return null;
+
+    const budgetAccounts = accounts.filter(account => 
+      budgetAccountIds.includes(account.id) &&
+      account.currency === budget.currency
+    );
+
     return (
       <View style={styles.tabContent}>
-        <View style={styles.emptyContainer}>
-          <Ionicons name="card-outline" size={64} color="rgba(255, 255, 255, 0.5)" />
-          <Text style={styles.emptyTitle}>No Accounts</Text>
-          <Text style={styles.emptyDescription}>
-            Account linking will be implemented soon
+        <View style={styles.accountsSection}>
+          <Text style={styles.sectionDescription}>
+            These accounts are being tracked for this budget. Only transactions from these accounts will count toward your budget.
           </Text>
+          
+          {loadingAccounts ? (
+            <View style={styles.emptyContainer}>
+              <Text style={styles.emptyDescription}>Loading accounts...</Text>
+            </View>
+          ) : budgetAccounts.length === 0 ? (
+            <View style={styles.emptyContainer}>
+              <Ionicons name="wallet-outline" size={64} color="#D1D5DB" />
+              <Text style={styles.emptyTitle}>No Accounts Linked</Text>
+              <Text style={styles.emptyDescription}>
+                No accounts are currently linked to this budget. Edit the budget to add accounts.
+              </Text>
+              <TouchableOpacity
+                style={styles.addAccountButton}
+                onPress={() => setShowEditModal(true)}
+              >
+                <Ionicons name="add-circle-outline" size={20} color="#10B981" />
+                <Text style={styles.addAccountButtonText}>Add Accounts</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={styles.accountsList}>
+              {budgetAccounts.map((account) => (
+                <View key={account.id} style={styles.accountCard}>
+                  <TouchableOpacity
+                    onPress={() => router.push(`/account/${account.id}`)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.accountCardHeader}>
+                      <View style={[styles.accountCardIcon, { backgroundColor: account.color }]}>
+                        <Ionicons name={account.icon as any} size={24} color="white" />
+                      </View>
+                      <View style={styles.accountCardInfo}>
+                        <Text style={styles.accountCardName}>{account.name}</Text>
+                        <Text style={styles.accountCardType}>
+                          {account.type === 'bank' ? 'Bank Account' :
+                           account.type === 'card' ? 'Card' :
+                           account.type === 'wallet' ? 'Wallet' :
+                           account.type === 'cash' ? 'Cash' : account.type}
+                        </Text>
+                      </View>
+                      <View style={styles.accountCardBalance}>
+                        <Text style={styles.accountCardBalanceText}>
+                          {formatCurrencyAmount(account.balance, account.currency)}
+                        </Text>
+                        <Text style={styles.accountCardBalanceLabel}>Balance</Text>
+                      </View>
+                    </View>
+                  </TouchableOpacity>
+                  <View style={styles.accountCardActions}>
+                    <TouchableOpacity
+                      style={styles.accountCardActionButton}
+                      onPress={() => router.push(`/account/${account.id}`)}
+                    >
+                      <Ionicons name="eye-outline" size={18} color="#3B82F6" />
+                      <Text style={styles.accountCardActionButtonText}>View</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.accountCardActionButton, styles.accountCardActionButtonSecondary]}
+                      onPress={() => setShowEditModal(true)}
+                    >
+                      <Ionicons name="settings-outline" size={18} color="#10B981" />
+                      <Text style={[styles.accountCardActionButtonText, styles.accountCardActionButtonTextSecondary]}>Manage</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))}
+              <TouchableOpacity
+                style={styles.editAccountsButton}
+                onPress={() => setShowEditModal(true)}
+              >
+                <Ionicons name="create-outline" size={20} color="#10B981" />
+                <Text style={styles.editAccountsButtonText}>Edit Accounts</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
       </View>
     );
@@ -482,20 +674,48 @@ export default function BudgetDetailScreen() {
 
 
   return (
-    <LinearGradient
-      colors={['#99D795', '#99D795', '#99D795']}
-      style={styles.container}
-    >
+    <View style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <ScrollView style={styles.scrollView}>
           {/* Header */}
           <View style={styles.header}>
             <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-              <Ionicons name="arrow-back" size={24} color="white" />
+              <Ionicons name="arrow-back" size={24} color="#000000" />
             </TouchableOpacity>
-            <Text style={styles.headerTitle}>Budget Details</Text>
-            <TouchableOpacity style={styles.editButton}>
-              <Ionicons name="create" size={24} color="white" />
+            <View style={styles.headerContent}>
+              <Text style={styles.headerTitle}>{budget.name}</Text>
+              <View style={styles.badgeContainer}>
+                {budget && (
+                  <View style={styles.budgetTypeBadge}>
+                    <Ionicons 
+                      name={getBudgetTypeInfo().icon as any} 
+                      size={14} 
+                      color={getBudgetTypeInfo().color} 
+                    />
+                    <Text style={styles.budgetTypeText}>
+                      {getBudgetTypeInfo().name}
+                    </Text>
+                  </View>
+                )}
+                {linkedCategory && (
+                  <View style={[styles.categoryBadge, { backgroundColor: addAlphaToHex(linkedCategory.color, 0.1) }]}>
+                    <Ionicons 
+                      name={linkedCategory.icon as any} 
+                      size={14} 
+                      color={linkedCategory.color} 
+                    />
+                    <Text style={[styles.categoryText, { color: linkedCategory.color }]}>
+                      {linkedCategory.name}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            </View>
+            <TouchableOpacity 
+              style={styles.editButton}
+              onPress={() => setShowEditModal(true)}
+            >
+              <Ionicons name="create-outline" size={24} color="#000000" />
             </TouchableOpacity>
           </View>
 
@@ -511,7 +731,7 @@ export default function BudgetDetailScreen() {
               <Ionicons 
                 name={activeTab === 'overview' ? 'home' : 'home-outline'} 
                 size={18} 
-                color={activeTab === 'overview' ? '#F59E0B' : 'rgba(255, 255, 255, 0.7)'} 
+                color={activeTab === 'overview' ? '#10B981' : '#6B7280'} 
               />
               <Text
                 style={[
@@ -532,7 +752,7 @@ export default function BudgetDetailScreen() {
               <Ionicons 
                 name={activeTab === 'transactions' ? 'list' : 'list-outline'} 
                 size={18} 
-                color={activeTab === 'transactions' ? '#F59E0B' : 'rgba(255, 255, 255, 0.7)'} 
+                color={activeTab === 'transactions' ? '#10B981' : '#6B7280'} 
               />
               <Text
                 style={[
@@ -553,7 +773,7 @@ export default function BudgetDetailScreen() {
               <Ionicons 
                 name={activeTab === 'accounts' ? 'card' : 'card-outline'} 
                 size={18} 
-                color={activeTab === 'accounts' ? '#F59E0B' : 'rgba(255, 255, 255, 0.7)'} 
+                color={activeTab === 'accounts' ? '#10B981' : '#6B7280'} 
               />
               <Text
                 style={[
@@ -585,7 +805,7 @@ export default function BudgetDetailScreen() {
                 <TouchableOpacity
                   onPress={() => setShowExcludeModal(false)}
                 >
-                  <Ionicons name="close" size={24} color="white" />
+                  <Ionicons name="close" size={24} color="#000000" />
                 </TouchableOpacity>
               </View>
               <View style={styles.modalBody}>
@@ -609,7 +829,7 @@ export default function BudgetDetailScreen() {
                     <Text style={styles.cancelButtonText}>Cancel</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={styles.excludeButton}
+                    style={[styles.excludeButton, { backgroundColor: '#10B981' }]}
                     onPress={handleExcludeTransaction}
                   >
                     <Text style={styles.excludeButtonText}>Exclude</Text>
@@ -619,53 +839,125 @@ export default function BudgetDetailScreen() {
             </View>
           </View>
         </Modal>
+
+        {/* Edit Budget Modal */}
+        <EditBudgetModal
+          visible={showEditModal}
+          budget={budget}
+          onClose={() => setShowEditModal(false)}
+          onUpdate={async () => {
+            await refreshBudgets();
+            await loadBudgetData();
+          }}
+          onDelete={async () => {
+            await refreshBudgets();
+            router.back();
+          }}
+        />
+
+        {/* Budget Reflection Modal */}
+        {budget && (
+          <BudgetReflectionModal
+            visible={showReflectionModal}
+            budget={budget}
+            onClose={() => setShowReflectionModal(false)}
+            onRenewalComplete={handleReflectionComplete}
+          />
+        )}
       </SafeAreaView>
-    </LinearGradient>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#FFFFFF', // White background
   },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   scrollView: {
     flex: 1,
     paddingHorizontal: 20,
+    backgroundColor: '#FFFFFF',
   },
   header: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     justifyContent: 'space-between',
-    paddingTop: 20,
-    paddingBottom: 30,
+    paddingTop: 16,
+    paddingBottom: 20,
+    backgroundColor: '#FFFFFF',
   },
   backButton: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
     justifyContent: 'center',
     alignItems: 'center',
+    marginTop: 4,
+  },
+  headerContent: {
+    flex: 1,
+    alignItems: 'center',
+    marginHorizontal: 8,
   },
   headerTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'white',
+    fontSize: 24,
+    fontFamily: 'Archivo Black', // Archivo Black for page headings
+    fontWeight: '900',
+    color: '#000000', // Black text
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  badgeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+  },
+  budgetTypeBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F3F4F6',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    gap: 6,
+  },
+  budgetTypeText: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#000000', // Black text
+  },
+  categoryBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    gap: 6,
+  },
+  categoryText: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
   },
   editButton: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
     justifyContent: 'center',
     alignItems: 'center',
+    marginTop: 4,
   },
   tabContainer: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#F3F4F6',
     borderRadius: 12,
     padding: 4,
     marginBottom: 20,
@@ -673,105 +965,165 @@ const styles = StyleSheet.create({
   tabButton: {
     flex: 1,
     flexDirection: 'row',
-    paddingVertical: 8,
-    paddingHorizontal: 4,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: 8,
   },
   activeTab: {
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    backgroundColor: '#FFFFFF',
   },
   tabText: {
-    fontSize: 10,
-    fontWeight: '600',
-    color: 'rgba(255, 255, 255, 0.7)',
-    marginLeft: 4,
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#6B7280',
+    marginLeft: 6,
   },
   activeTabText: {
-    color: 'white',
+    color: '#000000',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
   },
   tabContent: {
     marginBottom: 20,
   },
-  progressCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 20,
-  },
-  progressHeader: {
+  summaryCards: {
     flexDirection: 'row',
-    alignItems: 'center',
+    gap: 12,
     marginBottom: 20,
   },
-  budgetIcon: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  budgetInfo: {
+  summaryCard: {
     flex: 1,
-  },
-  budgetTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'white',
-    marginBottom: 4,
-  },
-  budgetPeriod: {
-    fontSize: 14,
-    color: '#9CA3AF',
-  },
-  budgetStatus: {
-    alignItems: 'flex-end',
-  },
-  statusText: {
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  progressContainer: {
-    flexDirection: 'row',
+    backgroundColor: '#F3F4F6',
+    borderRadius: 12,
+    padding: 16,
     alignItems: 'center',
+  },
+  spentCard: {
+    backgroundColor: '#FEF3C7', // Light orange/amber background
+  },
+  remainingCard: {
+    backgroundColor: '#D1FAE5', // Light green background
+  },
+  summaryLabel: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for titles/text
+    fontWeight: '400',
+    color: '#6B7280',
+    marginBottom: 8,
+  },
+  summaryAmount: {
+    fontSize: 18,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#000000', // Black text
+  },
+  progressSection: {
     marginBottom: 20,
   },
-  progressBar: {
-    flex: 1,
+  progressBarContainer: {
     height: 12,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#E5E7EB',
     borderRadius: 6,
-    marginRight: 12,
+    overflow: 'hidden',
+    marginBottom: 8,
   },
-  progressFill: {
+  progressBarFill: {
     height: '100%',
     borderRadius: 6,
   },
-  progressText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    minWidth: 50,
-    textAlign: 'right',
-  },
-  budgetStats: {
+  progressTextContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-  },
-  statItem: {
     alignItems: 'center',
   },
-  statLabel: {
-    fontSize: 12,
-    color: '#9CA3AF',
-    marginBottom: 4,
+  progressPercentage: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#000000', // Black text
   },
-  statValue: {
+  progressRemaining: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#6B7280',
+  },
+  budgetTypeInfoCard: {
+    backgroundColor: '#F9FAFB',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  budgetTypeInfoTitle: {
     fontSize: 16,
+    fontFamily: 'Poppins-SemiBold', // Poppins for section headings
     fontWeight: '600',
-    color: 'white',
+    color: '#000000', // Black text
+    marginBottom: 8,
+  },
+  budgetTypeInfoDescription: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#6B7280',
+    marginBottom: 12,
+    lineHeight: 20,
+  },
+  budgetTypeInfoDetails: {
+    marginTop: 8,
+  },
+  budgetTypeInfoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5E7EB',
+  },
+  budgetTypeInfoRowLast: {
+    borderBottomWidth: 0,
+    marginBottom: 0,
+    paddingBottom: 0,
+  },
+  budgetTypeInfoLabel: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#6B7280',
+    flex: 1,
+  },
+  budgetTypeInfoValue: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#000000', // Black text
+    flex: 1,
+    textAlign: 'right',
+  },
+  paceCard: {
+    backgroundColor: '#F9FAFB',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 20,
+  },
+  paceTitle: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold', // Poppins for section headings
+    fontWeight: '600',
+    color: '#000000', // Black text
+    marginBottom: 8,
+  },
+  paceText: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#000000', // Black text
+    lineHeight: 20,
   },
   insightsCard: {
     backgroundColor: '#000000',
@@ -781,8 +1133,9 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
+    fontFamily: 'Poppins-SemiBold', // Poppins for section headings
+    fontWeight: '600',
+    color: '#000000', // Black text
     marginBottom: 16,
   },
   insightItem: {
@@ -833,10 +1186,12 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   transactionCard: {
-    backgroundColor: '#000000',
+    backgroundColor: '#FFFFFF',
     borderRadius: 12,
     padding: 16,
     marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
   },
   transactionHeader: {
     flexDirection: 'row',
@@ -846,7 +1201,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+    backgroundColor: '#F3F4F6',
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: 12,
@@ -856,17 +1211,21 @@ const styles = StyleSheet.create({
   },
   transactionDescription: {
     fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginBottom: 2,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for titles/text
+    fontWeight: '400',
+    color: '#000000', // Black text
+    marginBottom: 4,
   },
   transactionDate: {
     fontSize: 14,
-    color: '#9CA3AF',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#6B7280',
   },
   transactionAmount: {
     fontSize: 16,
-    fontWeight: 'bold',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
     color: '#EF4444',
   },
   alertsList: {
@@ -963,7 +1322,7 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-end',
   },
   modalContent: {
-    backgroundColor: '#000000',
+    backgroundColor: '#FFFFFF',
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     padding: 20,
@@ -975,33 +1334,44 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   modalTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
+    fontSize: 20,
+    fontFamily: 'Archivo Black', // Archivo Black for page headings
+    fontWeight: '900',
+    color: '#000000', // Black text
   },
   modalBody: {
     marginBottom: 20,
   },
   inputLabel: {
     fontSize: 14,
-    color: '#9CA3AF',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for titles
+    fontWeight: '400',
+    color: '#6B7280',
     marginBottom: 8,
   },
   amountInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#F9FAFB',
     borderRadius: 12,
     padding: 16,
     fontSize: 16,
-    color: 'white',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#000000', // Black text
     marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
   },
   descriptionInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#F9FAFB',
     borderRadius: 12,
     padding: 16,
     fontSize: 16,
-    color: 'white',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#000000', // Black text
     marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
   },
   addExpenseText: {
     fontSize: 16,
@@ -1016,104 +1386,81 @@ const styles = StyleSheet.create({
   },
   errorTitle: {
     fontSize: 24,
-    fontWeight: 'bold',
-    color: 'white',
+    fontFamily: 'Archivo Black',
+    fontWeight: '900',
+    color: '#000000', // Black text
     marginBottom: 16,
     textAlign: 'center',
   },
   errorDescription: {
     fontSize: 16,
-    color: 'rgba(255, 255, 255, 0.7)',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    color: '#6B7280',
     textAlign: 'center',
     lineHeight: 24,
     marginBottom: 32,
   },
   errorBackButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#10B981',
     paddingHorizontal: 24,
     paddingVertical: 12,
     borderRadius: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
   },
   errorBackButtonText: {
     fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#FFFFFF', // White text on button
   },
-  budgetTypeBadge: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-    alignSelf: 'flex-start',
-    marginTop: 4,
-  },
-  budgetTypeText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: 'white',
+  errorContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 40,
+    backgroundColor: '#FFFFFF',
   },
   alertBanner: {
-    backgroundColor: 'rgba(245, 158, 11, 0.1)',
-    borderRadius: 8,
-    padding: 12,
+    backgroundColor: '#FEF3C7',
+    borderRadius: 12,
+    padding: 16,
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 20,
     borderWidth: 1,
-    borderColor: 'rgba(245, 158, 11, 0.3)',
+    borderColor: '#FCD34D',
   },
   alertText: {
     fontSize: 14,
-    color: '#F59E0B',
-    marginLeft: 8,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    color: '#92400E',
+    marginLeft: 12,
     flex: 1,
   },
-  paceCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 20,
-  },
-  paceContent: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  paceItem: {
-    alignItems: 'center',
-    flex: 1,
-  },
-  paceLabel: {
+  alertTime: {
     fontSize: 12,
-    color: '#9CA3AF',
-    marginBottom: 4,
-  },
-  paceValue: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: 'white',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#92400E',
   },
   actionButtons: {
     flexDirection: 'row',
     gap: 12,
+    marginBottom: 20,
   },
   actionButton: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(245, 158, 11, 0.1)',
-    borderRadius: 8,
-    paddingVertical: 12,
+    backgroundColor: '#10B981', // Dark green button
+    borderRadius: 12,
+    paddingVertical: 14,
     paddingHorizontal: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(245, 158, 11, 0.3)',
   },
   actionButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#F59E0B',
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#FFFFFF', // White text on button
     marginLeft: 8,
   },
   transactionActions: {
@@ -1124,33 +1471,38 @@ const styles = StyleSheet.create({
   excludeButton: {
     padding: 8,
     borderRadius: 6,
-    backgroundColor: 'rgba(107, 114, 128, 0.1)',
+    backgroundColor: '#F3F4F6',
   },
   includeButton: {
     padding: 8,
     borderRadius: 6,
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    backgroundColor: '#D1FAE5',
   },
   excludedSection: {
     marginTop: 20,
   },
   excludedTitle: {
     fontSize: 16,
+    fontFamily: 'Poppins-SemiBold', // Poppins for section headings
     fontWeight: '600',
-    color: 'white',
+    color: '#000000', // Black text
     marginBottom: 12,
   },
   excludedCard: {
     opacity: 0.7,
     borderWidth: 1,
-    borderColor: 'rgba(107, 114, 128, 0.3)',
+    borderColor: '#D1D5DB',
   },
   excludedText: {
     textDecorationLine: 'line-through',
     color: '#9CA3AF',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
   },
   excludedReason: {
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
     color: '#6B7280',
     fontStyle: 'italic',
     marginTop: 4,
@@ -1159,62 +1511,17 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   accountCard: {
-    backgroundColor: '#000000',
+    backgroundColor: '#FFFFFF',
     borderRadius: 12,
     padding: 16,
-  },
-  accountHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  accountIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  accountInfo: {
-    flex: 1,
-  },
-  accountName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginBottom: 2,
-  },
-  accountType: {
-    fontSize: 12,
-    color: '#9CA3AF',
-    marginBottom: 4,
-  },
-  accountBalance: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: 'white',
-  },
-  accountRole: {
-    alignItems: 'flex-end',
-  },
-  roleText: {
-    fontSize: 12,
-    color: '#10B981',
-    fontWeight: '600',
-  },
-  accountFooter: {
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.1)',
-    paddingTop: 8,
-  },
-  syncText: {
-    fontSize: 12,
-    color: '#6B7280',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
   },
   modalDescription: {
     fontSize: 14,
-    color: '#9CA3AF',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#6B7280',
     marginBottom: 16,
     lineHeight: 20,
   },
@@ -1230,16 +1537,19 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#D1D5DB',
     alignItems: 'center',
+    backgroundColor: '#FFFFFF',
   },
   cancelButtonText: {
     fontSize: 16,
-    fontWeight: '600',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
     color: '#6B7280',
   },
   excludeButtonText: {
     fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#FFFFFF', // White text on button
   },
   emptyContainer: {
     flex: 1,
@@ -1250,22 +1560,27 @@ const styles = StyleSheet.create({
   },
   emptyTitle: {
     fontSize: 18,
-    fontWeight: '600',
-    color: 'white',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for titles
+    fontWeight: '400',
+    color: '#000000', // Black text
     marginTop: 16,
     marginBottom: 8,
   },
   emptyDescription: {
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#6B7280',
     textAlign: 'center',
     lineHeight: 20,
   },
   goalInfoCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
+    backgroundColor: '#F9FAFB',
+    borderRadius: 12,
     padding: 20,
     marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
   },
   goalInfoHeader: {
     flexDirection: 'row',
@@ -1285,42 +1600,171 @@ const styles = StyleSheet.create({
   },
   goalInfoTitle: {
     fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
+    fontFamily: 'Poppins-SemiBold', // Poppins for section headings
+    fontWeight: '600',
+    color: '#000000', // Black text
     marginBottom: 4,
   },
   goalInfoSubtitle: {
     fontSize: 14,
-    color: '#9CA3AF',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#6B7280',
   },
   viewGoalButton: {
-    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+    backgroundColor: '#10B981',
     borderRadius: 8,
-    paddingHorizontal: 12,
+    paddingHorizontal: 16,
     paddingVertical: 8,
   },
   viewGoalText: {
     fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#FFFFFF', // White text on button
+  },
+  accountsSection: {
+    padding: 20,
+  },
+  sectionDescription: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    fontWeight: '400',
+    color: '#6B7280',
+    marginBottom: 20,
+    lineHeight: 20,
+  },
+  addAccountButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ECFDF5',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 20,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: '#10B981',
+  },
+  addAccountButtonText: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    fontWeight: '400',
+    color: '#10B981',
+  },
+  accountCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  accountCardIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  accountCardInfo: {
+    flex: 1,
+  },
+  accountCardName: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
-    color: '#F59E0B',
+    color: '#000000',
+    marginBottom: 4,
+  },
+  accountCardType: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    fontWeight: '400',
+    color: '#6B7280',
+  },
+  accountCardBalance: {
+    alignItems: 'flex-end',
+  },
+  accountCardBalanceText: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#10B981',
+    marginBottom: 4,
+  },
+  accountCardBalanceLabel: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    fontWeight: '400',
+    color: '#6B7280',
+  },
+  accountCardActions: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#E5E7EB',
+  },
+  accountCardActionButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#EFF6FF',
+    borderRadius: 8,
+    padding: 10,
+    gap: 6,
+    borderWidth: 1,
+    borderColor: '#3B82F6',
+  },
+  accountCardActionButtonSecondary: {
+    backgroundColor: '#ECFDF5',
+    borderColor: '#10B981',
+  },
+  accountCardActionButtonText: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    fontWeight: '400',
+    color: '#3B82F6',
+  },
+  accountCardActionButtonTextSecondary: {
+    color: '#10B981',
+  },
+  editAccountsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#10B981',
+    borderRadius: 8,
+    padding: 14,
+    marginTop: 20,
+    gap: 8,
+  },
+  editAccountsButtonText: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    fontWeight: '400',
+    color: '#FFFFFF',
   },
   goalProgressInfo: {
     marginTop: 8,
   },
   goalProgressLabel: {
     fontSize: 14,
-    color: '#9CA3AF',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for titles/text
+    fontWeight: '400',
+    color: '#6B7280',
     marginBottom: 4,
   },
   goalProgressValue: {
     fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#000000', // Black text
     marginBottom: 8,
   },
   goalProgressBar: {
     height: 8,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#E5E7EB',
     borderRadius: 4,
     overflow: 'hidden',
   },
@@ -1329,3 +1773,4 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
 });
+

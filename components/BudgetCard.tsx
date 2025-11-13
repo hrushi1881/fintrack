@@ -172,9 +172,12 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 16,
     marginBottom: 12,
+    backgroundColor: '#FFFFFF', // White background
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
+    shadowOpacity: 0.05,
     shadowRadius: 4,
     elevation: 2,
   },
@@ -182,6 +185,9 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 12,
     marginBottom: 8,
+    backgroundColor: '#FFFFFF', // White background
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
@@ -212,26 +218,29 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 16,
-    fontWeight: '600',
-    color: '#1F2937',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for titles
+    fontWeight: '400',
+    color: '#000000', // Black text
     marginLeft: 8,
     flex: 1,
   },
   compactTitle: {
     fontSize: 14,
-    fontWeight: '600',
-    color: '#1F2937',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for titles
+    fontWeight: '400',
+    color: '#000000', // Black text
     marginLeft: 6,
     flex: 1,
   },
   statusBadge: {
-    paddingHorizontal: 8,
+    paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 12,
   },
   statusText: {
     fontSize: 12,
-    fontWeight: '600',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
     color: '#FFFFFF',
   },
   progressSection: {
@@ -241,17 +250,18 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   progressBar: {
-    height: 6,
+    height: 8,
     backgroundColor: '#E5E7EB',
-    borderRadius: 3,
+    borderRadius: 4,
     overflow: 'hidden',
   },
   progressFill: {
     height: '100%',
-    borderRadius: 3,
+    borderRadius: 4,
   },
   progressText: {
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
     color: '#6B7280',
     textAlign: 'right',
     marginTop: 4,
@@ -266,13 +276,16 @@ const styles = StyleSheet.create({
   },
   amountLabel: {
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for titles
+    fontWeight: '400',
     color: '#6B7280',
-    marginBottom: 2,
+    marginBottom: 4,
   },
   amountValue: {
     fontSize: 16,
-    fontWeight: '600',
-    color: '#1F2937',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
+    color: '#000000', // Black text
   },
   footer: {
     flexDirection: 'row',
@@ -281,10 +294,12 @@ const styles = StyleSheet.create({
   },
   periodText: {
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
     color: '#6B7280',
   },
   compactAmount: {
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
     color: '#6B7280',
     textAlign: 'right',
     marginTop: 4,
@@ -304,8 +319,9 @@ const styles = StyleSheet.create({
   },
   goalTitle: {
     fontSize: 14,
-    fontWeight: '600',
-    color: '#1F2937',
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for titles
+    fontWeight: '400',
+    color: '#000000', // Black text
     marginLeft: 6,
   },
   goalProgress: {
@@ -313,6 +329,8 @@ const styles = StyleSheet.create({
   },
   goalProgressText: {
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
+    fontWeight: '400',
     color: '#6B7280',
   },
 });

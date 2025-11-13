@@ -1,994 +1,1366 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, StatusBar } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import React, { useCallback, useMemo, useState } from 'react';
+import { SafeAreaView, ScrollView, View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { router, useLocalSearchParams, useFocusEffect } from 'expo-router';
-import { useAuth } from '@/contexts/AuthContext';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { useSettings } from '@/contexts/SettingsContext';
-import { useLiabilities } from '@/contexts/LiabilitiesContext';
 import { formatCurrencyAmount } from '@/utils/currency';
-import { calculateGoalProgress, getProgressColor } from '@/utils/goals';
-import TransactionCard from '@/components/TransactionCard';
-import GoalCard from '@/components/GoalCard';
-import { BudgetCard } from '@/components/BudgetCard';
 import PayModal from '../modals/pay';
-import ReceiveModal from '../modals/receive';
 import TransferModal from '../modals/transfer';
+import TransferFundsModal from '../modals/transfer-funds';
 import { AddBudgetModal } from '../modals/add-budget';
+import type { AccountFund } from '@/types';
 
-interface Account {
-  id: string;
-  name: string;
-  type: string;
-  balance: number;
-  color: string;
-  icon: string;
-  description?: string;
-  liability_funds?: number;
-  own_funds?: number;
-  liability_portions?: Array<{
-    id: string;
-    liability_id: string;
-    amount: number;
-  }>;
-}
+const MAX_RECENT_TRANSACTIONS = 4;
 
-interface Transaction {
-  id: string;
-  amount: number;
-  type: string;
-  description: string;
-  date: string;
-  account_id: string;
-  category_id?: string;
-  category?: {
-    name: string;
+const toNumber = (value: any) => {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === 'string') return parseFloat(value);
+  return Number(value);
   };
-}
 
 export default function AccountDetailScreen() {
-  const { user } = useAuth();
-  const { accounts, transactions, goals, budgets, refreshAccounts, refreshTransactions, refreshGoals, refreshBudgets } = useRealtimeData();
+  const params = useLocalSearchParams<{ id: string }>();
+  const accountId = Array.isArray(params?.id) ? params.id[0] : params?.id;
+  const {
+    accounts,
+    transactions,
+    goals,
+    budgets,
+    refreshAccounts,
+    refreshAccountFunds,
+    globalRefresh,
+    getFundsForAccount,
+    getFundSummary,
+  } = useRealtimeData();
   const { currency } = useSettings();
-  const { getAccountBreakdown } = useLiabilities();
-  const { id } = useLocalSearchParams<{ id: string }>();
   
-  const [activeTab, setActiveTab] = useState('transactions');
   const [payModalVisible, setPayModalVisible] = useState(false);
-  const [receiveModalVisible, setReceiveModalVisible] = useState(false);
   const [transferModalVisible, setTransferModalVisible] = useState(false);
+  const [transferFundsModalVisible, setTransferFundsModalVisible] = useState(false);
   const [addBudgetModalVisible, setAddBudgetModalVisible] = useState(false);
   
-  
-  const [account, setAccount] = useState<Account | null>(null);
-  const [accountTransactions, setAccountTransactions] = useState<Transaction[]>([]);
-  const [accountBreakdown, setAccountBreakdown] = useState<any>(null);
-
-  // Refresh accounts when screen comes into focus to ensure latest balances
-  useFocusEffect(
-    React.useCallback(() => {
-      refreshAccounts().catch(console.error);
-    }, [refreshAccounts])
+  const account = useMemo(
+    () => accounts.find((item) => item.id === accountId),
+    [accounts, accountId]
   );
 
-  useEffect(() => {
-    if (id && accounts.length > 0) {
-      const foundAccount = accounts.find(acc => acc.id === id);
-      if (foundAccount) {
-        // Update account state with latest balance from accounts array
-        setAccount(foundAccount);
-        loadAccountBreakdown();
+  const accountTransactions = useMemo(() => {
+    if (!accountId) return [];
+    return transactions
+      .filter((tx) => tx.account_id === accountId)
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [transactions, accountId]);
+
+  const fundsForAccount = useMemo<AccountFund[]>(() => {
+    if (!accountId) return [];
+    const list = getFundsForAccount(accountId, { includeLocked: true });
+    return [...list].sort((a, b) => Number(b.spendable) - Number(a.spendable));
+  }, [accountId, getFundsForAccount]);
+
+  const fundSummary = useMemo(() => {
+    if (!accountId) {
+      return { total: 0, spendable: 0, locked: 0, goal: 0, borrowed: 0 };
+    }
+    return getFundSummary(accountId);
+  }, [accountId, getFundSummary]);
+
+  // Check if account has multiple fund types (to determine if Personal Fund label should be shown)
+  const hasMultipleFundTypes = useMemo(() => {
+    if (!accountId) return false;
+    const funds = fundsForAccount.filter((f) => (f.balance ?? 0) > 0);
+    const fundTypes = new Set(funds.map((f) => f.fund_type));
+    // Only show Personal Fund label if there are other fund types (borrowed or goal)
+    return fundTypes.size > 1 || (fundTypes.size === 1 && !fundTypes.has('personal'));
+  }, [fundsForAccount, accountId]);
+
+  const linkedGoals = useMemo(
+    () => {
+      // For Goals Savings account, show all goals
+      if (account?.type === 'goals_savings') {
+        return [];
       }
+      // For regular accounts, find goals that have funds in this account
+      return goals.filter((goal) => {
+        // This would require checking account_funds, but for now return empty
+        // as goals are no longer linked to specific accounts
+        return false;
+      });
+    },
+    [goals, accountId, account?.type]
+  );
+
+  const linkedBudgets = useMemo(() => {
+    return budgets.filter((budget: any) =>
+      accountId && budget?.budget_accounts?.some((link: any) => link.account_id === accountId)
+    );
+  }, [budgets, accountId]);
+
+  const formatCurrency = (value: number) => formatCurrencyAmount(value, currency);
+
+  // Calculate aggregate goal statistics for Goals Savings account
+  const goalStatistics = useMemo(() => {
+    if (account?.type !== 'goals_savings') {
+      return null;
     }
-  }, [id, accounts]);
 
-  const loadAccountBreakdown = async () => {
-    if (!id) return;
-    const breakdown = await getAccountBreakdown(id);
-    setAccountBreakdown(breakdown);
+    const active = goals.filter((goal) => !goal.is_achieved && !goal.is_archived);
+    const completed = goals.filter((goal) => goal.is_achieved && !goal.is_archived);
+    const archived = goals.filter((goal) => goal.is_archived);
+
+    const totals = goals.reduce(
+      (acc, goal) => {
+        const saved = Number(goal.current_amount ?? 0);
+        const target = Number(goal.target_amount ?? 0);
+        return {
+          saved: acc.saved + saved,
+          target: acc.target + target,
+        };
+      },
+      { saved: 0, target: 0 }
+    );
+
+    return {
+      activeGoals: active,
+      completedGoals: completed,
+      archivedGoals: archived,
+      totalSaved: totals.saved,
+      totalTarget: totals.target,
+      totalGoals: goals.length,
+    };
+  }, [goals, account?.type]);
+
+  const handleFundAction = useCallback(
+    (fund: AccountFund) => {
+      if (fund.fund_type === 'goal' && fund.linked_goal_id) {
+        router.push(`/goal/${fund.linked_goal_id}`);
+        return;
+      }
+      if (fund.fund_type === 'borrowed' && fund.linked_liability_id) {
+        router.push(`/liability/${fund.linked_liability_id}`);
+      }
+    },
+    []
+  );
+
+  const handleSync = async () => {
+    await globalRefresh();
+    await refreshAccountFunds();
+    await refreshAccounts();
   };
 
-  useEffect(() => {
-    if (account && transactions.length > 0) {
-      const accountTrans = transactions.filter(t => t.account_id === account.id);
-      setAccountTransactions(accountTrans);
-    }
-  }, [account, transactions]);
-
-  const formatCurrency = (amount: number) => {
-    return formatCurrencyAmount(amount, 'INR'); // TODO: Get from user settings
-  };
-
-  const handleTransactionPress = (transactionId: string) => {
-    router.push(`/transaction/${transactionId}`);
-  };
-
-  const renderFundBreakdown = () => {
-    if (!accountBreakdown || accountBreakdown.total === 0) return null;
-    
+  if (!account) {
     return (
-      <View style={styles.fundBreakdownCard}>
-        <Text style={styles.fundBreakdownTitle}>Fund Breakdown</Text>
-        <View style={styles.fundBreakdownRow}>
-          <View style={styles.fundItem}>
-            <View style={[styles.fundIcon, { backgroundColor: '#10B98120' }]}>
-              <Ionicons name="person" size={16} color="#10B981" />
+      <SafeAreaView style={styles.safeArea}> 
+        <View style={styles.loadingContainer}>
+          <Text style={styles.loadingText}>Account not found.</Text>
             </View>
-            <View style={styles.fundInfo}>
-              <Text style={styles.fundLabel}>Personal</Text>
-              <Text style={styles.fundAmount}>{formatCurrency(accountBreakdown.personal)}</Text>
-            </View>
-          </View>
-          
-          {accountBreakdown.liabilityPortions && accountBreakdown.liabilityPortions.length > 0 && (
-            <View style={styles.fundItem}>
-              <View style={[styles.fundIcon, { backgroundColor: '#6366F120' }]}>
-                <Ionicons name="card" size={16} color="#6366F1" />
-              </View>
-              <View style={styles.fundInfo}>
-                <Text style={styles.fundLabel}>Liabilities</Text>
-                <Text style={styles.fundAmount}>{formatCurrency(accountBreakdown.totalLiability)}</Text>
-              </View>
-            </View>
-          )}
-          
-          {accountBreakdown.goalPortions && accountBreakdown.goalPortions.length > 0 && (
-            <View style={styles.fundItem}>
-              <View style={[styles.fundIcon, { backgroundColor: '#F59E0B20' }]}>
-                <Ionicons name="flag" size={16} color="#F59E0B" />
-              </View>
-              <View style={styles.fundInfo}>
-                <Text style={styles.fundLabel}>Goals</Text>
-                <Text style={styles.fundAmount}>{formatCurrency(accountBreakdown.totalGoal || 0)}</Text>
-              </View>
-            </View>
-          )}
-        </View>
-        
-        {/* Detailed breakdown if multiple liabilities or goals */}
-        {(accountBreakdown.liabilityPortions?.length > 1 || accountBreakdown.goalPortions?.length > 1) && (
-          <View style={styles.detailedBreakdown}>
-            {accountBreakdown.liabilityPortions && accountBreakdown.liabilityPortions.length > 1 && (
-              <View style={styles.detailedSection}>
-                <Text style={styles.detailedTitle}>Liability Details:</Text>
-                {accountBreakdown.liabilityPortions.map((portion: any) => (
-                  <View key={portion.liabilityId} style={styles.detailedRow}>
-                    <Text style={styles.detailedLabel}>{portion.liabilityName}:</Text>
-                    <Text style={styles.detailedValue}>{formatCurrency(portion.amount)}</Text>
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <View style={styles.container}>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scrollContent}
+        >
+          <View style={styles.headerRow}>
+            <TouchableOpacity
+              style={styles.iconButton}
+              onPress={() => router.back()}
+              accessibilityLabel="Go back"
+            >
+              <Ionicons name="arrow-back" size={20} color="#0E401C" />
+      </TouchableOpacity>
+            <Text style={styles.headerTitle}>{account.name}</Text>
+            <TouchableOpacity
+              style={styles.iconButton}
+              onPress={handleSync}
+              accessibilityLabel="Refresh account"
+            >
+              <Ionicons name="refresh" size={20} color="#0E401C" />
+            </TouchableOpacity>
+    </View>
+
+          <View style={styles.balanceCard}>
+            {goalStatistics ? (
+              <>
+                <Text style={styles.balanceLabel}>Total Goal Savings</Text>
+                <Text style={styles.balanceValue}>
+                  {formatCurrency(goalStatistics.totalSaved)}
+                </Text>
+                <Text style={styles.balanceSubtext}>
+                  {goalStatistics.totalGoals} {goalStatistics.totalGoals === 1 ? 'goal' : 'goals'} · {formatCurrency(goalStatistics.totalTarget)} target
+                </Text>
+                <TouchableOpacity 
+                  style={[styles.primaryPill, styles.addTransactionButton]}
+                  onPress={() => router.push('/(tabs)/goals')}
+                >
+                  <Text style={styles.primaryPillText}>View All Goals</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <Text style={styles.balanceLabel}>Total Balance</Text>
+                <Text style={styles.balanceValue}>
+                  {formatCurrency(toNumber(account.balance))}
+                </Text>
+                {/* Only show Personal Fund breakdown if multiple fund types exist */}
+                {hasMultipleFundTypes && (
+                  <View style={styles.availableBalanceSection}>
+                    <Text style={styles.availableBalanceLabel}>Available to Spend</Text>
+                    <Text style={styles.availableBalanceValue}>
+                      {formatCurrency(fundSummary.spendable)}
+                    </Text>
+                    <Text style={styles.availableBalanceSubtext}>
+                      Personal Fund - Your true available balance
+                    </Text>
                   </View>
-                ))}
-              </View>
+                )}
+                <View style={styles.balanceActions}>
+                  <TouchableOpacity 
+                    style={[styles.primaryPill, styles.addTransactionButton]}
+                    onPress={() => setPayModalVisible(true)}
+                  >
+                    <Text style={styles.primaryPillText}>Add Transaction</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity 
+                    style={[styles.secondaryPill, styles.transferButton]}
+                    onPress={() => setTransferModalVisible(true)}
+                  >
+                    <Text style={styles.secondaryPillText}>Transfer</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
             )}
           </View>
-        )}
-      </View>
-    );
-  };
 
-  const renderHeader = () => (
-    <View style={styles.header}>
-      <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-        <Ionicons name="arrow-back" size={24} color="#000000" />
-      </TouchableOpacity>
-      <Text style={styles.headerTitle}>{account?.name || 'Account'}</Text>
-      <View style={styles.placeholder} />
-    </View>
-  );
-
-  const renderBalanceSection = () => (
-    <View style={styles.balanceContainer}>
-      <View style={styles.balanceBox}>
-        <Text style={styles.balanceLabel}>Current Balance</Text>
-        <Text style={styles.balanceAmount}>
-          {formatCurrency(account?.balance || 0)}
+          {goalStatistics ? (
+            <>
+              {/* Goals Savings Account - Show Aggregate Statistics */}
+              <View style={styles.goalsSummaryCard}>
+                <View style={styles.goalsSummaryHeader}>
+                  <Text style={styles.sectionTitle}>Goals Overview</Text>
+                </View>
+                <View style={styles.goalsStatsRow}>
+                  <View style={styles.goalsStatItem}>
+                    <Text style={styles.goalsStatLabel}>Active Goals</Text>
+                    <Text style={styles.goalsStatValue}>{goalStatistics.activeGoals.length}</Text>
+                    <Text style={styles.goalsStatAmount}>
+                      {formatCurrency(
+                        goalStatistics.activeGoals.reduce((sum, g) => sum + (Number(g.current_amount) || 0), 0)
+                      )}
         </Text>
-        {accountBreakdown && accountBreakdown.totalLiability > 0 && (
-          <View style={styles.balanceBreakdown}>
-            <View style={styles.balanceRow}>
-              <Text style={styles.balanceRowLabel}>💵 Personal Funds:</Text>
-              <Text style={styles.balanceRowAmount}>
-                {formatCurrency(accountBreakdown.personal)}
-              </Text>
-            </View>
-            {accountBreakdown.liabilityPortions.map((portion: any) => (
-              <View key={portion.liabilityId} style={styles.balanceRow}>
-                <Text style={styles.balanceRowLabel}>🏦 {portion.liabilityName}:</Text>
-                <Text style={[styles.balanceRowAmount, styles.liabilityAmount]}>
-                  {formatCurrency(portion.amount)}
+                  </View>
+                  <View style={styles.goalsStatItem}>
+                    <Text style={styles.goalsStatLabel}>Completed</Text>
+                    <Text style={styles.goalsStatValue}>{goalStatistics.completedGoals.length}</Text>
+                    <Text style={styles.goalsStatAmount}>
+                      {formatCurrency(
+                        goalStatistics.completedGoals.reduce((sum, g) => sum + (Number(g.current_amount) || 0), 0)
+                      )}
+                    </Text>
+                  </View>
+                </View>
+                <View style={styles.goalsProgressBar}>
+                  <View
+                    style={[
+                      styles.goalsProgressFill,
+                      {
+                        width: `${goalStatistics.totalTarget > 0 ? (goalStatistics.totalSaved / goalStatistics.totalTarget) * 100 : 0}%`,
+                      },
+                    ]}
+                  />
+                </View>
+                <Text style={styles.goalsProgressText}>
+                  {formatCurrency(goalStatistics.totalSaved)} of {formatCurrency(goalStatistics.totalTarget)} saved
                 </Text>
               </View>
-            ))}
-          </View>
-        )}
-        {accountBreakdown && accountBreakdown.totalLiability === 0 && accountBreakdown.personal === accountBreakdown.total && (
-          <View style={styles.balanceBreakdown}>
-            <Text style={styles.allPersonalText}>All funds are personal</Text>
-          </View>
-        )}
-      </View>
-    </View>
-  );
 
-  const renderQuickActions = () => (
-    <View style={styles.quickActionsContainer}>
+              <View style={styles.goalsListCard}>
+                <Text style={styles.sectionTitle}>Your Goals</Text>
+                {goalStatistics.activeGoals.length === 0 && goalStatistics.completedGoals.length === 0 ? (
+                  <View style={styles.emptyState}>
+                    <Ionicons name="flag-outline" size={36} color="#8BA17B" />
+                    <Text style={styles.emptyStateText}>No goals yet. Create one to start saving!</Text>
+                  </View>
+                ) : (
+                  <>
+                    {goalStatistics.activeGoals.map((goal) => (
       <TouchableOpacity 
-        style={styles.actionButton}
-        onPress={() => setPayModalVisible(true)}
-      >
-        <Ionicons name="arrow-up" size={20} color="#FFFFFF" />
-        <Text style={styles.actionText}>Pay</Text>
-      </TouchableOpacity>
-      
-      <TouchableOpacity 
-        style={styles.actionButton}
-        onPress={() => setReceiveModalVisible(true)}
-      >
-        <Ionicons name="arrow-down" size={20} color="#FFFFFF" />
-        <Text style={styles.actionText}>Receive</Text>
-      </TouchableOpacity>
-      
-      <TouchableOpacity 
-        style={styles.actionButton}
-        onPress={() => setTransferModalVisible(true)}
-      >
-        <Ionicons name="swap-horizontal" size={20} color="#FFFFFF" />
-        <Text style={styles.actionText}>Transfer</Text>
-      </TouchableOpacity>
-
-      
-    </View>
-  );
-
-  const renderFilterTabs = () => (
-    <View style={styles.tabsContainer}>
-      <TouchableOpacity 
-        style={[styles.tab, activeTab === 'transactions' && styles.activeTab]}
-        onPress={() => setActiveTab('transactions')}
-      >
-        <Text style={[styles.tabText, activeTab === 'transactions' && styles.activeTabText]}>
-          Transactions
+                        key={goal.id}
+                        style={styles.goalItem}
+                        onPress={() => router.push(`/goal/${goal.id}`)}
+                      >
+                        <View style={[styles.goalItemIcon, { backgroundColor: goal.color || '#4F6F3E' }]}>
+                          <Ionicons name={(goal.icon as any) || 'flag'} size={20} color="white" />
+                        </View>
+                        <View style={styles.goalItemInfo}>
+                          <Text style={styles.goalItemTitle}>{goal.title}</Text>
+                          <Text style={styles.goalItemProgress}>
+                            {formatCurrency(Number(goal.current_amount) || 0)} of {formatCurrency(Number(goal.target_amount) || 0)}
         </Text>
+                        </View>
+                        <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
       </TouchableOpacity>
-      
+                    ))}
+                    {goalStatistics.completedGoals.length > 0 && (
+                      <>
+                        <Text style={styles.completedSectionTitle}>Completed Goals</Text>
+                        {goalStatistics.completedGoals.map((goal) => (
       <TouchableOpacity 
-        style={[styles.tab, activeTab === 'budgets' && styles.activeTab]}
-        onPress={() => setActiveTab('budgets')}
-      >
-        <Text style={[styles.tabText, activeTab === 'budgets' && styles.activeTabText]}>
-          Budgets
+                            key={goal.id}
+                            style={styles.goalItem}
+                            onPress={() => router.push(`/goal/${goal.id}`)}
+                          >
+                            <View style={[styles.goalItemIcon, { backgroundColor: goal.color || '#4F6F3E' }]}>
+                              <Ionicons name={(goal.icon as any) || 'flag'} size={20} color="white" />
+                            </View>
+                            <View style={styles.goalItemInfo}>
+                              <Text style={styles.goalItemTitle}>{goal.title}</Text>
+                              <Text style={styles.goalItemProgress}>
+                                {formatCurrency(Number(goal.current_amount) || 0)} saved
         </Text>
+                            </View>
+                            <Ionicons name="checkmark-circle" size={20} color="#4F6F3E" />
       </TouchableOpacity>
-      
+                        ))}
+                      </>
+                    )}
+                  </>
+                )}
       <TouchableOpacity 
-        style={[styles.tab, activeTab === 'insights' && styles.activeTab]}
-        onPress={() => setActiveTab('insights')}
+                  style={styles.addGoalButton}
+                  onPress={() => router.push('/(tabs)/goals')}
       >
-        <Text style={[styles.tabText, activeTab === 'insights' && styles.activeTabText]}>
-          Insights
-        </Text>
-      </TouchableOpacity>
-      
-      <TouchableOpacity 
-        style={[styles.tab, activeTab === 'statements' && styles.activeTab]}
-        onPress={() => setActiveTab('statements')}
-      >
-        <Text style={[styles.tabText, activeTab === 'statements' && styles.activeTabText]}>
-          Statements
-        </Text>
+                  <Ionicons name="add" size={18} color="#4F6F3E" />
+                  <Text style={styles.addGoalText}>View All Goals</Text>
       </TouchableOpacity>
     </View>
-  );
+            </>
+          ) : (
+            <>
+              {/* Regular Account - Show Funds and Transactions */}
+              <View style={styles.chartCard}>
+                <View style={styles.chartHeader}>
+                  <Text style={styles.sectionTitle}>Spending This Month</Text>
+                  <Text style={styles.chartAmount}>{formatCurrencyAmount(0, currency)}</Text>
+                </View>
+                <Text style={styles.chartCaption}>Week 1   Week 2   Week 3   Week 4</Text>
+                <View style={styles.chartPlaceholder}>
+                  <Ionicons name="pulse-outline" size={64} color="#D3DFC7" />
+                </View>
+              </View>
 
-  const renderTransactionsList = () => (
-    <View style={styles.transactionsContainer}>
-      {accountTransactions.length > 0 ? (
-        accountTransactions.map((transaction) => (
-          <TransactionCard
-            key={transaction.id}
-            id={transaction.id}
-            amount={transaction.amount}
-            type={transaction.type as 'income' | 'expense' | 'transfer'}
-            category={transaction.category?.name || 'Other'}
-            description={transaction.description}
-            date={transaction.date}
-            onPress={() => handleTransactionPress(transaction.id)}
-          />
-        ))
-      ) : (
-        <View style={styles.emptyState}>
-          <Ionicons name="receipt-outline" size={48} color="#9CA3AF" />
-          <Text style={styles.emptyTitle}>No Transactions Yet</Text>
-          <Text style={styles.emptyDescription}>
-            Start by making a payment or receiving money
-          </Text>
-        </View>
-      )}
-    </View>
-  );
+              {/* Only show Funds Breakdown section if multiple fund types exist */}
+              {hasMultipleFundTypes && (
+                <View style={styles.fundBreakdownCard}>
+                  <View style={styles.fundSummaryHeader}>
+                    <Text style={styles.sectionTitle}>Funds Breakdown</Text>
+                    <TouchableOpacity
+                      style={styles.transferFundsButton}
+                      onPress={() => setTransferFundsModalVisible(true)}
+                    >
+                      <Ionicons name="swap-horizontal" size={16} color="#000000" />
+                      <Text style={styles.transferFundsButtonText}>Transfer</Text>
+                    </TouchableOpacity>
+                  </View>
+                  
+                  {/* Personal Fund - Primary Display */}
+                  <View style={styles.personalFundCard}>
+                    <View style={styles.personalFundHeader}>
+                      <View style={styles.personalFundIcon}>
+                        <Ionicons name="wallet" size={24} color="#10B981" />
+                      </View>
+                      <View style={styles.personalFundInfo}>
+                        <Text style={styles.personalFundLabel}>Personal Fund</Text>
+                        <Text style={styles.personalFundAmount}>
+                          {formatCurrency(fundSummary.spendable)}
+                        </Text>
+                        <Text style={styles.personalFundSubtext}>
+                          Available to spend on anything
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
 
-  const renderBudgets = () => {
-    // Get budgets that include this account
-    const accountBudgets = budgets.filter(budget => 
-      (budget as any).budget_accounts?.some((ba: any) => ba.account_id === account?.id)
-    );
+                {/* Liability Funds */}
+                {fundSummary.borrowed > 0 && (
+                  <View style={styles.fundTypeSection}>
+                    <Text style={styles.fundTypeTitle}>Liability Funds</Text>
+                    <Text style={styles.fundTypeSubtitle}>
+                      Reserved for debt payments
+                    </Text>
+                    {fundsForAccount
+                      .filter((f) => f.fund_type === 'borrowed' && (f.balance ?? 0) > 0)
+                      .map((fund) => (
+                        <View key={fund.id} style={styles.fundItem}>
+                          <View style={styles.fundItemLeft}>
+                            <View style={[styles.fundItemIcon, { backgroundColor: 'rgba(239, 68, 68, 0.1)' }]}>
+                              <Ionicons name="card-outline" size={18} color="#EF4444" />
+                            </View>
+                            <View style={styles.fundItemInfo}>
+                              <Text style={styles.fundItemName}>{fund.name}</Text>
+                              <Text style={styles.fundItemAmount}>
+                                {formatCurrency(fund.balance ?? 0)}
+                              </Text>
+                            </View>
+                          </View>
+                          <TouchableOpacity
+                            onPress={() => handleFundAction(fund)}
+                            style={styles.fundItemAction}
+                          >
+                            <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
+                          </TouchableOpacity>
+                        </View>
+                      ))}
+                  </View>
+                )}
 
-    return (
-      <View style={styles.budgetsContainer}>
-        <View style={styles.budgetsHeader}>
-          <Text style={styles.budgetsTitle}>Account Budgets</Text>
+                {/* Goal Funds */}
+                {fundSummary.goal > 0 && (
+                  <View style={styles.fundTypeSection}>
+                    <Text style={styles.fundTypeTitle}>Goal Funds</Text>
+                    <Text style={styles.fundTypeSubtitle}>
+                      Locked savings - cannot be spent directly
+                    </Text>
+                    {fundsForAccount
+                      .filter((f) => f.fund_type === 'goal' && (f.balance ?? 0) > 0)
+                      .map((fund) => (
+                        <View key={fund.id} style={styles.fundItem}>
+                          <View style={styles.fundItemLeft}>
+                            <View style={[styles.fundItemIcon, { backgroundColor: 'rgba(245, 158, 11, 0.1)' }]}>
+                              <Ionicons name="lock-closed-outline" size={18} color="#F59E0B" />
+                            </View>
+                            <View style={styles.fundItemInfo}>
+                              <Text style={styles.fundItemName}>{fund.name}</Text>
+                              <Text style={styles.fundItemAmount}>
+                                {formatCurrency(fund.balance ?? 0)}
+                              </Text>
+                            </View>
+                          </View>
+                          <TouchableOpacity
+                            onPress={() => handleFundAction(fund)}
+                            style={styles.fundItemAction}
+                          >
+                            <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
+                          </TouchableOpacity>
+                        </View>
+                      ))}
+                  </View>
+                )}
+
+                {/* Empty State */}
+                {fundsForAccount.length === 0 && (
+                  <View style={styles.emptyState}>
+                    <Ionicons name="layers-outline" size={36} color="#8BA17B" />
+                    <Text style={styles.emptyStateText}>
+                      All funds are in Personal Fund. Create liabilities or goals to allocate funds.
+                    </Text>
+                  </View>
+                )}
+                </View>
+              )}
+
+              <View style={styles.transactionsCard}>
+                <Text style={styles.sectionTitle}>Recent Transactions</Text>
+                {accountTransactions.length === 0 ? (
+                  <View style={styles.emptyState}>
+                    <Ionicons name="receipt-outline" size={36} color="#8BA17B" />
+                    <Text style={styles.emptyStateText}>No transactions yet. Start by adding one.</Text>
+                  </View>
+                ) : (
+                  accountTransactions.slice(0, MAX_RECENT_TRANSACTIONS).map((tx) => (
+                    <RecentTransactionRow
+                      key={tx.id}
+                      name={tx.description || tx.category?.name || 'Transaction'}
+                      amount={tx.amount}
+                      type={tx.type}
+                      date={tx.date}
+                      onPress={() => router.push(`/transaction/${tx.id}`)}
+                      formatter={formatCurrency}
+                    />
+                  ))
+                )}
+                {accountTransactions.length > MAX_RECENT_TRANSACTIONS && (
           <TouchableOpacity 
-            style={styles.addBudgetButton}
-            onPress={() => setAddBudgetModalVisible(true)}
+                    style={styles.viewAllButton}
+                    onPress={() => router.push('/(tabs)/transactions')}
           >
-            <Ionicons name="add" size={20} color="#10B981" />
-            <Text style={styles.addBudgetText}>Create Budget</Text>
+                    <Text style={styles.viewAllText}>View all</Text>
+                    <Ionicons name="chevron-forward" size={18} color="#4F6F3E" />
           </TouchableOpacity>
+                )}
         </View>
 
-        {accountBudgets.length > 0 ? (
-          <View style={styles.budgetsList}>
-            {accountBudgets.map((budget) => (
-              <BudgetCard
-                key={budget.id}
-                budget={budget}
+              <View style={styles.linkedSection}>
+                <Text style={styles.sectionTitle}>Linked Goals / Budgets</Text>
+                {linkedGoals.map((goal) => (
+                  <LinkedItemRow
+                    key={`goal-${goal.id}`}
+                    icon="airplane-outline"
+                    title={goal.title}
+                    subtitle={`${formatCurrencyAmount(goal.current_amount ?? 0, currency)} saved`}
+                    onPress={() => router.push(`/goal/${goal.id}`)}
+                  />
+                ))}
+                {linkedBudgets.map((budget) => (
+                  <LinkedItemRow
+                    key={`budget-${budget.id}`}
+                    icon="cart-outline"
+                    title={budget.name}
+                    subtitle="Budget"
                 onPress={() => router.push(`/budget/${budget.id}`)}
               />
             ))}
-          </View>
-        ) : (
+                {linkedGoals.length === 0 && linkedBudgets.length === 0 && (
           <View style={styles.emptyState}>
-            <Ionicons name="wallet-outline" size={48} color="#9CA3AF" />
-            <Text style={styles.emptyTitle}>No Budgets Yet</Text>
-            <Text style={styles.emptyDescription}>
-              Create a budget to track spending for this account
-            </Text>
+                    <Ionicons name="bookmark-outline" size={32} color="#8BA17B" />
+                    <Text style={styles.emptyStateText}>No goals or budgets linked yet.</Text>
+                  </View>
+                )}
             <TouchableOpacity 
-              style={styles.createBudgetButton}
+                  style={styles.addLinkedButton}
               onPress={() => setAddBudgetModalVisible(true)}
             >
-              <Text style={styles.createBudgetText}>Create Your First Budget</Text>
+                  <Ionicons name="add" size={18} color="#4F6F3E" />
+                  <Text style={styles.addLinkedText}>Add Budget</Text>
             </TouchableOpacity>
           </View>
+            </>
         )}
+        </ScrollView>
+
+        <PayModal
+          visible={payModalVisible}
+          onClose={() => setPayModalVisible(false)}
+          onSuccess={handleSync}
+          preselectedAccountId={account.id}
+        />
+        <TransferModal
+          visible={transferModalVisible}
+          onClose={() => setTransferModalVisible(false)}
+          onSuccess={handleSync}
+          preselectedAccountId={account.id}
+        />
+        <TransferFundsModal
+          visible={transferFundsModalVisible}
+          onClose={() => setTransferFundsModalVisible(false)}
+          onSuccess={handleSync}
+          preselectedAccountId={account.id}
+        />
+        <AddBudgetModal
+          visible={addBudgetModalVisible}
+          onClose={() => setAddBudgetModalVisible(false)}
+        />
       </View>
-    );
-  };
-
-  const renderInsights = () => (
-    <View style={styles.insightsContainer}>
-      <Text style={styles.insightsTitle}>Account Insights</Text>
-      <View style={styles.insightCard}>
-        <Text style={styles.insightText}>Coming Soon</Text>
-        <Text style={styles.insightSubtext}>
-          Detailed analytics and insights will be available here
-        </Text>
-      </View>
-    </View>
-  );
-
-  const renderStatements = () => (
-    <View style={styles.statementsContainer}>
-      <Text style={styles.statementsTitle}>Account Statements</Text>
-      <View style={styles.statementCard}>
-        <Text style={styles.statementText}>Coming Soon</Text>
-        <Text style={styles.statementSubtext}>
-          Download your account statements here
-        </Text>
-      </View>
-    </View>
-  );
-
-  const renderGoalsContent = () => {
-    const activeGoals = goals.filter(goal => !goal.is_achieved);
-    const completedGoals = goals.filter(goal => goal.is_achieved);
-
-    return (
-      <View style={styles.content}>
-        {renderHeader()}
-        {renderBalanceSection()}
-        
-        {/* Goals-specific tabs */}
-        <View style={styles.tabsContainer}>
-          <TouchableOpacity 
-            style={[styles.tab, activeTab === 'goals' && styles.activeTab]}
-            onPress={() => setActiveTab('goals')}
-          >
-            <Text style={[styles.tabText, activeTab === 'goals' && styles.activeTabText]}>
-              Goals ({activeGoals.length})
-            </Text>
-          </TouchableOpacity>
-          
-          <TouchableOpacity 
-            style={[styles.tab, activeTab === 'transactions' && styles.activeTab]}
-            onPress={() => setActiveTab('transactions')}
-          >
-            <Text style={[styles.tabText, activeTab === 'transactions' && styles.activeTabText]}>
-              Transactions
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {activeTab === 'goals' && (
-          <View style={styles.goalsContainer}>
-            <View style={styles.goalsSection}>
-              <Text style={styles.sectionTitle}>Active Goals</Text>
-              {activeGoals.length > 0 ? (
-                activeGoals.map((goal) => (
-                  <GoalCard
-                    key={goal.id}
-                    goal={goal}
-                    onPress={() => router.push(`/goal/${goal.id}`)}
-                  />
-                ))
-              ) : (
-                <View style={styles.emptyGoalsContainer}>
-                  <Ionicons name="flag-outline" size={48} color="rgba(255, 255, 255, 0.5)" />
-                  <Text style={styles.emptyGoalsTitle}>No Active Goals</Text>
-                  <Text style={styles.emptyGoalsDescription}>
-                    Create your first goal to start saving!
-                  </Text>
-                  <TouchableOpacity 
-                    style={styles.createGoalButton}
-                    onPress={() => router.push('/(tabs)/goals')}
-                  >
-                    <Text style={styles.createGoalButtonText}>Create Goal</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-            </View>
-
-            {completedGoals.length > 0 && (
-              <View style={styles.goalsSection}>
-                <Text style={styles.sectionTitle}>Completed Goals</Text>
-                {completedGoals.map((goal) => (
-                  <GoalCard
-                    key={goal.id}
-                    goal={goal}
-                    onPress={() => router.push(`/goal/${goal.id}`)}
-                  />
-                ))}
-              </View>
-            )}
-          </View>
-        )}
-        
-        {activeTab === 'transactions' && renderTransactionsList()}
-      </View>
-    );
-  };
-
-  const renderContent = () => {
-    if (!account) {
-      return (
-        <View style={styles.loadingContainer}>
-          <Text style={styles.loadingText}>Loading account...</Text>
-        </View>
-      );
-    }
-
-    // Special handling for Goals Savings Account
-    if (account.type === 'goals_savings') {
-      return renderGoalsContent();
-    }
-
-    return (
-      <View style={styles.content}>
-        {renderHeader()}
-        {renderBalanceSection()}
-        {renderQuickActions()}
-        {renderFilterTabs()}
-        
-        {activeTab === 'transactions' && renderTransactionsList()}
-        {activeTab === 'budgets' && renderBudgets()}
-        {activeTab === 'insights' && renderInsights()}
-        {activeTab === 'statements' && renderStatements()}
-      </View>
-    );
-  };
-
-  return (
-    <>
-      <StatusBar barStyle="dark-content" backgroundColor="#99D795" />
-      <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
-        <SafeAreaView style={styles.safeArea}>
-          <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
-            {renderContent()}
-          </ScrollView>
-        </SafeAreaView>
-      </LinearGradient>
-
-      {/* Modals */}
-      <PayModal 
-        visible={payModalVisible} 
-        onClose={() => setPayModalVisible(false)}
-        onSuccess={async () => {
-          // Wait for refresh to complete before updating UI
-          await Promise.all([
-            refreshAccounts(),
-            refreshTransactions(),
-          ]);
-          // Reload account breakdown to show updated fund breakdown
-          await loadAccountBreakdown();
-        }}
-        preselectedAccountId={account?.id}
-      />
-      <ReceiveModal 
-        visible={receiveModalVisible} 
-        onClose={() => setReceiveModalVisible(false)}
-        onSuccess={async () => {
-          // Wait for refresh to complete before updating UI
-          await Promise.all([
-            refreshAccounts(),
-            refreshTransactions(),
-          ]);
-          // Reload account breakdown to show updated fund breakdown
-          await loadAccountBreakdown();
-        }}
-        preselectedAccountId={account?.id}
-      />
-      <TransferModal 
-        visible={transferModalVisible} 
-        onClose={() => setTransferModalVisible(false)}
-        onSuccess={async () => {
-          // Wait for refresh to complete before updating UI
-          await Promise.all([
-            refreshAccounts(),
-            refreshTransactions(),
-          ]);
-          // Reload account breakdown to show updated fund breakdown
-          await loadAccountBreakdown();
-        }}
-        preselectedAccountId={account?.id}
-      />
-      <AddBudgetModal 
-        visible={addBudgetModalVisible} 
-        onClose={() => setAddBudgetModalVisible(false)}
-      />
-      
-    </>
+    </SafeAreaView>
   );
 }
 
+interface FundChipProps {
+  label: string;
+  amount: number;
+  tone: 'primary' | 'warning' | 'muted';
+  formatter: (value: number) => string;
+}
+
+const FundChip: React.FC<FundChipProps> = ({ label, amount, tone, formatter }) => {
+  const palette = {
+    primary: { bg: '#E5F0D9', text: '#1F3A24' },
+    warning: { bg: '#F9E8D0', text: '#7C4A0B' },
+    muted: { bg: '#F0F4EB', text: '#3B4F2F' },
+  }[tone];
+
+  return (
+    <View style={[styles.fundChip, { backgroundColor: palette.bg }]}> 
+      <Text style={[styles.fundChipLabel, { color: palette.text }]}>{label}</Text>
+      <Text style={[styles.fundChipValue, { color: palette.text }]}>{formatter(amount)}</Text>
+    </View>
+  );
+};
+
+interface FundDetailRowProps {
+  fund: AccountFund;
+  formatter: (value: number) => string;
+  onPressAction?: (fund: AccountFund) => void;
+}
+
+const FundDetailRow: React.FC<FundDetailRowProps> = ({ fund, formatter, onPressAction }) => {
+  const isLocked = !fund.spendable;
+  const displayName = fund.display_name || fund.name;
+
+  const palette = useMemo(() => {
+    switch (fund.fund_type) {
+      case 'goal':
+        return {
+          iconName: 'lock-closed-outline' as const,
+          bg: '#F5EEE5',
+          icon: '#B4690E',
+          caption: 'Goal fund · locked',
+        };
+      case 'borrowed':
+        return {
+          iconName: 'card-outline' as const,
+          bg: '#FDECEC',
+          icon: '#B83228',
+          caption: 'Borrowed money',
+        };
+      case 'reserved':
+        return {
+          iconName: 'shield-outline' as const,
+          bg: '#E8F0F5',
+          icon: '#1C4B6C',
+          caption: 'Reserved',
+        };
+      case 'sinking':
+        return {
+          iconName: 'calendar-outline' as const,
+          bg: '#EAF3E8',
+          icon: '#4F6F3E',
+          caption: 'Sinking fund',
+        };
+      default:
+        return {
+          iconName: 'wallet-outline' as const,
+          bg: '#E4F5EB',
+          icon: '#1F3A24',
+          caption: fund.spendable ? 'Available to spend' : 'Restricted',
+        };
+    }
+  }, [fund.fund_type, fund.spendable]);
+
+  const showAction =
+    isLocked &&
+    onPressAction &&
+    (fund.fund_type === 'goal' || fund.fund_type === 'borrowed') &&
+    (fund.linked_goal_id || fund.linked_liability_id);
+
+  return (
+    <View style={styles.fundDetailRow}>
+      <View style={styles.fundDetailLeft}>
+        <View style={[styles.fundDetailIcon, { backgroundColor: palette.bg }]}>
+          <Ionicons name={palette.iconName} size={16} color={palette.icon} />
+        </View>
+        <View style={styles.fundDetailCopy}>
+          <Text style={styles.fundDetailName}>{displayName}</Text>
+          <Text style={styles.fundDetailMeta}>
+            {isLocked ? 'Locked' : 'Spendable'} · {palette.caption}
+                  </Text>
+        </View>
+      </View>
+      <View style={styles.fundDetailRight}>
+        <Text style={styles.fundDetailAmount}>{formatter(fund.balance ?? 0)}</Text>
+        {showAction ? (
+                  <TouchableOpacity 
+            style={styles.fundDetailAction}
+            onPress={() => onPressAction?.(fund)}
+            accessibilityRole="button"
+                  >
+            <Text style={styles.fundDetailActionText}>
+              {fund.fund_type === 'goal' ? 'Withdraw' : 'Review'}
+            </Text>
+                  </TouchableOpacity>
+        ) : null}
+                </View>
+      </View>
+    );
+  };
+
+interface RecentTransactionRowProps {
+  name: string;
+  amount: number;
+  type: string;
+  date: string;
+  onPress: () => void;
+  formatter: (value: number) => string;
+}
+
+const RecentTransactionRow: React.FC<RecentTransactionRowProps> = ({
+  name,
+  amount,
+  type,
+  date,
+  onPress,
+  formatter,
+}) => {
+  const isExpense = type === 'expense';
+  const isIncome = type === 'income';
+  const amountColor = isIncome ? '#2B8A3E' : isExpense ? '#B83228' : '#1F3A24';
+
+    return (
+    <TouchableOpacity style={styles.transactionRow} onPress={onPress}>
+      <View style={styles.transactionIcon}>
+        <Ionicons name="receipt-outline" size={20} color="#4F6F3E" />
+      </View>
+      <View style={styles.transactionInfo}>
+        <Text style={styles.transactionName}>{name}</Text>
+        <Text style={styles.transactionDate}>
+          {new Date(date).toLocaleDateString()}
+        </Text>
+      </View>
+      <Text style={[styles.transactionAmount, { color: amountColor }]}> 
+        {isExpense ? '-' : isIncome ? '+' : ''}
+        {formatter(Math.abs(amount))}
+      </Text>
+    </TouchableOpacity>
+  );
+};
+
+interface LinkedItemRowProps {
+  icon: keyof typeof Ionicons.glyphMap;
+  title: string;
+  subtitle: string;
+  onPress: () => void;
+}
+
+const LinkedItemRow: React.FC<LinkedItemRowProps> = ({ icon, title, subtitle, onPress }) => (
+  <TouchableOpacity style={styles.linkedRow} onPress={onPress}>
+    <View style={styles.linkedIcon}>
+      <Ionicons name={icon} size={18} color="#0E401C" />
+    </View>
+    <View style={styles.linkedInfo}>
+      <Text style={styles.linkedTitle}>{title}</Text>
+      <Text style={styles.linkedSubtitle}>{subtitle}</Text>
+    </View>
+    <Ionicons name="chevron-forward" size={18} color="#4F6F3E" />
+  </TouchableOpacity>
+  );
+
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
-  scrollView: {
+  container: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
-  content: {
-    flex: 1,
+  scrollContent: {
+    paddingBottom: 32,
   },
-  header: {
+  headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 30,
+    paddingTop: 16,
+    paddingBottom: 12,
   },
-  backButton: {
+  iconButton: {
     width: 40,
     height: 40,
-    borderRadius: 20,
-    backgroundColor: '#000000',
-    justifyContent: 'center',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#D7DECC',
     alignItems: 'center',
+    justifyContent: 'center',
   },
   headerTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#000000',
+    fontSize: 22,
+    fontFamily: 'Archivo Black',
+    color: '#1F3A24',
   },
-  placeholder: {
-    width: 40,
-  },
-  balanceContainer: {
-    alignItems: 'center',
-    marginBottom: 30,
-  },
-  balanceBox: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 24,
-    borderWidth: 1,
-    borderColor: '#000000',
-    alignItems: 'center',
-    minWidth: 200,
+  balanceCard: {
+    marginHorizontal: 20,
+    marginTop: 4,
+    backgroundColor: '#F2F6EA',
+    borderRadius: 24,
+    padding: 20,
   },
   balanceLabel: {
     fontSize: 14,
-    color: '#6B7280',
-    marginBottom: 8,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#5A6A4A',
   },
-  balanceAmount: {
-    fontSize: 32,
-    fontWeight: 'bold',
-    color: '#000000',
+  balanceValue: {
+    marginTop: 6,
+    fontSize: 36,
+    fontFamily: 'Archivo Black',
+    color: '#0E401C',
   },
-  balanceBreakdown: {
-    marginTop: 16,
-    width: '100%',
-  },
-  balanceRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  balanceRowLabel: {
-    fontSize: 14,
-    color: '#666666',
-    fontWeight: '500',
-  },
-  balanceRowAmount: {
-    fontSize: 16,
-    color: '#000000',
-    fontWeight: '600',
-  },
-  liabilityAmount: {
-    color: '#EF4444',
-    fontWeight: '600',
-  },
-  allPersonalText: {
-    color: '#6B7280',
-    fontSize: 12,
-    fontStyle: 'italic',
-    marginTop: 8,
-  },
-  liabilityBreakdownCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 16,
-    marginTop: 16,
-    borderWidth: 1,
-    borderColor: '#000000',
-    minWidth: 200,
-  },
-  liabilityBreakdownTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#000000',
-    marginBottom: 12,
-    textAlign: 'center',
-  },
-  liabilityPortionRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
-  },
-  liabilityPortionInfo: {
-    flex: 1,
-  },
-  liabilityPortionName: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#000000',
-    marginBottom: 2,
-  },
-  liabilityPortionType: {
-    fontSize: 12,
-    color: '#6B7280',
-    textTransform: 'uppercase',
-  },
-  liabilityPortionAmount: {
-    fontSize: 14,
-    fontWeight: 'bold',
-    color: '#F59E0B',
-  },
-  quickActionsContainer: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 30,
-    gap: 20,
-  },
-  actionButton: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: '#000000',
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  actionText: {
-    fontSize: 12,
-    color: '#FFFFFF',
+  balanceSubtext: {
     marginTop: 4,
-    fontWeight: '600',
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#6F8060',
   },
-  convertButton: {
-    backgroundColor: '#F59E0B',
-  },
-  tabsContainer: {
+  balanceActions: {
     flexDirection: 'row',
-    backgroundColor: '#000000',
-    borderRadius: 25,
-    padding: 4,
-    marginHorizontal: 20,
-    marginBottom: 20,
+    gap: 12,
+    marginTop: 20,
   },
-  tab: {
+  primaryPill: {
     flex: 1,
+    borderRadius: 999,
+    alignItems: 'center',
     paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 20,
-    alignItems: 'center',
   },
-  activeTab: {
-    backgroundColor: '#99D795',
+  addTransactionButton: {
+    backgroundColor: '#4F6F3E',
   },
-  tabText: {
-    fontSize: 14,
-    fontWeight: '600',
+  primaryPillText: {
     color: '#FFFFFF',
-  },
-  activeTabText: {
-    color: '#000000',
-  },
-  transactionsContainer: {
-    paddingBottom: 20,
-  },
-  emptyState: {
-    alignItems: 'center',
-    paddingVertical: 60,
-    paddingHorizontal: 40,
-  },
-  emptyTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#000000',
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  emptyDescription: {
     fontSize: 14,
-    color: '#6B7280',
-    textAlign: 'center',
-    lineHeight: 20,
+    fontFamily: 'InstrumentSerif-Regular',
   },
-  insightsContainer: {
-    paddingHorizontal: 20,
-    paddingBottom: 20,
-  },
-  insightsTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#000000',
-    marginBottom: 16,
-  },
-  insightCard: {
-    backgroundColor: '#000000',
-    borderRadius: 12,
-    padding: 20,
-    alignItems: 'center',
-  },
-  insightText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#FFFFFF',
-    marginBottom: 8,
-  },
-  insightSubtext: {
-    fontSize: 14,
-    color: '#9CA3AF',
-    textAlign: 'center',
-  },
-  statementsContainer: {
-    paddingHorizontal: 20,
-    paddingBottom: 20,
-  },
-  statementsTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#000000',
-    marginBottom: 16,
-  },
-  statementCard: {
-    backgroundColor: '#000000',
-    borderRadius: 12,
-    padding: 20,
-    alignItems: 'center',
-  },
-  statementText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#FFFFFF',
-    marginBottom: 8,
-  },
-  statementSubtext: {
-    fontSize: 14,
-    color: '#9CA3AF',
-    textAlign: 'center',
-  },
-  loadingContainer: {
+  secondaryPill: {
     flex: 1,
-    justifyContent: 'center',
+    borderRadius: 999,
     alignItems: 'center',
+    paddingVertical: 12,
   },
-  loadingText: {
-    fontSize: 16,
-    color: '#6B7280',
+  transferButton: {
+    backgroundColor: '#E6ECD9',
   },
-  goalsContainer: {
-    paddingHorizontal: 20,
+  secondaryPillText: {
+    color: '#4F6F3E',
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
   },
-  goalsSection: {
-    marginBottom: 24,
+  chartCard: {
+    marginHorizontal: 20,
+    marginTop: 20,
+    padding: 20,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: '#EDF1E7',
+  },
+  chartHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   sectionTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
-    marginBottom: 16,
-  },
-  emptyGoalsContainer: {
-    alignItems: 'center',
-    paddingVertical: 40,
-    paddingHorizontal: 20,
-    backgroundColor: '#000000',
-    borderRadius: 16,
-  },
-  emptyGoalsTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  emptyGoalsDescription: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
-    textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 20,
-  },
-  createGoalButton: {
-    backgroundColor: '#10B981',
-    borderRadius: 12,
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-  },
-  createGoalButtonText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  budgetsContainer: {
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-  },
-  budgetsHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  budgetsTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'white',
-  },
-  addBudgetButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.3)',
-  },
-  addBudgetText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#10B981',
-    marginLeft: 4,
-  },
-  budgetsList: {
-    gap: 12,
-  },
-  createBudgetButton: {
-    backgroundColor: '#10B981',
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 8,
-    marginTop: 16,
-    alignSelf: 'center',
-  },
-  createBudgetText: {
     fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-  },
-  fundBreakdownCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
-    marginHorizontal: 20,
-  },
-  fundBreakdownTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
+    color: '#0E401C',
+    fontFamily: 'Archivo Black',
+    letterSpacing: 0.3,
     marginBottom: 12,
   },
-  fundBreakdownRow: {
+  chartAmount: {
+    fontSize: 18,
+    color: '#1F3A24',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  chartCaption: {
+    marginTop: 14,
+    fontSize: 12,
+    color: '#7C8C6B',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  chartPlaceholder: {
+    marginTop: 16,
+    alignItems: 'center',
+    paddingVertical: 20,
+    borderRadius: 16,
+    backgroundColor: '#F5F8F0',
+  },
+  fundBreakdownCard: {
+    marginHorizontal: 20,
+    marginTop: 20,
+    padding: 20,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: '#EDF1E7',
+  },
+  fundRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
     gap: 12,
+    marginTop: 16,
+  },
+  fundSummaryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  fundSummaryTotal: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#1F3A24',
+  },
+  transferFundsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  transferFundsButtonText: {
+    fontSize: 13,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#000000',
+  },
+  availableBalanceSection: {
+    marginTop: 16,
+    padding: 16,
+    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.2)',
+  },
+  availableBalanceLabel: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    marginBottom: 4,
+  },
+  availableBalanceValue: {
+    fontSize: 24,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#10B981',
+    marginBottom: 4,
+  },
+  availableBalanceSubtext: {
+    fontSize: 11,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+  },
+  personalFundCard: {
+    marginBottom: 20,
+    padding: 16,
+    backgroundColor: 'rgba(16, 185, 129, 0.05)',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.15)',
+  },
+  personalFundHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  personalFundIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  personalFundInfo: {
+    flex: 1,
+  },
+  personalFundLabel: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 4,
+  },
+  personalFundAmount: {
+    fontSize: 22,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#10B981',
+    marginBottom: 2,
+  },
+  personalFundSubtext: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  fundTypeSection: {
+    marginBottom: 20,
+  },
+  fundTypeTitle: {
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 4,
+  },
+  fundTypeSubtitle: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    marginBottom: 12,
   },
   fundItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    flex: 1,
-    minWidth: '45%',
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
+    justifyContent: 'space-between',
     padding: 12,
+    marginBottom: 8,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.08)',
   },
-  fundIcon: {
-    width: 32,
-    height: 32,
+  fundItemLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+  },
+  fundItemIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fundItemInfo: {
+    flex: 1,
+  },
+  fundItemName: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 2,
+  },
+  fundItemAmount: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  fundItemAction: {
+    padding: 4,
+  },
+  lockedHelperText: {
+    marginTop: 12,
+    fontSize: 12,
+    color: '#637050',
+    fontFamily: 'InstrumentSerif-Regular',
+    lineHeight: 18,
+  },
+  fundDetailList: {
+    marginTop: 16,
+    gap: 12,
+  },
+  fundDetailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
     borderRadius: 16,
+    backgroundColor: '#F7F9F2',
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+  },
+  fundDetailLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    gap: 12,
+  },
+  fundDetailIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fundDetailCopy: {
+    flexShrink: 1,
+  },
+  fundDetailName: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
+  },
+  fundDetailMeta: {
+    marginTop: 2,
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
+  },
+  fundDetailRight: {
+    alignItems: 'flex-end',
+    gap: 6,
+  },
+  fundDetailAmount: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
+  },
+  fundDetailAction: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: '#EDE4FF',
+  },
+  fundDetailActionText: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#5F3DC4',
+  },
+  fundChip: {
+    flex: 1,
+    borderRadius: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+  },
+  fundChipLabel: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    marginBottom: 6,
+  },
+  fundChipValue: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  transactionsCard: {
+    marginHorizontal: 20,
+    marginTop: 20,
+    padding: 20,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: '#EDF1E7',
+  },
+  transactionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#EEF2E4',
+  },
+  transactionIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: '#E8F0DC',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  transactionInfo: {
+    flex: 1,
+  },
+  transactionName: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
+  },
+  transactionDate: {
+    marginTop: 2,
+    fontSize: 12,
+    color: '#7C8C6B',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  transactionAmount: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  viewAllButton: {
+    marginTop: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-end',
+    gap: 6,
+  },
+  viewAllText: {
+    fontSize: 13,
+    color: '#4F6F3E',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  linkedSection: {
+    marginHorizontal: 20,
+    marginTop: 20,
+    padding: 20,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: '#EDF1E7',
+  },
+  linkedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#EEF2E4',
+  },
+  linkedIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    backgroundColor: '#E8F0DC',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  linkedInfo: {
+    flex: 1,
+  },
+  linkedTitle: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
+  },
+  linkedSubtitle: {
+    marginTop: 2,
+    fontSize: 12,
+    color: '#7C8C6B',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  addLinkedButton: {
+    marginTop: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+  },
+  addLinkedText: {
+    fontSize: 13,
+    color: '#4F6F3E',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  emptyState: {
+    paddingVertical: 24,
+    alignItems: 'center',
+    gap: 8,
+  },
+  emptyStateText: {
+    fontSize: 13,
+    color: '#7C8C6B',
+    fontFamily: 'InstrumentSerif-Regular',
+    textAlign: 'center',
+  },
+  loadingContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+  },
+  loadingText: {
+    fontSize: 14,
+    color: '#6F8060',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  goalsSummaryCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    padding: 20,
+    marginTop: 16,
+    marginBottom: 16,
+    marginHorizontal: 20,
+  },
+  goalsSummaryHeader: {
+    marginBottom: 16,
+  },
+  goalsStatsRow: {
+    flexDirection: 'row',
+    gap: 16,
+    marginBottom: 16,
+  },
+  goalsStatItem: {
+    flex: 1,
+    backgroundColor: '#F7F9F2',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+  },
+  goalsStatLabel: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
+    marginBottom: 8,
+  },
+  goalsStatValue: {
+    fontSize: 24,
+    fontFamily: 'Archivo Black',
+    color: '#0E401C',
+    marginBottom: 4,
+    letterSpacing: 0.5,
+  },
+  goalsStatAmount: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#4F6F3E',
+  },
+  goalsProgressBar: {
+    height: 8,
+    backgroundColor: '#E5ECD6',
+    borderRadius: 4,
+    marginBottom: 8,
+    overflow: 'hidden',
+  },
+  goalsProgressFill: {
+    height: '100%',
+    backgroundColor: '#4F6F3E',
+    borderRadius: 4,
+  },
+  goalsProgressText: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
+    textAlign: 'center',
+  },
+  goalsListCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    padding: 20,
+    marginBottom: 16,
+    marginHorizontal: 20,
+  },
+  goalItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    backgroundColor: '#F7F9F2',
+    borderRadius: 12,
+    marginBottom: 8,
+    gap: 12,
+  },
+  goalItemIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 8,
   },
-  fundInfo: {
+  goalItemInfo: {
     flex: 1,
+    gap: 4,
   },
-  fundLabel: {
-    fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.7)',
-    marginBottom: 4,
-  },
-  fundAmount: {
+  goalItemTitle: {
     fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
   },
-  detailedBreakdown: {
-    marginTop: 12,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.1)',
+  goalItemProgress: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
   },
-  detailedSection: {
-    marginBottom: 8,
-  },
-  detailedTitle: {
+  completedSectionTitle: {
     fontSize: 14,
-    fontWeight: '600',
-    color: 'rgba(255, 255, 255, 0.8)',
+    fontFamily: 'Archivo Black',
+    color: '#0E401C',
+    marginTop: 16,
     marginBottom: 8,
+    letterSpacing: 0.3,
   },
-  detailedRow: {
+  addGoalButton: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 4,
-    paddingLeft: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    marginTop: 12,
+    backgroundColor: '#F7F9F2',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    gap: 8,
   },
-  detailedLabel: {
-    fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.6)',
-  },
-  detailedValue: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: 'white',
+  addGoalText: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#4F6F3E',
   },
 });

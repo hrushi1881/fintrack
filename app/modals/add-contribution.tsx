@@ -1,18 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, TextInput, Modal, Alert } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useNotification } from '@/contexts/NotificationContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
-import { useLiabilities } from '@/contexts/LiabilitiesContext';
-import FundPicker, { FundBucket } from '@/components/FundPicker';
-import { supabase } from '@/lib/supabase';
-import { addContributionToGoal, AddContributionData, checkMilestoneAchievements, checkGoalCompletion } from '@/utils/goals';
+import InlineAccountSelector from '@/components/InlineAccountSelector';
+import { checkMilestoneAchievements, checkGoalCompletion } from '@/utils/goals';
 import { createCategory } from '@/utils/categories';
 import { formatCurrencyAmount } from '@/utils/currency';
-import { Goal } from '@/types';
+import { Goal, Account } from '@/types';
+import { supabase } from '@/lib/supabase';
 
 interface AddContributionModalProps {
   visible: boolean;
@@ -30,37 +28,106 @@ export default function AddContributionModal({
   const { user } = useAuth();
   const { currency } = useSettings();
   const { showNotification } = useNotification();
-  const { accounts, refreshGoals, refreshAccounts, refreshTransactions } = useRealtimeData();
+  const { accounts, refreshGoals, refreshAccounts, refreshTransactions, globalRefresh } = useRealtimeData();
   
   const [amount, setAmount] = useState('');
   const [sourceAccountId, setSourceAccountId] = useState('');
+  const [destinationAccountId, setDestinationAccountId] = useState('');
   const [description, setDescription] = useState('');
   const [loading, setLoading] = useState(false);
-  const [selectedFundBucket, setSelectedFundBucket] = useState<FundBucket | null>(null);
-  const [showFundPicker, setShowFundPicker] = useState(false);
 
-  // Filter out Goals Savings Account from source accounts
-  const availableAccounts = accounts.filter(account => account.type !== 'goals_savings');
-
-  useEffect(() => {
-    if (visible && availableAccounts.length > 0 && !sourceAccountId) {
-      setSourceAccountId(availableAccounts[0].id);
+  // Filter accounts - exclude liability and Goals Savings accounts from transactions
+  // Goals Savings account is only for displaying aggregate statistics
+  // For currency matching: prefer matching currency, but show all if none match
+  const sourceAccounts = useMemo(() => {
+    if (!accounts || accounts.length === 0) {
+      console.log('⚠️ add-contribution: No accounts available');
+      return [];
     }
-  }, [visible, availableAccounts, sourceAccountId]);
-
-  // Reset fund bucket when source account changes
-  useEffect(() => {
-    if (sourceAccountId && selectedFundBucket) {
-      setSelectedFundBucket(null);
+    if (!goal) {
+      console.log('⚠️ add-contribution: No goal provided');
+      return [];
     }
-  }, [sourceAccountId]);
+    
+    const filtered = accounts.filter(
+      (account) => 
+        account.type !== 'liability' && 
+        account.type !== 'goals_savings' &&
+        (account.is_active === true || account.is_active === undefined || account.is_active === null)
+    );
+    
+    // Filter by currency if goal has currency, otherwise show all
+    const currencyMatched = goal.currency 
+      ? filtered.filter((acc) => acc.currency === goal.currency)
+      : filtered;
 
-  // Auto-show fund picker when account is selected
-  useEffect(() => {
-    if (visible && sourceAccountId && !selectedFundBucket) {
-      setShowFundPicker(true);
+    // If no currency matches, show all filtered accounts (user can still select)
+    const result = currencyMatched.length > 0 ? currencyMatched : filtered;
+    
+    console.log('✅ add-contribution sourceAccounts:', result.length, 'from', accounts.length, 'total (goal currency:', goal.currency, ')');
+    return result;
+  }, [accounts, goal]);
+  
+  const destinationAccounts = useMemo(() => {
+    if (!accounts || accounts.length === 0) {
+      console.log('⚠️ add-contribution: No accounts available for destination');
+      return [];
     }
-  }, [visible, sourceAccountId]);
+    if (!goal) {
+      console.log('⚠️ add-contribution: No goal provided for destination');
+      return [];
+    }
+    
+    const filtered = accounts.filter(
+      (account) => 
+        account.type !== 'liability' && 
+        account.type !== 'goals_savings' &&
+        (account.is_active === true || account.is_active === undefined || account.is_active === null)
+    );
+    
+    // Filter by currency if goal has currency, otherwise show all
+    const currencyMatched = goal.currency 
+      ? filtered.filter((acc) => acc.currency === goal.currency)
+      : filtered;
+    
+    // If no currency matches, show all filtered accounts (user can still select)
+    const result = currencyMatched.length > 0 ? currencyMatched : filtered;
+    
+    console.log('✅ add-contribution destinationAccounts:', result.length, 'from', accounts.length, 'total (goal currency:', goal.currency, ')');
+    return result;
+  }, [accounts, goal]);
+
+  // Refresh accounts when modal opens
+  useEffect(() => {
+    if (visible) {
+      refreshAccounts();
+    }
+  }, [visible, refreshAccounts]);
+
+  // Initialize accounts when modal opens
+  useEffect(() => {
+    if (visible && goal) {
+      if (sourceAccounts.length > 0 && !sourceAccountId) {
+        const firstAccountId = sourceAccounts[0].id;
+        setSourceAccountId(firstAccountId);
+        // Auto-select same account for destination (user can change it)
+        // This allows saving goal funds in the same account they're paying from
+        if (!destinationAccountId) {
+          setDestinationAccountId(firstAccountId);
+        }
+      }
+      // If source is already selected but destination is not, auto-select same account
+      if (sourceAccountId && !destinationAccountId && destinationAccounts.some(acc => acc.id === sourceAccountId)) {
+        setDestinationAccountId(sourceAccountId);
+      }
+      // Fallback: if no source selected yet, just set destination to first available
+      if (!sourceAccountId && destinationAccounts.length > 0 && !destinationAccountId) {
+        const savingsAccount = destinationAccounts.find((acc) => acc.type === 'bank' || acc.type === 'wallet');
+        setDestinationAccountId(savingsAccount?.id || destinationAccounts[0].id);
+      }
+    }
+  }, [visible, sourceAccounts, destinationAccounts, goal, sourceAccountId, destinationAccountId]);
+
 
   const handleSubmit = async () => {
     if (!user || !goal) return;
@@ -76,42 +143,39 @@ export default function AddContributionModal({
       return;
     }
 
-    const sourceAccount = availableAccounts.find(acc => acc.id === sourceAccountId);
-    if (!sourceAccount) {
-      Alert.alert('Error', 'Source account not found');
+    if (!destinationAccountId) {
+      Alert.alert('Error', 'Please select a destination account');
       return;
     }
 
-    // We rely on bucket-aware deduction; base balance check is not sufficient when using liability/goal buckets
+    // Allow same account - user can save goal funds in the same account they're paying from
 
-    if (!selectedFundBucket) {
-      Alert.alert('Error', 'Please select a fund source');
-      return;
-    }
+    // Contribution always uses personal fund from source account
+    // No fund selection needed - always defaults to personal fund
 
     setLoading(true);
     try {
-      // Get Goals Savings Account
-      const { data: goalsAccount, error: goalsAccErr } = await supabase
-        .from('accounts')
-        .select('*')
-        .eq('user_id', user.id)
-        .eq('type', 'goals_savings')
-        .single();
-      if (goalsAccErr || !goalsAccount) throw new Error('Goals Savings Account not found');
+      // Use the updated addContributionToGoal function
+      // Note: The function handles spending from source account and receiving into destination
+      // But we need to handle the fund bucket selection ourselves since the function uses personal bucket
+      // For now, we'll use the utility function which handles the RPC calls
 
       // Get Goal Savings category; create if missing
-      let goalCategoryId: string | null = null;
       const { data: goalCategory, error: categoryError } = await supabase
         .from('categories')
-        .select('id')
+        .select('id, name')
         .eq('user_id', user.id)
         .eq('name', 'Goal Savings')
         .contains('activity_types', ['goal'])
         .eq('is_deleted', false)
         .single();
+
+      let goalCategoryId: string | null = null;
+      let categoryName: string = 'Goal Savings';
+
       if (goalCategory?.id) {
         goalCategoryId = goalCategory.id;
+        categoryName = goalCategory.name;
       } else {
         try {
           const created = await createCategory({
@@ -121,111 +185,93 @@ export default function AddContributionModal({
             activity_types: ['goal'] as any,
           });
           goalCategoryId = created.id;
+          categoryName = created.name;
         } catch (e) {
           throw new Error('Goal Savings category not found');
         }
       }
 
-      // 1) Deduct from selected bucket using spend_from_account_bucket
+      // 1) Spend from source account's personal fund (always)
+      // Contributions always come from personal funds - no fund selection needed
       const bucketParam = {
-        type: selectedFundBucket.type,
-        id: selectedFundBucket.type !== 'personal' ? selectedFundBucket.id : null,
+        type: 'personal',
+        id: null,
       };
 
-      const { data: sourceTxn, error: bucketErr } = await supabase.rpc('spend_from_account_bucket', {
+      const { data: sourceTxn, error: spendError } = await supabase.rpc('spend_from_account_bucket', {
         p_user_id: user.id,
         p_account_id: sourceAccountId,
         p_bucket: bucketParam,
         p_amount: amountValue,
-        p_category: goalCategoryId,
+        p_category: categoryName, // Category name is expected
         p_description: description.trim() || `Contribution to ${goal.title}`,
         p_date: new Date().toISOString().split('T')[0],
         p_currency: goal.currency,
       });
-      if (bucketErr) throw bucketErr;
+      if (spendError) throw spendError;
 
-      // 2) Receive into Goals Savings account as goal bucket using RPC
-      // Get category name for the RPC (it expects category name, not ID)
-      const { data: goalCategoryData } = await supabase
-        .from('categories')
-        .select('name')
-        .eq('id', goalCategoryId)
-        .single();
-      
-      const categoryName = goalCategoryData?.name || 'Goal Savings';
-
+      // 2) Receive into destination account as goal bucket
       const { error: receiveError } = await supabase.rpc('receive_to_account_bucket', {
         p_user_id: user.id,
-        p_account_id: goalsAccount.id,
+        p_account_id: destinationAccountId,
         p_bucket_type: 'goal',
         p_bucket_id: goal.id,
         p_amount: amountValue,
         p_category: categoryName,
         p_description: description.trim() || `Contribution to ${goal.title}`,
         p_date: new Date().toISOString().split('T')[0],
-        p_notes: `Contribution from ${accounts.find(acc => acc.id === sourceAccountId)?.name || 'account'}`,
         p_currency: goal.currency,
       });
       if (receiveError) throw receiveError;
 
-      // 3) Get the transaction ID from the source transaction (spend_from_account_bucket result)
-      // The receive_to_account_bucket creates a transaction internally, but we need to link it
-      // Let's fetch the most recent transaction for this goal contribution
-      const { data: recentTransactions, error: fetchTxnError } = await supabase
-        .from('transactions')
-        .select('id')
-        .eq('account_id', goalsAccount.id)
-        .eq('type', 'income')
-        .order('created_at', { ascending: false })
-        .limit(1)
+      // 3) Update goal current amount (sum all goal funds)
+      const { data: goalFunds } = await supabase
+        .from('account_funds')
+        .select('balance')
+        .eq('type', 'goal')
+        .or(`reference_id.eq.${goal.id},metadata->>goal_id.eq.${goal.id}`);
+
+      const totalGoalAmount = goalFunds?.reduce((sum, fund) => {
+        const balance = typeof fund.balance === 'string' ? parseFloat(fund.balance) : fund.balance || 0;
+        return sum + balance;
+      }, 0) || (goal.current_amount + amountValue);
+
+      const isAchieved = totalGoalAmount >= goal.target_amount;
+      const { data: updatedGoal, error: goalUpdateError } = await supabase
+        .from('goals')
+        .update({
+          current_amount: totalGoalAmount,
+          is_achieved: isAchieved,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', goal.id)
+        .select()
         .single();
       
-      if (fetchTxnError) {
-        console.warn('Could not fetch transaction ID for goal contribution:', fetchTxnError);
-      }
+      if (goalUpdateError) throw goalUpdateError;
 
-      // 4) Create goal contribution record (link to the expense transaction from source account)
+      // 4) Create goal contribution record (with destination_account_id)
       const sourceTransactionId = (sourceTxn as any)?.id || (sourceTxn as any)?.transaction_id || null;
       const { error: contributionError } = await supabase
         .from('goal_contributions')
         .insert({
           goal_id: goal.id,
-          transaction_id: sourceTransactionId || recentTransactions?.id,
+          transaction_id: sourceTransactionId,
           amount: amountValue,
           source_account_id: sourceAccountId,
+          destination_account_id: destinationAccountId, // Account where goal funds are stored
           contribution_type: 'manual',
         });
       if (contributionError) throw contributionError;
       
-      // Refresh data to show updated goal progress and account balances
-      await Promise.all([
-        refreshGoals(),
-        refreshAccounts(),
-        refreshTransactions(),
-      ]);
-      
-      // Small delay to ensure database has committed and state has updated
-      await new Promise(resolve => setTimeout(resolve, 200));
-
-      // Check if goal is now completed
-      try {
-        const { isCompleted } = await checkGoalCompletion(goal.id);
-        if (isCompleted) {
-          // Goal completed! The celebration will be handled by the goal detail page
-          console.log('Goal completed!', goal.title);
-        }
-      } catch (error) {
-        console.error('Error checking goal completion:', error);
-      }
-      
-      const progress = Math.round((updatedGoal.current_amount / updatedGoal.target_amount) * 100);
+      // Refresh data
+      await globalRefresh();
       
       // Check for milestone achievements
       const milestones = checkMilestoneAchievements(updatedGoal.current_amount, updatedGoal.target_amount);
-      const newlyAchieved = milestones.filter(m => m.achieved && 
-        checkMilestoneAchievements(goal.current_amount, goal.target_amount).find(
-          prev => prev.milestone === m.milestone
-        )?.achieved === false
+      const previousMilestones = checkMilestoneAchievements(goal.current_amount, goal.target_amount);
+      const newlyAchieved = milestones.filter(
+        (m) => m.achieved && !previousMilestones.find((p) => p.milestone === m.milestone)?.achieved
       );
       
       if (newlyAchieved.length > 0) {
@@ -238,6 +284,7 @@ export default function AddContributionModal({
           description: `${latestMilestone.milestone} for "${goal.title}"!`,
         });
       } else {
+        const progress = Math.round((updatedGoal.current_amount / updatedGoal.target_amount) * 100);
         showNotification({
           type: 'success',
           title: 'Contribution Added',
@@ -247,16 +294,27 @@ export default function AddContributionModal({
         });
       }
 
+      // Check if goal is completed
+      try {
+        const { isCompleted } = await checkGoalCompletion(goal.id);
+        if (isCompleted) {
+          console.log('Goal completed!', goal.title);
+        }
+      } catch (error) {
+        console.error('Error checking goal completion:', error);
+      }
+
       onSuccess?.();
       onClose();
       
       // Reset form
       setAmount('');
       setSourceAccountId('');
+      setDestinationAccountId('');
       setDescription('');
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error adding contribution:', error);
-      Alert.alert('Error', 'Failed to add contribution. Please try again.');
+      Alert.alert('Error', error.message || 'Failed to add contribution. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -266,22 +324,15 @@ export default function AddContributionModal({
     return formatCurrencyAmount(amount, currency);
   };
 
-  const selectedAccount = availableAccounts.find(acc => acc.id === sourceAccountId);
-  
-  // Styles for selected fund info
-
   return (
     <Modal
       visible={visible}
       animationType="slide"
       presentationStyle="pageSheet"
-    >
-      <LinearGradient
-        colors={['#99D795', '#99D795', '#99D795']}
-        style={styles.container}
+      onRequestClose={onClose}
       >
         <SafeAreaView style={styles.safeArea}>
-          <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
+        <View style={styles.container}>
             {/* Header */}
             <View style={styles.header}>
               <TouchableOpacity style={styles.cancelButton} onPress={onClose}>
@@ -297,6 +348,11 @@ export default function AddContributionModal({
               </TouchableOpacity>
             </View>
 
+          <ScrollView
+            style={styles.scrollView}
+            contentContainerStyle={styles.scrollContent}
+            showsVerticalScrollIndicator={false}
+          >
             {/* Goal Info */}
             {goal && (
               <View style={styles.goalInfo}>
@@ -312,140 +368,75 @@ export default function AddContributionModal({
               </View>
             )}
 
-            {/* Form */}
-            <View style={styles.form}>
-              {/* Amount */}
-              <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Amount</Text>
-                <View style={styles.amountInputContainer}>
-                  <Text style={styles.currencySymbol}>
-                    {formatCurrencyAmount(0, currency).charAt(0)}
-                  </Text>
+            {/* Amount Input */}
+            <View style={styles.amountSection}>
+              <Text style={styles.amountLabel}>Amount</Text>
+              <View style={styles.amountInputWrapper}>
+                <Text style={styles.currencySymbol}>$</Text>
                   <TextInput
                     style={styles.amountInput}
                     value={amount}
                     onChangeText={setAmount}
-                    placeholder="0"
+                  placeholder="0.00"
                     placeholderTextColor="#9CA3AF"
-                    keyboardType="numeric"
-                  />
-                </View>
-                {amount && parseFloat(amount) > 0 && (
-                  <Text style={styles.amountPreview}>
-                    {formatCurrency(parseFloat(amount))}
-                  </Text>
-                )}
+                  keyboardType="decimal-pad"
+                  autoFocus={!amount}
+                />
               </View>
-
-              {/* Source Account */}
-              <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>From Account</Text>
-                <View style={styles.accountSelector}>
-                  {availableAccounts.map((account) => (
-                    <TouchableOpacity
-                      key={account.id}
-                      style={[
-                        styles.accountOption,
-                        sourceAccountId === account.id && styles.accountOptionSelected
-                      ]}
-                      onPress={() => {
-                        setSourceAccountId(account.id);
-                        setShowFundPicker(true);
-                      }}
-                    >
-                      <View style={styles.accountInfo}>
-                        <View style={[styles.accountIcon, { backgroundColor: account.color }]}>
-                          <Ionicons name={account.icon as any} size={20} color="white" />
                         </View>
-                        <View style={styles.accountDetails}>
-                          <Text style={styles.accountName}>{account.name}</Text>
-                          <Text style={styles.accountBalance}>
-                            Balance: {formatCurrency(account.balance)}
+
+            {/* Source Account Selection - Pays from Personal Fund */}
+            <InlineAccountSelector
+              accounts={sourceAccounts}
+              selectedAccountId={sourceAccountId}
+              onSelect={(account) => setSourceAccountId(account.id)}
+              label="Pay From Account"
+              showBalance={true}
+            />
+            {sourceAccountId && (
+              <View style={styles.infoBanner}>
+                <Ionicons name="information-circle-outline" size={16} color="#4F6F3E" />
+                <Text style={styles.infoText}>
+                  Money will be deducted from Personal Funds in this account
                           </Text>
                         </View>
-                      </View>
-                      {sourceAccountId === account.id && (
-                        <Ionicons name="checkmark-circle" size={20} color="#10B981" />
-                      )}
-                    </TouchableOpacity>
-                  ))}
-                </View>
-                {sourceAccountId && selectedFundBucket && (
-                  <View style={styles.selectedFundInfo}>
-                    <Ionicons 
-                      name={
-                        selectedFundBucket.type === 'personal' ? 'wallet' :
-                        selectedFundBucket.type === 'liability' ? 'card' :
-                        'flag'
-                      } 
-                      size={16} 
-                      color="#10B981" 
-                    />
-                    <Text style={styles.selectedFundText}>
-                      Using: {selectedFundBucket.name}
+            )}
+
+            {/* Destination Account Selection - Stores as Goal Fund */}
+            <InlineAccountSelector
+              accounts={destinationAccounts}
+              selectedAccountId={destinationAccountId}
+              onSelect={(account) => setDestinationAccountId(account.id)}
+              label="Store In Account"
+              showBalance={true}
+            />
+            {destinationAccountId && (
+              <View style={styles.infoBanner}>
+                <Ionicons name="lock-closed-outline" size={16} color="#4F6F3E" />
+                <Text style={styles.infoText}>
+                  {sourceAccountId === destinationAccountId 
+                    ? 'Money will be deducted from Personal Funds and stored as locked Goal Funds in this same account'
+                    : 'Money will be stored as locked Goal Funds in this account'}
                     </Text>
-                    <TouchableOpacity onPress={() => setShowFundPicker(true)}>
-                      <Text style={styles.changeFundText}>Change</Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
               </View>
+            )}
 
               {/* Description */}
-              <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Note (Optional)</Text>
+            <View style={styles.descriptionSection}>
+              <Text style={styles.descriptionLabel}>Note (Optional)</Text>
                 <TextInput
-                  style={[styles.textInput, styles.multilineInput]}
+                style={styles.descriptionInput}
                   value={description}
                   onChangeText={setDescription}
                   placeholder="Add a note about this contribution..."
                   placeholderTextColor="#9CA3AF"
                   multiline
-                  numberOfLines={2}
+                numberOfLines={3}
                 />
-              </View>
-
-              {/* Preview */}
-              {amount && sourceAccountId && selectedAccount && (
-                <View style={styles.previewContainer}>
-                  <Text style={styles.previewTitle}>Preview</Text>
-                  <View style={styles.previewCard}>
-                    <View style={styles.previewRow}>
-                      <Text style={styles.previewLabel}>Transfer</Text>
-                      <Text style={styles.previewValue}>
-                        {formatCurrency(parseFloat(amount))}
-                      </Text>
-                    </View>
-                    <View style={styles.previewRow}>
-                      <Text style={styles.previewLabel}>From</Text>
-                      <Text style={styles.previewValue}>{selectedAccount.name}</Text>
-                    </View>
-                    <View style={styles.previewRow}>
-                      <Text style={styles.previewLabel}>To</Text>
-                      <Text style={styles.previewValue}>Goals Savings</Text>
-                    </View>
-                    <View style={styles.previewRow}>
-                      <Text style={styles.previewLabel}>For</Text>
-                      <Text style={styles.previewValue}>{goal?.title}</Text>
-                    </View>
-                  </View>
-                </View>
-              )}
             </View>
           </ScrollView>
+        </View>
         </SafeAreaView>
-        {/* FundPicker Modal */}
-        <FundPicker
-          visible={showFundPicker}
-          onClose={() => setShowFundPicker(false)}
-          accountId={sourceAccountId}
-          amount={amount ? parseFloat(amount) : 0}
-          onSelect={(bucket) => {
-            setSelectedFundBucket(bucket);
-            setShowFundPicker(false);
-          }}
-        />
-      </LinearGradient>
     </Modal>
   );
 }
@@ -453,56 +444,68 @@ export default function AddContributionModal({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   scrollView: {
     flex: 1,
+  },
+  scrollContent: {
     paddingHorizontal: 20,
+    paddingBottom: 32,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: 20,
-    paddingBottom: 30,
+    paddingTop: 16,
+    paddingBottom: 16,
+    paddingHorizontal: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5E7EB',
   },
   cancelButton: {
     paddingVertical: 8,
-    paddingHorizontal: 16,
+    paddingHorizontal: 4,
   },
   cancelText: {
     fontSize: 16,
-    color: 'white',
-    fontWeight: '500',
+    color: '#4F6F3E',
+    fontFamily: 'Poppins-SemiBold',
   },
   headerTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
+    fontSize: 20,
+    fontFamily: 'Archivo Black',
+    color: '#0E401C',
+    letterSpacing: 0.5,
   },
   addButton: {
-    backgroundColor: '#10B981',
+    backgroundColor: '#4F6F3E',
     paddingVertical: 8,
     paddingHorizontal: 16,
     borderRadius: 8,
   },
   addButtonDisabled: {
-    backgroundColor: '#6B7280',
+    backgroundColor: '#9CA3AF',
   },
   addText: {
     fontSize: 16,
-    color: 'white',
-    fontWeight: '600',
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-SemiBold',
   },
   goalInfo: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
+    backgroundColor: '#F7F9F2',
+    borderRadius: 16,
     padding: 16,
+    marginTop: 16,
     marginBottom: 24,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
   },
   goalIcon: {
     width: 48,
@@ -510,168 +513,158 @@ const styles = StyleSheet.create({
     borderRadius: 24,
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 16,
+    marginRight: 12,
   },
   goalDetails: {
     flex: 1,
   },
   goalTitle: {
     fontSize: 16,
-    fontWeight: 'bold',
-    color: 'white',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#0E401C',
     marginBottom: 4,
   },
   goalProgress: {
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
   },
-  form: {
-    flex: 1,
+  amountSection: {
+    marginBottom: 32,
+    alignItems: 'center',
+    width: '100%',
   },
-  inputGroup: {
-    marginBottom: 24,
+  amountLabel: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#9CA3AF',
+    marginBottom: 12,
+    textAlign: 'center',
+    letterSpacing: 0.3,
   },
-  inputLabel: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginBottom: 8,
-  },
-  amountInputContainer: {
+  amountInputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    paddingHorizontal: 16,
+    justifyContent: 'center',
+    width: '100%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
+    borderColor: '#E5E7EB',
+    paddingHorizontal: 24,
+    paddingVertical: 24,
+    minHeight: 100,
   },
   currencySymbol: {
-    fontSize: 18,
-    color: 'white',
-    fontWeight: '600',
+    fontSize: 32,
+    fontFamily: 'Poppins-Regular',
+    color: '#9CA3AF',
     marginRight: 8,
   },
   amountInput: {
     flex: 1,
-    fontSize: 18,
-    color: 'white',
-    paddingVertical: 16,
-  },
-  amountPreview: {
-    fontSize: 14,
-    color: '#9CA3AF',
-    marginTop: 4,
+    fontSize: 40,
+    fontFamily: 'Poppins-Bold',
+    color: '#1F2937',
     textAlign: 'center',
+    paddingVertical: 0,
+    minWidth: 120,
   },
-  accountSelector: {
-    gap: 8,
+  amountInputPlaceholder: {
+    color: '#9CA3AF',
   },
-  accountOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
+  accountsSection: {
+    marginBottom: 24,
+  },
+  fundSourceSection: {
+    marginBottom: 24,
+  },
+  selectedFundCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
-  },
-  accountOptionSelected: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    borderColor: '#10B981',
-  },
-  accountInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  accountIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  accountDetails: {
-    flex: 1,
-  },
-  accountName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginBottom: 2,
-  },
-  accountBalance: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
-  },
-  accountDetailText: {
-    fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.6)',
-    marginTop: 2,
-  },
-  textInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
+    borderColor: '#E5ECD6',
     padding: 16,
-    fontSize: 16,
-    color: 'white',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
-  },
-  multilineInput: {
-    height: 60,
-    textAlignVertical: 'top',
-  },
-  previewContainer: {
-    marginTop: 8,
-  },
-  previewTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginBottom: 12,
-  },
-  previewCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-  },
-  previewRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  previewLabel: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
-  },
-  previewValue: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: 'white',
   },
   selectedFundInfo: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 12,
-    padding: 12,
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-    borderRadius: 8,
-    gap: 8,
+    gap: 12,
   },
-  selectedFundText: {
+  selectedFundDetails: {
     flex: 1,
-    fontSize: 14,
-    color: '#10B981',
-    fontWeight: '600',
+    gap: 4,
   },
-  changeFundText: {
+  fundSourceLabel: {
     fontSize: 14,
-    color: '#10B981',
-    textDecorationLine: 'underline',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
+    marginBottom: 8,
+  },
+  selectedFundName: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
+  },
+  selectedFundAmount: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
+  },
+  selectFundButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#F7F9F2',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    padding: 16,
+    gap: 12,
+  },
+  selectFundText: {
+    flex: 1,
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#4F6F3E',
+  },
+  descriptionSection: {
+    marginBottom: 24,
+  },
+  descriptionLabel: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
+    marginBottom: 8,
+  },
+  descriptionInput: {
+    backgroundColor: '#F7F9F2',
+    borderRadius: 12,
+    padding: 16,
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    minHeight: 80,
+    textAlignVertical: 'top',
+  },
+  infoBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#F7F9F2',
+    borderRadius: 12,
+    padding: 12,
+    marginTop: -8,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+  },
+  infoText: {
+    flex: 1,
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
   },
 });

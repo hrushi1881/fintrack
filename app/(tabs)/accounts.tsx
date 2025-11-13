@@ -1,38 +1,24 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, Alert } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
-import { useAuth } from '@/contexts/AuthContext';
-import { useBackgroundMode } from '@/contexts/BackgroundModeContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { useSettings } from '@/contexts/SettingsContext';
 import { formatCurrencyAmount } from '@/utils/currency';
 import AddAccountModal from '../modals/add-account';
-import GlassmorphCard from '@/components/GlassmorphCard';
-import FinancialCard from '@/components/FinancialCard';
-import IOSGradientBackground from '@/components/iOSGradientBackground';
-import { theme, BACKGROUND_MODES } from '@/theme';
-
-interface Account {
-  id: string;
-  name: string;
-  type: string;
-  balance: number;
-  color: string;
-  icon: string;
-  description?: string;
-  include_in_totals: boolean;
-}
+import AddOrganizationModal from '../modals/add-organization';
+import { useOrganizations } from '@/contexts/OrganizationsContext';
 
 export default function AccountsScreen() {
-  const { user } = useAuth();
-  const { backgroundMode } = useBackgroundMode();
   const { accounts, totalBalance, loading, refreshAccounts } = useRealtimeData();
   const { currency } = useSettings();
-  const [addAccountModalVisible, setAddAccountModalVisible] = useState(false);
+  const { organizations, organizationsWithAccounts, createOrganization, defaultOrganizationId } = useOrganizations();
 
-  // Refresh accounts when screen comes into focus to ensure latest balances
+  const [addAccountModalVisible, setAddAccountModalVisible] = useState(false);
+  const [addOrganizationModalVisible, setAddOrganizationModalVisible] = useState(false);
+  const [expandedOrganizations, setExpandedOrganizations] = useState<Record<string, boolean>>({});
+  const [selectedOrganizationId, setSelectedOrganizationId] = useState<string | undefined>(undefined);
+
   useFocusEffect(
     React.useCallback(() => {
       refreshAccounts().catch(console.error);
@@ -43,389 +29,435 @@ export default function AccountsScreen() {
     return formatCurrencyAmount(amount, currency);
   };
 
-  const getAccountTypeDisplay = (type: string) => {
-    return type.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
+  const organizationChoices = useMemo(() => {
+    if (!organizations) return [];
+    const defaults: Array<{ id: string; name: string; currency: string }> = [];
+    const defaultOrg = organizations.find((org) => org.id === defaultOrganizationId);
+    if (defaultOrg) {
+      defaults.push({ id: defaultOrg.id, name: defaultOrg.name, currency: defaultOrg.currency });
+    } else if (defaultOrganizationId) {
+      defaults.push({
+        id: defaultOrganizationId,
+        name: 'Unassigned',
+        currency: currency,
+      });
+    }
+
+    const remaining = organizations
+      .filter((org) => org.id !== defaultOrganizationId)
+      .map((org) => ({ id: org.id, name: org.name, currency: org.currency }));
+
+    return [...defaults, ...remaining];
+  }, [organizations, defaultOrganizationId, currency]);
+
+  const organizationViews = useMemo(() => organizationsWithAccounts, [organizationsWithAccounts]);
+
+  const toggleOrganization = (id: string) => {
+    setExpandedOrganizations((prev) => ({
+      ...prev,
+      [id]: !prev[id],
+    }));
   };
 
-  const renderBackground = () => {
-    if (backgroundMode === BACKGROUND_MODES.IOS_GRADIENT) {
-      return (
-        <IOSGradientBackground gradientType="default" animated={true} shimmer={true}>
-          {renderContent()}
-        </IOSGradientBackground>
-      );
-    } else {
-      return (
-        <LinearGradient
-          colors={['#99D795', '#99D795', '#99D795']}
-          style={styles.container}
-        >
-          {renderContent()}
-        </LinearGradient>
-      );
+  const handleAddAccount = (organizationId?: string) => {
+    setSelectedOrganizationId(organizationId);
+    setAddAccountModalVisible(true);
+  };
+
+  const handleAccountCreated = (_account: any, orgId: string | null) => {
+    if (orgId) {
+      setExpandedOrganizations((prev) => ({ ...prev, [orgId]: true }));
     }
   };
 
-  const renderContent = () => (
-    <>
-    <SafeAreaView style={styles.safeArea}>
-      <ScrollView style={styles.scrollView}>
-        {/* Header */}
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>Your Accounts</Text>
-          <TouchableOpacity 
-            style={styles.addButton}
-            onPress={() => setAddAccountModalVisible(true)}
-          >
-            <Ionicons name="add" size={24} color="white" />
-          </TouchableOpacity>
-        </View>
+  const handleOrganizationCreated = async (values: any) => {
+    try {
+      const newOrg = await createOrganization(values);
+      setExpandedOrganizations((prev) => ({ ...prev, [newOrg.id]: true }));
+      setSelectedOrganizationId(newOrg.id);
+      setAddOrganizationModalVisible(false);
+      setTimeout(() => {
+        setAddAccountModalVisible(true);
+      }, 300);
+    } catch (error: any) {
+      console.error('Unable to create organization', error);
+      const message =
+        (error && typeof error === 'object' && 'message' in error && error.message) ||
+        'Something went wrong while creating the organization.';
+      Alert.alert('Could not create organization', String(message));
+    }
+  };
 
-        {/* Total Balance */}
-        <GlassmorphCard style={styles.totalBalanceCard}>
-          <Text style={styles.totalBalanceLabel}>Total Balance</Text>
-          <Text style={styles.totalBalanceAmount}>{formatCurrency(totalBalance)}</Text>
-        </GlassmorphCard>
-
-          {/* Accounts List */}
-          <View style={styles.accountsList}>
-            {accounts.length > 0 ? (
-              accounts.map((account, index) => {
-                // Special handling for Goals Savings Account
-                if (account.type === 'goals_savings') {
-                  return (
-                    <TouchableOpacity
-                      key={account.id}
-                      style={styles.goalsAccountCard}
-                      onPress={() => router.push(`/account/${account.id}`)}
-                    >
-                      <View style={styles.goalsAccountHeader}>
-                        <View style={[styles.goalsAccountIcon, { backgroundColor: account.color }]}>
-                          <Ionicons name="trophy" size={24} color="white" />
-                        </View>
-                        <View style={styles.goalsAccountInfo}>
-                          <Text style={styles.goalsAccountName}>{account.name}</Text>
-                          <Text style={styles.goalsAccountSubtitle}>Saving for your goals</Text>
-                        </View>
-                        <View style={styles.goalsAccountBalance}>
-                          <Text style={styles.goalsAccountAmount}>
-                            {formatCurrency(account.balance)}
-                          </Text>
-                        </View>
-                      </View>
-                      <View style={styles.goalsAccountFooter}>
-                        <Text style={styles.goalsAccountDescription}>
-                          Tap to view your goals and progress
-                        </Text>
-                        <Ionicons name="arrow-forward" size={16} color="#10B981" />
-                      </View>
-                    </TouchableOpacity>
-                  );
-                }
-
-                // Regular account handling
-                let iconType: 'card' | 'wallet' | 'bank' | 'cash' = 'bank';
-                if (account.type.toLowerCase().includes('card')) iconType = 'card';
-                else if (account.type.toLowerCase().includes('wallet')) iconType = 'wallet';
-                else if (account.type.toLowerCase().includes('cash')) iconType = 'cash';
-                else iconType = 'bank';
-
-                return (
-                  <FinancialCard
-                    key={account.id}
-                    data={{
-                      id: account.id,
-                      name: account.name,
-                      amount: Math.abs(account.balance),
-                      icon: iconType,
-                      backgroundColor: 'rgba(153, 215, 149, 1)',
-                      iconBackgroundColor: '#000',
-                      liabilityFunds: (account as any).liability_funds,
-                      ownFunds: (account as any).own_funds,
-                    }}
-                    onPress={(id) => router.push(`/account/${id}`)}
-                    style={{ marginBottom: index === accounts.length - 1 ? 0 : 12 }}
-                    blurIntensity={10}
-                    cardHeight={100}
-                    borderRadius={25}
-                    iconSize={72}
-                    iconBorderRadius={20}
-                    arrowButtonSize={40}
-                    arrowButtonColor="#000"
-                    arrowColor="#fff"
-                    textColor="#000"
-                    amountColor="#1a1a1a"
-                  />
-                );
-              })
-            ) : (
-              <GlassmorphCard style={styles.emptyAccountsContainer}>
-                <Ionicons name="wallet-outline" size={48} color="rgba(255,255,255,0.5)" />
-                <Text style={styles.emptyAccountsTitle}>No Accounts Yet</Text>
-                <Text style={styles.emptyAccountsDescription}>
-                  Add your first account to start tracking your finances
-                </Text>
-                <TouchableOpacity
-                  style={styles.emptyAddButton}
-                  onPress={() => setAddAccountModalVisible(true)}
-                >
-                  <Text style={styles.emptyAddButtonText}>Add Your First Account</Text>
-                </TouchableOpacity>
-              </GlassmorphCard>
-            )}
-          </View>
-
-          {/* Quick Actions */}
-          <View style={styles.quickActions}>
-            <TouchableOpacity 
-              style={styles.actionButton}
-              onPress={() => setAddAccountModalVisible(true)}
-            >
-              <Ionicons name="add-circle" size={24} color="#10B981" />
-              <Text style={styles.actionText}>Add Account</Text>
-            </TouchableOpacity>
-            <TouchableOpacity 
-              style={styles.actionButton}
-              onPress={() => router.push('/(tabs)/transactions')}
-            >
-              <Ionicons name="swap-horizontal" size={24} color="#3B82F6" />
-              <Text style={styles.actionText}>Transfer</Text>
-            </TouchableOpacity>
-          </View>
-        </ScrollView>
-      </SafeAreaView>
-
-      {/* Add Account Modal */}
-           <AddAccountModal
-             visible={addAccountModalVisible}
-             onClose={() => {
-               setAddAccountModalVisible(false);
-             }}
-             onSuccess={() => {
-               refreshAccounts(); // Refresh accounts after adding
-             }}
-           />
-    </>
+  const selectedOrganization = useMemo(
+    () => (selectedOrganizationId ? organizationViews.find((org) => org.id === selectedOrganizationId) : undefined),
+    [selectedOrganizationId, organizationViews]
   );
 
-  if (loading) {
-    return (
-      <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
-        <SafeAreaView style={styles.safeArea}>
-          <GlassmorphCard style={styles.loadingContainer}>
-            <Text style={styles.loadingText}>Loading accounts...</Text>
-          </GlassmorphCard>
-        </SafeAreaView>
-      </LinearGradient>
-    );
-  }
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <View style={styles.container}>
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+        >
+        <View style={styles.header}>
+            <Text style={styles.title}>Accounts</Text>
+            <View style={styles.headerActions}>
+              <TouchableOpacity
+                style={styles.headerIconButton}
+                onPress={() => setAddOrganizationModalVisible(true)}
+                accessibilityRole="button"
+              >
+                <Ionicons name="business-outline" size={20} color="#0E401C" />
+              </TouchableOpacity>
+          <TouchableOpacity 
+                style={styles.headerIconButton}
+                onPress={() => handleAddAccount(undefined)}
+                accessibilityRole="button"
+          >
+                <Ionicons name="add-outline" size={22} color="#0E401C" />
+          </TouchableOpacity>
+            </View>
+        </View>
 
-  return renderBackground();
+          <View style={styles.netWorthCard}>
+            <Text style={styles.netWorthLabel}>Net Worth</Text>
+            <Text style={styles.netWorthValue}>{formatCurrency(totalBalance)}</Text>
+            <Text style={styles.netWorthSubtext}>Last updated just now</Text>
+          </View>
+
+          <View style={styles.organizationsSection}>
+            {loading ? (
+              <Text style={styles.loadingText}>Loading accounts...</Text>
+            ) : organizationViews.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Ionicons name="wallet-outline" size={48} color="#8BA17B" />
+                <Text style={styles.emptyTitle}>Nothing tracked yet</Text>
+                <Text style={styles.emptyDescription}>
+                  Create an organization to start grouping accounts.
+                </Text>
+                <TouchableOpacity
+                  style={styles.primaryButton}
+                  onPress={() => setAddOrganizationModalVisible(true)}
+                >
+                  <Text style={styles.primaryButtonText}>Add Organization</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              organizationViews.map((org) => {
+                const isExpanded = expandedOrganizations[org.id] ?? true;
+                  return (
+                  <View key={org.id} style={styles.organizationCard}>
+                    <TouchableOpacity
+                      style={styles.organizationHeader}
+                      onPress={() => router.push({ pathname: '/organization/[id]', params: { id: org.id } })}
+                      activeOpacity={0.85}
+                    >
+                      <View style={styles.organizationAvatar}>
+                        <Ionicons name="business-outline" size={22} color="#0E401C" />
+                      </View>
+                      <View style={styles.organizationInfo}>
+                        <Text style={styles.organizationName}>{org.name}</Text>
+                        <Text style={styles.organizationBalance}>{org.formattedBalance}</Text>
+                        <Text style={styles.organizationSubtext}>
+                          {org.accounts.length} {org.accounts.length === 1 ? 'account' : 'accounts'}
+                        </Text>
+                      </View>
+                      <TouchableOpacity onPress={() => toggleOrganization(org.id)} style={styles.expandButton}>
+                        <Ionicons
+                          name={isExpanded ? 'chevron-up' : 'chevron-down'}
+                          size={20}
+                          color="#0E401C"
+                        />
+                      </TouchableOpacity>
+                    </TouchableOpacity>
+
+                    {isExpanded && (
+                      <View style={styles.accountsList}>
+                        {org.accounts.map((account) => {
+                          const accountType = (account as any).type || 'bank';
+                          const isCreditAccount = accountType === 'credit_card' || accountType === 'card' || accountType === 'credit';
+                return (
+                            <TouchableOpacity
+                    key={account.id}
+                              style={styles.accountRow}
+                              onPress={() => router.push(`/account/${account.id}`)}
+                              activeOpacity={0.85}
+                            >
+                              <View style={styles.accountIconWrapper}>
+                                <Ionicons name="card-outline" size={18} color="#0E401C" />
+                              </View>
+                              <View style={styles.accountInfo}>
+                                <Text style={styles.accountName}>{account.name}</Text>
+                                <Text style={styles.accountType}>
+                                  {String(accountType).replace(/_/g, ' ')}
+                                </Text>
+                              </View>
+                              <View style={styles.accountBalanceColumn}>
+                                <Text style={styles.accountBalance}>{formatCurrency(Number(account.balance ?? 0))}</Text>
+                                {isCreditAccount && (account as any).credit_limit ? (
+                                  <Text style={styles.creditUsage}>
+                                    {formatCurrency(Number(account.balance ?? 0))} /
+                                    {formatCurrency(Number((account as any).credit_limit ?? 0))}
+                                  </Text>
+                                ) : null}
+                              </View>
+                            </TouchableOpacity>
+                          );
+                        })}
+
+                        {org.id !== defaultOrganizationId && (
+                <TouchableOpacity
+                            style={styles.addAccountRow}
+                            onPress={() => handleAddAccount(org.id)}
+                          >
+                            <Ionicons name="add" size={18} color="#4F6F3E" />
+                            <Text style={styles.addAccountText}>Add Account</Text>
+                </TouchableOpacity>
+                        )}
+                      </View>
+                    )}
+                  </View>
+                );
+              })
+            )}
+          </View>
+        </ScrollView>
+      </View>
+
+           <AddAccountModal
+             visible={addAccountModalVisible}
+        onClose={() => setAddAccountModalVisible(false)}
+        onSuccess={handleAccountCreated}
+        organizationId={selectedOrganizationId}
+        organizationName={selectedOrganization?.name}
+        organizationOptions={organizationChoices}
+        defaultOrganizationId={defaultOrganizationId}
+      />
+
+      <AddOrganizationModal
+        visible={addOrganizationModalVisible}
+        onClose={() => setAddOrganizationModalVisible(false)}
+        onSubmit={handleOrganizationCreated}
+      />
+        </SafeAreaView>
+  );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
+    position: 'relative',
   },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
-  scrollView: {
-    flex: 1,
+  scrollContent: {
+    paddingBottom: 24,
     paddingHorizontal: 20,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingTop: 20,
-    paddingBottom: 30,
+    paddingTop: 12,
+    marginBottom: 20,
   },
-  headerTitle: {
-    fontSize: 24,
-    color: 'white',
-    fontWeight: 'bold',
+  title: {
+    fontSize: 26,
+    color: '#101010',
+    fontFamily: 'Archivo Black',
   },
-  addButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  headerIconButton: {
+    width: 40,
+    height: 40,
     borderRadius: 12,
-    padding: 12,
+    borderWidth: 1,
+    borderColor: '#DADFD5',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  totalBalanceCard: {
-    backgroundColor: '#000000',
+  netWorthCard: {
+    backgroundColor: '#F3F7ED',
     borderRadius: 20,
     padding: 24,
-    marginBottom: 30,
-    alignItems: 'center',
+    marginBottom: 24,
   },
-  totalBalanceLabel: {
-    fontSize: 16,
-    color: 'white',
-    fontFamily: 'serif',
-    marginBottom: 8,
+  netWorthLabel: {
+    fontSize: 14,
+    color: '#6B7D5D',
+    fontFamily: 'InstrumentSerif-Regular',
   },
-  totalBalanceAmount: {
+  netWorthValue: {
     fontSize: 32,
-    color: 'white',
-    fontFamily: 'serif',
-    fontWeight: 'bold',
+    color: '#101010',
+    marginTop: 8,
+    fontFamily: 'Archivo Black',
   },
-  accountsList: {
-    marginBottom: 30,
+  netWorthSubtext: {
+    fontSize: 12,
+    color: '#6B7D5D',
+    marginTop: 6,
+    fontFamily: 'Poppins-Regular',
   },
-  accountItem: {
-    marginBottom: 12,
+  organizationsSection: {
+    gap: 16,
   },
-  accountItemContent: {
+  organizationCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#EDF1E7',
+    padding: 16,
+    shadowColor: '#1A331F',
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  organizationHeader: {
     flexDirection: 'row',
     alignItems: 'center',
   },
-  accountIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    justifyContent: 'center',
+  organizationAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: '#E7EDDD',
     alignItems: 'center',
-    marginRight: 16,
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  organizationInfo: {
+    flex: 1,
+  },
+  organizationName: {
+    fontSize: 16,
+    color: '#101010',
+    fontFamily: 'Poppins-SemiBold',
+  },
+  organizationBalance: {
+    fontSize: 14,
+    color: '#3B5230',
+    marginTop: 2,
+    fontFamily: 'Poppins-Medium',
+  },
+  organizationSubtext: {
+    fontSize: 12,
+    color: '#6B7D5D',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  expandButton: {
+    padding: 8,
+  },
+  accountsList: {
+    marginTop: 16,
+    gap: 12,
+  },
+  accountRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    backgroundColor: '#F8FAF4',
+    borderRadius: 16,
+  },
+  accountIconWrapper: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    backgroundColor: '#E7EDDD',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
   },
   accountInfo: {
     flex: 1,
   },
   accountName: {
-    ...theme.typography.glassTitle,
-    marginBottom: 4,
+    fontSize: 15,
+    color: '#101010',
+    fontFamily: 'Poppins-Medium',
   },
   accountType: {
-    ...theme.typography.glassCaption,
+    fontSize: 12,
+    color: '#6B7D5D',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  accountBalanceColumn: {
+    alignItems: 'flex-end',
+    gap: 4,
   },
   accountBalance: {
-    marginRight: 12,
+    fontSize: 14,
+    color: '#101010',
+    fontFamily: 'Poppins-SemiBold',
   },
-  balanceAmount: {
-    ...theme.typography.currency,
+  creditUsage: {
+    fontSize: 11,
+    color: '#6B7D5D',
+    fontFamily: 'InstrumentSerif-Regular',
   },
-  quickActions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 20,
-  },
-  actionButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    flex: 1,
-    marginHorizontal: 8,
-    alignItems: 'center',
-  },
-  actionText: {
-    color: 'white',
+  addAccountRow: {
     marginTop: 8,
-    fontSize: 12,
-  },
-  loadingContainer: {
-    flex: 1,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 10,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+  },
+  addAccountText: {
+    fontSize: 13,
+    color: '#4F6F3E',
+    fontFamily: 'Poppins-SemiBold',
   },
   loadingText: {
-    fontSize: 16,
-    color: 'rgba(0,0,0,0.7)',
-  },
-  accountDescription: {
-    fontSize: 12,
-    color: '#9CA3AF',
-    marginTop: 2,
-  },
-  excludedText: {
-    fontSize: 10,
-    color: '#F59E0B',
-    marginTop: 2,
-  },
-  emptyAccountsContainer: {
-    alignItems: 'center',
-    paddingVertical: 40,
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    marginBottom: 20,
-  },
-  emptyAccountsTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: 'white',
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  emptyAccountsDescription: {
     fontSize: 14,
-    color: 'rgba(255,255,255,0.7)',
+    color: '#6B7D5D',
     textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 20,
+    paddingVertical: 40,
+    fontFamily: 'Poppins-Regular',
   },
-  emptyAddButton: {
-    backgroundColor: '#10B981',
-    borderRadius: 12,
-    paddingHorizontal: 20,
+  emptyState: {
+    paddingVertical: 40,
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: '#F8FAF4',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#E7EDDD',
+  },
+  emptyTitle: {
+    fontSize: 16,
+    color: '#101010',
+    fontFamily: 'Poppins-SemiBold',
+  },
+  emptyDescription: {
+    fontSize: 13,
+    color: '#6B7D5D',
+    textAlign: 'center',
+    paddingHorizontal: 32,
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  primaryButton: {
+    marginTop: 8,
+    backgroundColor: '#4F6F3E',
+    paddingHorizontal: 24,
     paddingVertical: 12,
+    borderRadius: 999,
   },
-  emptyAddButtonText: {
-    color: 'white',
+  primaryButtonText: {
+    color: '#FFFFFF',
     fontSize: 14,
-    fontWeight: '600',
-  },
-  goalsAccountCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 12,
-    borderWidth: 2,
-    borderColor: '#10B981',
-    borderStyle: 'dashed',
-  },
-  goalsAccountHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  goalsAccountIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  goalsAccountInfo: {
-    flex: 1,
-  },
-  goalsAccountName: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
-    marginBottom: 4,
-  },
-  goalsAccountSubtitle: {
-    fontSize: 14,
-    color: '#10B981',
-    fontWeight: '500',
-  },
-  goalsAccountBalance: {
-    alignItems: 'flex-end',
-  },
-  goalsAccountAmount: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'white',
-  },
-  goalsAccountFooter: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  goalsAccountDescription: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
-    flex: 1,
+    fontFamily: 'Poppins-SemiBold',
   },
 });

@@ -16,13 +16,15 @@ export interface AddContributionData {
   goal_id: string;
   amount: number;
   source_account_id: string;
+  destination_account_id: string; // Account where goal funds will be stored
   description?: string;
 }
 
 export interface WithdrawFromGoalData {
   goal_id: string;
   amount: number;
-  destination_account_id: string;
+  source_account_id: string; // Account where the goal fund is located
+  destination_account_id: string; // Account where money goes (personal funds)
   description?: string;
 }
 
@@ -68,12 +70,10 @@ export async function getOrCreateGoalsSavingsAccount(userId: string, currency: s
 
 /**
  * Create a new goal
+ * Note: Goals no longer require a Goals Savings account - funds can be stored in any account
  */
 export async function createGoal(userId: string, goalData: CreateGoalData): Promise<Goal> {
-  // Get or create Goals Savings Account
-  const goalsAccount = await getOrCreateGoalsSavingsAccount(userId, goalData.currency);
-
-  // Create the goal
+  // Create the goal (no account required at creation time)
   const { data: goal, error: goalError } = await supabase
     .from('goals')
     .insert({
@@ -101,9 +101,10 @@ export async function createGoal(userId: string, goalData: CreateGoalData): Prom
 
 /**
  * Add a contribution to a goal
+ * Money moves from source account to destination account as goal fund
  */
 export async function addContributionToGoal(contributionData: AddContributionData): Promise<{ goal: Goal; contribution: GoalContribution }> {
-  const { goal_id, amount, source_account_id, description } = contributionData;
+  const { goal_id, amount, source_account_id, destination_account_id, description } = contributionData;
 
   // Get goal details
   const { data: goal, error: goalError } = await supabase
@@ -116,16 +117,16 @@ export async function addContributionToGoal(contributionData: AddContributionDat
     throw new Error(`Goal not found: ${goalError?.message}`);
   }
 
-  // Get Goals Savings Account
-  const { data: goalsAccount, error: accountError } = await supabase
+  // Get destination account (where goal funds will be stored)
+  const { data: destinationAccount, error: destError } = await supabase
     .from('accounts')
     .select('*')
+    .eq('id', destination_account_id)
     .eq('user_id', goal.user_id)
-    .eq('type', 'goals_savings')
     .single();
 
-  if (accountError || !goalsAccount) {
-    throw new Error(`Goals Savings Account not found: ${accountError?.message}`);
+  if (destError || !destinationAccount) {
+    throw new Error(`Destination account not found: ${destError?.message}`);
   }
 
   // Get source account
@@ -133,26 +134,25 @@ export async function addContributionToGoal(contributionData: AddContributionDat
     .from('accounts')
     .select('*')
     .eq('id', source_account_id)
+    .eq('user_id', goal.user_id)
     .single();
 
   if (sourceError || !sourceAccount) {
     throw new Error(`Source account not found: ${sourceError?.message}`);
   }
 
-  // Validate source account has sufficient balance
-  if (sourceAccount.balance < amount) {
-    throw new Error('Insufficient balance in source account');
-  }
+  // Allow same account - user can save goal funds in the same account they're paying from
+  // The money will be deducted from personal funds and stored as goal funds in the same account
 
-  // Validate source account is not the Goals Savings Account
-  if (sourceAccount.type === 'goals_savings') {
-    throw new Error('Cannot contribute from Goals Savings Account');
+  // Validate currencies match
+  if (sourceAccount.currency !== goal.currency || destinationAccount.currency !== goal.currency) {
+    throw new Error('Account currencies must match goal currency');
   }
 
   // Get the Goal Savings category
   const { data: goalCategory, error: categoryError } = await supabase
     .from('categories')
-    .select('id')
+    .select('id, name')
     .eq('name', 'Goal Savings')
     .contains('activity_types', ['goal'])
     .eq('is_deleted', false)
@@ -163,12 +163,13 @@ export async function addContributionToGoal(contributionData: AddContributionDat
   }
 
   // Spend from source account (personal bucket)
+  // Contributions always come from personal funds
   const { data: spendResult, error: spendError } = await supabase.rpc('spend_from_account_bucket', {
     p_user_id: goal.user_id,
     p_account_id: source_account_id,
     p_bucket: { type: 'personal', id: null },
     p_amount: amount,
-    p_category: goalCategory.id,
+    p_category: categoryName, // Use category name, not ID
     p_description: description || `Contribution to ${goal.title}`,
     p_date: new Date().toISOString().split('T')[0],
     p_currency: goal.currency,
@@ -179,13 +180,14 @@ export async function addContributionToGoal(contributionData: AddContributionDat
 
   const createdExpenseId = (spendResult as any)?.id || (spendResult as any)?.transaction_id || null;
 
-  // Receive into Goals Savings account as goal bucket for this goal
+  // Receive into destination account as goal bucket for this goal
   const { error: receiveError } = await supabase.rpc('receive_to_account_bucket', {
     p_user_id: goal.user_id,
-    p_account_id: goalsAccount.id,
-    p_bucket: { type: 'goal', id: goal_id },
+    p_account_id: destination_account_id,
+    p_bucket_type: 'goal',
+    p_bucket_id: goal_id,
     p_amount: amount,
-    p_category: goalCategory.id,
+    p_category: goalCategory.name || 'Goal Savings',
     p_description: description || `Contribution to ${goal.title}`,
     p_date: new Date().toISOString().split('T')[0],
     p_currency: goal.currency,
@@ -194,13 +196,24 @@ export async function addContributionToGoal(contributionData: AddContributionDat
     throw new Error(`Failed to receive into goal bucket: ${receiveError.message}`);
   }
 
-  // Update goal current amount
-  const newCurrentAmount = goal.current_amount + amount;
-  const isAchieved = newCurrentAmount >= goal.target_amount;
+  // Update goal current amount (sum all goal funds across all accounts)
+  // Query account_funds using type='goal' and reference_id=goal_id
+  const { data: goalFunds, error: fundsError } = await supabase
+    .from('account_funds')
+    .select('balance')
+    .eq('type', 'goal')
+    .or(`reference_id.eq.${goal_id},metadata->>goal_id.eq.${goal_id}`);
+  
+  const totalGoalAmount = goalFunds?.reduce((sum, fund) => {
+    const balance = typeof fund.balance === 'string' ? parseFloat(fund.balance) : fund.balance || 0;
+    return sum + balance;
+  }, 0) || (goal.current_amount + amount);
+
+  const isAchieved = totalGoalAmount >= goal.target_amount;
   const { data: updatedGoal, error: goalUpdateError } = await supabase
     .from('goals')
     .update({ 
-      current_amount: newCurrentAmount,
+      current_amount: totalGoalAmount,
       is_achieved: isAchieved,
       updated_at: new Date().toISOString(),
     })
@@ -212,7 +225,7 @@ export async function addContributionToGoal(contributionData: AddContributionDat
     throw new Error(`Failed to update goal: ${goalUpdateError.message}`);
   }
 
-  // Create goal contribution record
+  // Create goal contribution record (with destination_account_id)
   const { data: contribution, error: contributionError } = await supabase
     .from('goal_contributions')
     .insert({
@@ -220,6 +233,7 @@ export async function addContributionToGoal(contributionData: AddContributionDat
       transaction_id: createdExpenseId,
       amount: amount,
       source_account_id: source_account_id,
+      destination_account_id: destination_account_id, // Account where goal funds are stored
       contribution_type: 'manual',
     })
     .select()
@@ -533,11 +547,13 @@ export async function deleteGoal(goalId: string): Promise<void> {
 
 /**
  * Withdraw funds from goal
+ * Money moves from goal fund in source account to personal funds in destination account
  */
 export async function withdrawFromGoal(
   goalId: string,
   amount: number,
-  destinationAccountId: string,
+  sourceAccountId: string, // Account where the goal fund is located
+  destinationAccountId: string, // Account where money goes (personal funds)
   note?: string
 ): Promise<{ goal: Goal; transaction: Transaction }> {
   // Get goal details
@@ -551,20 +567,16 @@ export async function withdrawFromGoal(
     throw new Error(`Failed to fetch goal: ${goalError.message}`);
   }
 
-  if (amount > goal.current_amount) {
-    throw new Error('Withdrawal amount exceeds available balance');
-  }
-
-  // Get Goals Savings Account
-  const { data: goalsAccount, error: goalsAccountError } = await supabase
+  // Get source account (where goal fund is located)
+  const { data: sourceAccount, error: sourceError } = await supabase
     .from('accounts')
     .select('*')
+    .eq('id', sourceAccountId)
     .eq('user_id', goal.user_id)
-    .eq('type', 'goals_savings')
     .single();
 
-  if (goalsAccountError) {
-    throw new Error(`Failed to find Goals Savings Account: ${goalsAccountError.message}`);
+  if (sourceError) {
+    throw new Error(`Failed to find source account: ${sourceError.message}`);
   }
 
   // Get destination account
@@ -572,16 +584,51 @@ export async function withdrawFromGoal(
     .from('accounts')
     .select('*')
     .eq('id', destinationAccountId)
+    .eq('user_id', goal.user_id)
     .single();
 
   if (destAccountError) {
     throw new Error(`Failed to find destination account: ${destAccountError.message}`);
   }
 
+  // Validate source and destination are different
+  if (sourceAccountId === destinationAccountId) {
+    throw new Error('Source and destination accounts must be different');
+  }
+
+  // Validate currencies match goal currency
+  // Both accounts must match goal currency for goal operations to maintain consistency
+  // Goal funds are stored in accounts with matching currency, so withdrawals should also match
+  if (sourceAccount.currency !== goal.currency) {
+    throw new Error(`Source account currency (${sourceAccount.currency || 'undefined'}) must match goal currency (${goal.currency}). The goal fund is stored in an account with currency ${goal.currency}.`);
+  }
+  
+  if (destAccount.currency !== goal.currency) {
+    throw new Error(`Destination account currency (${destAccount.currency || 'undefined'}) must match goal currency (${goal.currency}). Please select an account with currency ${goal.currency} to receive the withdrawal.`);
+  }
+
+  // Check if goal fund exists in source account and has sufficient balance
+  const { data: goalFund, error: fundError } = await supabase
+    .from('account_funds')
+    .select('balance')
+    .eq('account_id', sourceAccountId)
+    .eq('type', 'goal')
+    .or(`reference_id.eq.${goalId},metadata->>goal_id.eq.${goalId}`)
+    .single();
+
+  if (fundError || !goalFund) {
+    throw new Error(`Goal fund not found in source account: ${fundError?.message}`);
+  }
+
+  const fundBalance = typeof goalFund.balance === 'string' ? parseFloat(goalFund.balance) : goalFund.balance || 0;
+  if (fundBalance < amount) {
+    throw new Error('Withdrawal amount exceeds available goal fund balance');
+  }
+
   // Get Goal Savings category
   const { data: goalCategory, error: categoryError } = await supabase
     .from('categories')
-    .select('id')
+    .select('id, name')
     .eq('name', 'Goal Savings')
     .contains('activity_types', ['goal'])
     .eq('is_deleted', false)
@@ -591,13 +638,14 @@ export async function withdrawFromGoal(
     throw new Error(`Failed to find Goal Savings category: ${categoryError.message}`);
   }
 
-  // Spend from goal bucket in Goals Savings account
+  // Spend from goal bucket in source account
+  // Goal funds are locked - can only be withdrawn, not spent/transferred
   const { data: spendResult, error: spendError } = await supabase.rpc('spend_from_account_bucket', {
     p_user_id: goal.user_id,
-    p_account_id: goalsAccount.id,
+    p_account_id: sourceAccountId,
     p_bucket: { type: 'goal', id: goalId },
     p_amount: amount,
-    p_category: goalCategory.id,
+    p_category: goalCategory.name || 'Goal Savings', // Use category name
     p_description: note || `Withdrawal from ${goal.title}`,
     p_date: new Date().toISOString().split('T')[0],
     p_currency: goal.currency,
@@ -612,9 +660,10 @@ export async function withdrawFromGoal(
   const { error: receiveError } = await supabase.rpc('receive_to_account_bucket', {
     p_user_id: goal.user_id,
     p_account_id: destinationAccountId,
-    p_bucket: { type: 'personal', id: null },
+    p_bucket_type: 'personal',
+    p_bucket_id: null,
     p_amount: amount,
-    p_category: goalCategory.id,
+    p_category: goalCategory.name || 'Goal Savings',
     p_description: note || `Withdrawal from ${goal.title}`,
     p_date: new Date().toISOString().split('T')[0],
     p_currency: goal.currency,
@@ -623,12 +672,22 @@ export async function withdrawFromGoal(
     throw new Error(`Failed to receive into destination account: ${receiveError.message}`);
   }
 
-  // Update goal current amount
-  const newCurrentAmount = goal.current_amount - amount;
+  // Update goal current amount (sum all goal funds across all accounts)
+  const { data: goalFunds, error: fundsError } = await supabase
+    .from('account_funds')
+    .select('balance')
+    .eq('type', 'goal')
+    .or(`reference_id.eq.${goalId},metadata->>goal_id.eq.${goalId}`);
+  
+  const totalGoalAmount = goalFunds?.reduce((sum, fund) => {
+    const balance = typeof fund.balance === 'string' ? parseFloat(fund.balance) : fund.balance || 0;
+    return sum + balance;
+  }, 0) || 0;
+
   const { data: updatedGoal, error: goalUpdateError } = await supabase
     .from('goals')
     .update({ 
-      current_amount: newCurrentAmount,
+      current_amount: totalGoalAmount,
       updated_at: new Date().toISOString(),
     })
     .eq('id', goalId)
@@ -641,6 +700,248 @@ export async function withdrawFromGoal(
 
   // Return stub transaction with id if created; otherwise return updated goal
   return { goal: updatedGoal, transaction: { id: createdWithdrawalTxnId } as any };
+}
+
+/**
+ * Get all accounts that hold funds for a specific goal
+ */
+export async function getGoalAccounts(goalId: string): Promise<Array<{ account: Account; balance: number }>> {
+  // Query account_funds to find all accounts with this goal's funds
+  const { data: goalFunds, error } = await supabase
+    .from('account_funds')
+    .select(`
+      account_id,
+      balance,
+      account:accounts!inner(*)
+    `)
+    .eq('type', 'goal')
+    .or(`reference_id.eq.${goalId},metadata->>goal_id.eq.${goalId}`);
+
+  if (error) {
+    throw new Error(`Failed to fetch goal accounts: ${error.message}`);
+  }
+
+  if (!goalFunds || goalFunds.length === 0) {
+    return [];
+  }
+
+  // Group by account and sum balances
+  const accountMap = new Map<string, { account: Account; balance: number }>();
+  
+  goalFunds.forEach((fund: any) => {
+    const accountId = fund.account_id;
+    const balance = typeof fund.balance === 'string' ? parseFloat(fund.balance) : fund.balance || 0;
+    
+    if (accountMap.has(accountId)) {
+      accountMap.get(accountId)!.balance += balance;
+    } else {
+      accountMap.set(accountId, {
+        account: fund.account,
+        balance: balance,
+      });
+    }
+  });
+
+  return Array.from(accountMap.values());
+}
+
+/**
+ * Update a goal
+ */
+export async function updateGoal(
+  goalId: string,
+  updates: Partial<{
+    title: string;
+    description: string;
+    target_amount: number;
+    target_date: string | null;
+    category: string;
+    color: string;
+    icon: string;
+  }>
+): Promise<Goal> {
+  const updateData: any = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (updates.title !== undefined) updateData.title = updates.title;
+  if (updates.description !== undefined) updateData.description = updates.description;
+  if (updates.target_amount !== undefined) updateData.target_amount = updates.target_amount;
+  if (updates.target_date !== undefined) updateData.target_date = updates.target_date;
+  if (updates.category !== undefined) updateData.category = updates.category;
+  if (updates.color !== undefined) updateData.color = updates.color;
+  if (updates.icon !== undefined) updateData.icon = updates.icon;
+
+  // If target_amount changed, check if goal is achieved
+  if (updates.target_amount !== undefined) {
+    const { data: goal } = await supabase
+      .from('goals')
+      .select('current_amount')
+      .eq('id', goalId)
+      .single();
+
+    if (goal) {
+      updateData.is_achieved = goal.current_amount >= updates.target_amount;
+    }
+  }
+
+  const { data: updatedGoal, error } = await supabase
+    .from('goals')
+    .update(updateData)
+    .eq('id', goalId)
+    .select()
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to update goal: ${error.message}`);
+  }
+
+  return updatedGoal as Goal;
+}
+
+/**
+ * Transfer goal funds from one account to another
+ */
+export async function transferGoalFunds(
+  goalId: string,
+  fromAccountId: string,
+  toAccountId: string,
+  amount: number,
+  userId: string,
+  description?: string
+): Promise<void> {
+  // Get goal details
+  const { data: goal, error: goalError } = await supabase
+    .from('goals')
+    .select('*')
+    .eq('id', goalId)
+    .single();
+
+  if (goalError || !goal) {
+    throw new Error(`Goal not found: ${goalError?.message}`);
+  }
+
+  // Validate accounts
+  const { data: fromAccount, error: fromError } = await supabase
+    .from('accounts')
+    .select('*')
+    .eq('id', fromAccountId)
+    .eq('user_id', userId)
+    .single();
+
+  if (fromError || !fromAccount) {
+    throw new Error(`Source account not found: ${fromError?.message}`);
+  }
+
+  const { data: toAccount, error: toError } = await supabase
+    .from('accounts')
+    .select('*')
+    .eq('id', toAccountId)
+    .eq('user_id', userId)
+    .single();
+
+  if (toError || !toAccount) {
+    throw new Error(`Destination account not found: ${toError?.message}`);
+  }
+
+  // Validate currencies match
+  if (fromAccount.currency !== goal.currency || toAccount.currency !== goal.currency) {
+    throw new Error('Account currencies must match goal currency');
+  }
+
+  // Validate source and destination are different
+  if (fromAccountId === toAccountId) {
+    throw new Error('Source and destination accounts must be different');
+  }
+
+  // Check if goal fund exists in source account and has sufficient balance
+  const { data: sourceGoalFund, error: sourceFundError } = await supabase
+    .from('account_funds')
+    .select('balance, id')
+    .eq('account_id', fromAccountId)
+    .eq('type', 'goal')
+    .or(`reference_id.eq.${goalId},metadata->>goal_id.eq.${goalId}`)
+    .single();
+
+  if (sourceFundError || !sourceGoalFund) {
+    throw new Error(`Goal fund not found in source account: ${sourceFundError?.message}`);
+  }
+
+  const fundBalance = typeof sourceGoalFund.balance === 'string' 
+    ? parseFloat(sourceGoalFund.balance) 
+    : sourceGoalFund.balance || 0;
+  
+  if (fundBalance < amount) {
+    throw new Error('Transfer amount exceeds available goal fund balance');
+  }
+
+  // Get Goal Savings category
+  const { data: goalCategory, error: categoryError } = await supabase
+    .from('categories')
+    .select('id, name')
+    .eq('name', 'Goal Savings')
+    .contains('activity_types', ['goal'])
+    .eq('is_deleted', false)
+    .single();
+
+  if (categoryError) {
+    throw new Error(`Failed to find Goal Savings category: ${categoryError.message}`);
+  }
+
+  // Spend from goal bucket in source account
+  const { error: spendError } = await supabase.rpc('spend_from_account_bucket', {
+    p_user_id: userId,
+    p_account_id: fromAccountId,
+    p_bucket: { type: 'goal', id: goalId },
+    p_amount: amount,
+    p_category: goalCategory.name || 'Goal Savings',
+    p_description: description || `Transfer goal funds from ${fromAccount.name} to ${toAccount.name}`,
+    p_date: new Date().toISOString().split('T')[0],
+    p_currency: goal.currency,
+  });
+
+  if (spendError) {
+    throw new Error(`Failed to spend from goal bucket: ${spendError.message}`);
+  }
+
+  // Receive into goal bucket in destination account
+  const { error: receiveError } = await supabase.rpc('receive_to_account_bucket', {
+    p_user_id: userId,
+    p_account_id: toAccountId,
+    p_bucket_type: 'goal',
+    p_bucket_id: goalId,
+    p_amount: amount,
+    p_category: goalCategory.name || 'Goal Savings',
+    p_description: description || `Transfer goal funds from ${fromAccount.name} to ${toAccount.name}`,
+    p_date: new Date().toISOString().split('T')[0],
+    p_currency: goal.currency,
+  });
+
+  if (receiveError) {
+    throw new Error(`Failed to receive into goal bucket: ${receiveError.message}`);
+  }
+
+  // Update goal current amount (sum all goal funds across all accounts)
+  const { data: goalFunds, error: fundsError } = await supabase
+    .from('account_funds')
+    .select('balance')
+    .eq('type', 'goal')
+    .or(`reference_id.eq.${goalId},metadata->>goal_id.eq.${goalId}`);
+  
+  const totalGoalAmount = goalFunds?.reduce((sum, fund) => {
+    const balance = typeof fund.balance === 'string' ? parseFloat(fund.balance) : fund.balance || 0;
+    return sum + balance;
+  }, 0) || 0;
+
+  const isAchieved = totalGoalAmount >= goal.target_amount;
+  await supabase
+    .from('goals')
+    .update({ 
+      current_amount: totalGoalAmount,
+      is_achieved: isAchieved,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', goalId);
 }
 
 /**

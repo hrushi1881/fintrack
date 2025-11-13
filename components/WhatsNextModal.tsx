@@ -7,6 +7,7 @@ import { Goal } from '@/types';
 interface WhatsNextModalProps {
   visible: boolean;
   onClose: () => void;
+  onEditGoal?: () => void;
   onExtendGoal: () => void;
   onArchiveGoal: () => void;
   onWithdrawFunds: () => void;
@@ -17,6 +18,7 @@ interface WhatsNextModalProps {
 export default function WhatsNextModal({
   visible,
   onClose,
+  onEditGoal,
   onExtendGoal,
   onArchiveGoal,
   onWithdrawFunds,
@@ -57,6 +59,22 @@ export default function WhatsNextModal({
 
             {/* Options */}
             <View style={styles.optionsContainer}>
+              {/* Edit Goal */}
+              {onEditGoal && (
+                <TouchableOpacity style={styles.optionButton} onPress={onEditGoal}>
+                  <View style={styles.optionIcon}>
+                    <Ionicons name="create" size={24} color="#3B82F6" />
+                  </View>
+                  <View style={styles.optionContent}>
+                    <Text style={styles.optionTitle}>Edit Goal</Text>
+                    <Text style={styles.optionDescription}>
+                      Update goal details and manage accounts
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={20} color="#6B7280" />
+                </TouchableOpacity>
+              )}
+
               {/* Extend Goal */}
               <TouchableOpacity style={styles.optionButton} onPress={onExtendGoal}>
                 <View style={styles.optionIcon}>

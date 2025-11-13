@@ -12,7 +12,6 @@ import {
   ActivityIndicator,
   Modal,
 } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { supabase } from '@/lib/supabase';
@@ -21,22 +20,23 @@ import { useSettings } from '@/contexts/SettingsContext';
 import { useLiabilities } from '@/contexts/LiabilitiesContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { formatCurrencyAmount } from '@/utils/currency';
-import GlassmorphCard from '@/components/GlassmorphCard';
+import GlassCard from '@/components/GlassCard';
 import FundPicker, { FundBucket } from '@/components/FundPicker';
+import { calculatePaymentBreakdown } from '@/utils/liabilityCalculations';
+import { applyExtraPayment, ExtraPaymentOption } from '@/utils/liabilityPaymentAdjustments';
 
 type LiabilityData = {
   id: string;
   title: string;
   liability_type: string;
   current_balance: number;
+  original_amount?: number;
+  interest_rate_apy?: number;
   periodical_payment?: number;
+  start_date?: string;
+  last_payment_date?: string;
+  next_due_date?: string;
   metadata?: any;
-};
-
-type LiabilityAllocation = {
-  accountId: string;
-  amount: number;
-  liabilityName?: string;
 };
 
 interface PayLiabilityModalProps {
@@ -50,7 +50,7 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
   const { user } = useAuth();
   const { currency } = useSettings();
   const { getAccountBreakdown, fetchLiabilityAllocations } = useLiabilities();
-  const { globalRefresh, refreshAccounts } = useRealtimeData();
+  const { globalRefresh, refreshAccounts, refreshAccountFunds, refreshTransactions, recalculateAllBalances } = useRealtimeData();
   
   const [liability, setLiability] = useState<LiabilityData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -65,7 +65,29 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [selectedFundBucket, setSelectedFundBucket] = useState<FundBucket | null>(null);
   const [showFundPicker, setShowFundPicker] = useState(false);
-  const [isMock, setIsMock] = useState(false);
+  const [showExtraPaymentOptions, setShowExtraPaymentOptions] = useState(false);
+  const [extraPaymentOption, setExtraPaymentOption] = useState<ExtraPaymentOption>('reducePrincipal');
+  const [numberOfPaymentsToSkip, setNumberOfPaymentsToSkip] = useState('1');
+
+  // Calculate payment breakdown
+  const paymentBreakdown = useMemo(() => {
+    if (!liability || !amount) return null;
+    
+    const paymentAmount = parseFloat(amount);
+    if (isNaN(paymentAmount) || paymentAmount <= 0) return null;
+
+    const currentBalance = Number(liability.current_balance || 0);
+    const annualRate = Number(liability.interest_rate_apy || 0);
+    const lastPaymentDate = liability.last_payment_date ? new Date(liability.last_payment_date) : undefined;
+
+    return calculatePaymentBreakdown(
+      paymentAmount,
+      currentBalance,
+      annualRate,
+      paymentDate,
+      lastPaymentDate
+    );
+  }, [liability, amount, paymentDate]);
 
   useEffect(() => {
     if (visible && liabilityId && user) {
@@ -75,6 +97,9 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
       setSelectedFundBucket(null);
       setDescription('');
       setPaymentDate(new Date());
+      setShowExtraPaymentOptions(false);
+      setExtraPaymentOption('reducePrincipal');
+      setNumberOfPaymentsToSkip('1');
       fetchLiability();
       fetchAccounts();
     }
@@ -92,7 +117,6 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
 
       if (error) throw error;
       setAccounts(data || []);
-      console.log('Fetched accounts for pay liability:', data?.length || 0, data);
     } catch (error) {
       console.error('Error fetching accounts:', error);
       setAccounts([]);
@@ -101,10 +125,10 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
 
   // Auto-show fund picker when account is selected
   useEffect(() => {
-    if (selectedAccountId && !selectedFundBucket) {
+    if (selectedAccountId && !selectedFundBucket && visible) {
       setShowFundPicker(true);
     }
-  }, [selectedAccountId]);
+  }, [selectedAccountId, visible]);
 
   // Reset fund bucket when account changes
   useEffect(() => {
@@ -113,7 +137,7 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
     }
   }, [selectedAccountId]);
 
-  // Calculate regular accounts - must be called before early returns
+  // Calculate regular accounts
   const regularAccounts = useMemo(() => {
     if (!accounts || accounts.length === 0) return [];
     return accounts.filter((a) => 
@@ -138,7 +162,7 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
       if (error) throw error;
       setLiability(data);
       
-      // Pre-fill EMI amount if applicable
+      // Pre-fill amount with monthly payment if available
       if (data.periodical_payment) {
         setAmount(data.periodical_payment.toString());
       }
@@ -150,16 +174,20 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
     }
   };
 
+  // Check if payment is extra (more than regular payment)
+  const isExtraPayment = useMemo(() => {
+    if (!liability || !amount) return false;
+    const amountNum = parseFloat(amount);
+    const regularPayment = liability.periodical_payment || 0;
+    return !isNaN(amountNum) && amountNum > regularPayment && regularPayment > 0;
+  }, [liability, amount]);
 
-  const detectLiabilityType = (liabilityType: string): 'loan' | 'emi' | 'one_time' => {
-    if (['personal_loan', 'student_loan', 'auto_loan', 'mortgage'].includes(liabilityType)) {
-      return 'loan';
-    }
-    if (liability?.periodical_payment) {
-      return 'emi';
-    }
-    return 'one_time';
-  };
+  const extraAmount = useMemo(() => {
+    if (!isExtraPayment || !liability || !amount) return 0;
+    const amountNum = parseFloat(amount);
+    const regularPayment = liability.periodical_payment || 0;
+    return amountNum - regularPayment;
+  }, [isExtraPayment, liability, amount]);
 
   const handlePayment = async () => {
     if (!user || !liability || !amount) return;
@@ -180,27 +208,38 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
       return;
     }
 
+    // If extra payment and option not selected, show options
+    if (isExtraPayment && !showExtraPaymentOptions) {
+      setShowExtraPaymentOptions(true);
+      return;
+    }
+
     try {
       setSaving(true);
-      // Use bucket-aware RPCs for repayment based on selected fund bucket
+      
+      const regularPayment = liability.periodical_payment || 0;
+      const regularAmount = isExtraPayment ? regularPayment : amountNum;
+      const extraAmountValue = isExtraPayment ? extraAmount : 0;
+
+      // First, record the regular payment
       if (selectedFundBucket.type === 'personal') {
         // Repay from personal funds using repay_liability
         const { error: repayErr } = await supabase.rpc('repay_liability', {
           p_user_id: user.id,
           p_account_id: selectedAccountId,
           p_liability_id: liability.id,
-          p_amount: amountNum,
+          p_amount: regularAmount,
           p_date: paymentDate.toISOString().split('T')[0],
           p_notes: description || null,
         });
         if (repayErr) throw repayErr;
-      } else if (selectedFundBucket.type === 'liability' && selectedFundBucket.id === liability.id) {
+      } else if (selectedFundBucket.type === 'borrowed' && selectedFundBucket.id === liability.id) {
         // Repay using liability portion funds from the same liability
         const { error: settleErr } = await supabase.rpc('settle_liability_portion', {
           p_user_id: user.id,
           p_account_id: selectedAccountId,
           p_liability_id: liability.id,
-          p_amount: amountNum,
+          p_amount: regularAmount,
           p_date: paymentDate.toISOString().split('T')[0],
           p_notes: description || null,
         });
@@ -211,12 +250,34 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
         return;
       }
 
-      console.log('✅ Liability payment RPC success, refreshing accounts...');
-      // Force immediate account refresh
-      await refreshAccounts();
+      // If there's an extra payment, apply it with the selected option
+      if (extraAmountValue > 0 && showExtraPaymentOptions) {
+        const skipCount = extraPaymentOption === 'skipPayments' 
+          ? parseInt(numberOfPaymentsToSkip) || 1 
+          : undefined;
+        
+        const result = await applyExtraPayment(
+          liability.id,
+          user.id,
+          extraAmountValue,
+          extraPaymentOption,
+          skipCount
+        );
+
+        if (!result.success) {
+          Alert.alert('Warning', result.message || 'Extra payment could not be applied, but regular payment was recorded');
+        }
+      }
+
+      // Wait for database commit
+      await new Promise(resolve => setTimeout(resolve, 500));
       
-      // Small delay to ensure database has committed and state has updated
-      await new Promise(resolve => setTimeout(resolve, 200));
+      // Refresh all data
+      await Promise.all([
+        refreshAccounts(),
+        refreshAccountFunds(),
+        refreshTransactions(),
+      ]);
 
       Alert.alert('Success', 'Payment recorded successfully', [
         {
@@ -240,24 +301,34 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
     return formatCurrencyAmount(amount, currency);
   };
 
+  const formatDate = (date: Date) => {
+    return date.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+  };
+
+  if (!visible) return null;
+
   if (loading) {
     return (
       <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-        <LinearGradient colors={["#99D795", "#99D795", "#99D795"]} style={styles.container}>
-          <SafeAreaView style={styles.safeArea}>
+        <SafeAreaView style={styles.safeArea}>
+          <View style={styles.container}>
             <View style={styles.header}>
-              <TouchableOpacity style={styles.backButton} onPress={onClose}>
-                <Ionicons name="close" size={28} color="#FFFFFF" />
+              <TouchableOpacity onPress={onClose} style={styles.closeButton}>
+                <Ionicons name="close" size={24} color="#000000" />
               </TouchableOpacity>
               <Text style={styles.headerTitle}>Pay Liability</Text>
-              <View style={{ width: 28 }} />
+              <View style={styles.closeButton} />
             </View>
-            <View style={styles.container}>
-              <ActivityIndicator size="large" color="#10B981" />
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="large" color="#000000" />
               <Text style={styles.loadingText}>Loading...</Text>
             </View>
-          </SafeAreaView>
-        </LinearGradient>
+          </View>
+        </SafeAreaView>
       </Modal>
     );
   }
@@ -265,220 +336,386 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
   if (!liability) {
     return (
       <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
-        <LinearGradient colors={["#99D795", "#99D795", "#99D795"]} style={styles.container}>
-          <SafeAreaView style={styles.safeArea}>
+        <SafeAreaView style={styles.safeArea}>
+          <View style={styles.container}>
             <View style={styles.header}>
-              <TouchableOpacity style={styles.backButton} onPress={onClose}>
-                <Ionicons name="close" size={28} color="#FFFFFF" />
+              <TouchableOpacity onPress={onClose} style={styles.closeButton}>
+                <Ionicons name="close" size={24} color="#000000" />
               </TouchableOpacity>
               <Text style={styles.headerTitle}>Pay Liability</Text>
-              <View style={{ width: 28 }} />
+              <View style={styles.closeButton} />
             </View>
-            <View style={styles.container}>
+            <View style={styles.errorContainer}>
               <Text style={styles.errorText}>Liability not found</Text>
               <TouchableOpacity style={styles.backButton} onPress={onClose}>
                 <Text style={styles.backButtonText}>Go Back</Text>
               </TouchableOpacity>
             </View>
-          </SafeAreaView>
-        </LinearGradient>
+          </View>
+        </SafeAreaView>
       </Modal>
     );
   }
-
-  const liabilityType = detectLiabilityType(liability.liability_type);
-
-  if (!visible) return null;
 
   return (
     <Modal
       visible={visible}
       animationType="slide"
-      presentationStyle="pageSheet"
+      transparent
       onRequestClose={onClose}
     >
-      <LinearGradient colors={["#99D795", "#99D795", "#99D795"]} style={styles.container}>
-        <SafeAreaView style={styles.safeArea}>
-        <ScrollView style={styles.scrollView}>
-          {/* Header */}
-          <View style={styles.header}>
-            <TouchableOpacity style={styles.backButton} onPress={onClose}>
-              <Ionicons name="close" size={28} color="#FFFFFF" />
-            </TouchableOpacity>
-            <Text style={styles.headerTitle}>Pay Liability</Text>
-            <View style={{ width: 28 }} />
-          </View>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalContent}>
+          <View style={styles.modalContainer}>
+            {/* Header */}
+            <View style={styles.header}>
+              <TouchableOpacity onPress={onClose} style={styles.closeButton}>
+                <Ionicons name="close" size={24} color="#000000" />
+              </TouchableOpacity>
+              <Text style={styles.headerTitle}>Pay Liability</Text>
+              <View style={styles.closeButton} />
+            </View>
 
-          {/* Liability Info */}
-          <GlassmorphCard style={styles.infoCard}>
-            <Text style={styles.infoLabel}>Liability</Text>
-            <Text style={styles.infoValue}>{liability.title}</Text>
-            <Text style={styles.infoBalance}>
-              Balance: {formatCurrency(parseFloat(liability.current_balance || '0'))}
-            </Text>
-          </GlassmorphCard>
+            <ScrollView 
+              style={styles.scrollView}
+              contentContainerStyle={styles.scrollContent}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+            >
+              {/* Liability Info */}
+              <GlassCard padding={20} marginVertical={12}>
+                <Text style={styles.infoLabel}>Liability</Text>
+                <Text style={styles.infoValue}>{liability.title}</Text>
+                <View style={styles.infoRow}>
+                  <Text style={styles.infoLabel}>Current Balance</Text>
+                  <Text style={styles.infoBalance}>
+                    {formatCurrency(Number(liability.current_balance || 0))}
+                  </Text>
+                </View>
+                {liability.interest_rate_apy && liability.interest_rate_apy > 0 && (
+                  <View style={styles.infoRow}>
+                    <Text style={styles.infoLabel}>Interest Rate</Text>
+                    <Text style={styles.infoBalance}>
+                      {liability.interest_rate_apy.toFixed(2)}% annually
+                    </Text>
+                  </View>
+                )}
+              </GlassCard>
 
-          {/* Account Selection */}
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Select Account</Text>
-            {regularAccounts.length === 0 ? (
-              <View style={styles.emptyContainer}>
-                <Text style={styles.emptyText}>No accounts available. Please create an account first.</Text>
+              {/* Account Selection */}
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Select Account</Text>
+                {regularAccounts.length === 0 ? (
+                  <GlassCard padding={20} marginVertical={8}>
+                    <Text style={styles.emptyText}>
+                      No accounts available. Please create an account first.
+                    </Text>
+                  </GlassCard>
+                ) : (
+                  <View style={styles.accountList}>
+                    {regularAccounts.map((acc) => (
+                      <TouchableOpacity
+                        key={acc.id}
+                        style={[
+                          styles.accountItem,
+                          selectedAccountId === acc.id && styles.accountItemActive,
+                        ]}
+                        onPress={() => setSelectedAccountId(acc.id)}
+                      >
+                        <View style={styles.accountInfo}>
+                          <Text style={[
+                            styles.accountName,
+                            selectedAccountId === acc.id && styles.accountNameActive,
+                          ]}>
+                            {acc.name}
+                          </Text>
+                          <Text style={styles.accountBalance}>
+                            {formatCurrency(Number(acc.balance || 0))}
+                          </Text>
+                        </View>
+                        {selectedAccountId === acc.id && (
+                          <Ionicons name="checkmark-circle" size={24} color="#000000" />
+                        )}
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
               </View>
-            ) : (
-              <View style={styles.accountList}>
-                {regularAccounts.map((acc) => (
+
+              {/* Fund Source Selection */}
+              {selectedAccountId && (
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Fund Source</Text>
+                  {selectedFundBucket ? (
+                    <TouchableOpacity
+                      style={styles.fundBucketButton}
+                      onPress={() => setShowFundPicker(true)}
+                    >
+                      <View style={styles.fundBucketInfo}>
+                        <View style={[styles.fundBucketIcon, { backgroundColor: (selectedFundBucket.color || '#6366F1') + '20' }]}>
+                          <Ionicons
+                            name={
+                              selectedFundBucket.type === 'personal'
+                                ? 'wallet-outline'
+                                : selectedFundBucket.type === 'borrowed'
+                                ? 'card-outline'
+                                : 'layers-outline'
+                            }
+                            size={20}
+                            color={selectedFundBucket.color || '#6366F1'}
+                          />
+                        </View>
+                        <View style={styles.fundBucketDetails}>
+                          <Text style={styles.fundBucketName}>{selectedFundBucket.name}</Text>
+                          <Text style={styles.fundBucketAmount}>
+                            Available: {formatCurrencyAmount(selectedFundBucket.amount, currency)}
+                          </Text>
+                        </View>
+                      </View>
+                      <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity
+                      style={styles.selectFundButton}
+                      onPress={() => setShowFundPicker(true)}
+                    >
+                      <Ionicons name="wallet-outline" size={20} color="#000000" />
+                      <Text style={styles.selectFundText}>Select Fund Source</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
+
+              {/* Amount */}
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Payment Amount</Text>
+                <View style={styles.amountInputContainer}>
+                  <Text style={styles.currencySymbol}>{currency === 'USD' ? '$' : '₹'}</Text>
+                  <TextInput
+                    style={styles.amountInput}
+                    placeholder="0.00"
+                    placeholderTextColor="rgba(0, 0, 0, 0.4)"
+                    keyboardType="decimal-pad"
+                    value={amount}
+                    onChangeText={setAmount}
+                  />
+                </View>
+                {liability.periodical_payment && (
                   <TouchableOpacity
-                    key={acc.id}
-                    style={[
-                      styles.accountItem,
-                      selectedAccountId === acc.id && styles.accountItemActive,
-                    ]}
-                    onPress={() => setSelectedAccountId(acc.id)}
+                    style={styles.suggestedAmountButton}
+                    onPress={() => setAmount(liability.periodical_payment!.toString())}
                   >
-                    <Text style={styles.accountName}>{acc.name}</Text>
-                    <Text style={styles.accountBalance}>
-                      {formatCurrency(parseFloat(acc.balance || '0'))}
+                    <Text style={styles.suggestedAmountText}>
+                      Use monthly payment: {formatCurrency(liability.periodical_payment)}
                     </Text>
                   </TouchableOpacity>
-                ))}
+                )}
               </View>
-            )}
-          </View>
 
-          {/* Fund Source Selection */}
-          {selectedAccountId && (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Fund Source</Text>
-              {selectedFundBucket ? (
-                <TouchableOpacity
-                  style={styles.fundBucketButton}
-                  onPress={() => setShowFundPicker(true)}
-                >
-                  <View style={styles.fundBucketInfo}>
-                    <View style={[styles.fundBucketIcon, { backgroundColor: (selectedFundBucket.color || '#6366F1') + '20' }]}>
-                      <Ionicons
-                        name={
-                          selectedFundBucket.type === 'personal'
-                            ? 'person'
-                            : selectedFundBucket.type === 'liability'
-                            ? 'card'
-                            : 'flag'
-                        }
-                        size={20}
-                        color={selectedFundBucket.color || '#6366F1'}
-                      />
-                    </View>
-                    <View style={styles.fundBucketDetails}>
-                      <Text style={styles.fundBucketName}>{selectedFundBucket.name}</Text>
-                      <Text style={styles.fundBucketAmount}>
-                        Available: {formatCurrencyAmount(selectedFundBucket.amount, currency)}
+              {/* Payment Breakdown Preview */}
+              {paymentBreakdown && (
+                <GlassCard padding={20} marginVertical={12}>
+                  <Text style={styles.breakdownTitle}>Payment Breakdown</Text>
+                  <View style={styles.breakdownRow}>
+                    <Text style={styles.breakdownLabel}>Principal</Text>
+                    <Text style={styles.breakdownValue}>
+                      {formatCurrency(paymentBreakdown.principal)}
+                    </Text>
+                  </View>
+                  <View style={styles.breakdownRow}>
+                    <Text style={styles.breakdownLabel}>Interest</Text>
+                    <Text style={styles.breakdownValue}>
+                      {formatCurrency(paymentBreakdown.interest)}
+                    </Text>
+                  </View>
+                  <View style={styles.breakdownDivider} />
+                  <View style={styles.breakdownRow}>
+                    <Text style={styles.breakdownLabelTotal}>Total Payment</Text>
+                    <Text style={styles.breakdownValueTotal}>
+                      {formatCurrency(paymentBreakdown.totalAmount)}
+                    </Text>
+                  </View>
+                  <View style={styles.breakdownRow}>
+                    <Text style={styles.breakdownLabel}>Remaining Balance</Text>
+                    <Text style={styles.breakdownValue}>
+                      {formatCurrency(paymentBreakdown.remainingBalance)}
+                    </Text>
+                  </View>
+                  {isExtraPayment && !showExtraPaymentOptions && (
+                    <>
+                      <View style={styles.breakdownDivider} />
+                      <View style={styles.extraPaymentNotice}>
+                        <Ionicons name="information-circle-outline" size={20} color="#F59E0B" />
+                        <Text style={styles.extraPaymentText}>
+                          You're paying {formatCurrency(extraAmount)} extra. Tap "Continue" to choose how to apply it.
+                        </Text>
+                      </View>
+                    </>
+                  )}
+                </GlassCard>
+              )}
+
+              {/* Extra Payment Options */}
+              {isExtraPayment && showExtraPaymentOptions && (
+                <GlassCard padding={20} marginVertical={12}>
+                  <Text style={styles.extraOptionsTitle}>Apply Extra Payment</Text>
+                  <Text style={styles.extraOptionsSubtitle}>
+                    You're paying {formatCurrency(extraAmount)} more than your regular payment of {formatCurrency(liability.periodical_payment || 0)}.
+                  </Text>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.extraOptionButton,
+                      extraPaymentOption === 'reducePayment' && styles.extraOptionButtonActive,
+                    ]}
+                    onPress={() => setExtraPaymentOption('reducePayment')}
+                  >
+                    <Ionicons
+                      name={extraPaymentOption === 'reducePayment' ? 'radio-button-on' : 'radio-button-off'}
+                      size={20}
+                      color={extraPaymentOption === 'reducePayment' ? '#000000' : 'rgba(0, 0, 0, 0.4)'}
+                    />
+                    <View style={styles.extraOptionContent}>
+                      <Text style={styles.extraOptionTitle}>Reduce Monthly Payment</Text>
+                      <Text style={styles.extraOptionDescription}>
+                        Keep same end date, lower your monthly payment
                       </Text>
                     </View>
-                  </View>
-                  <Ionicons name="chevron-forward" size={20} color="rgba(255,255,255,0.7)" />
-                </TouchableOpacity>
-              ) : (
-                <TouchableOpacity
-                  style={styles.selectFundButton}
-                  onPress={() => setShowFundPicker(true)}
-                >
-                  <Ionicons name="wallet-outline" size={20} color="#10B981" />
-                  <Text style={styles.selectFundText}>Select Fund Source</Text>
-                </TouchableOpacity>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.extraOptionButton,
+                      extraPaymentOption === 'reduceTerm' && styles.extraOptionButtonActive,
+                    ]}
+                    onPress={() => setExtraPaymentOption('reduceTerm')}
+                  >
+                    <Ionicons
+                      name={extraPaymentOption === 'reduceTerm' ? 'radio-button-on' : 'radio-button-off'}
+                      size={20}
+                      color={extraPaymentOption === 'reduceTerm' ? '#000000' : 'rgba(0, 0, 0, 0.4)'}
+                    />
+                    <View style={styles.extraOptionContent}>
+                      <Text style={styles.extraOptionTitle}>Reduce Loan Term</Text>
+                      <Text style={styles.extraOptionDescription}>
+                        Keep same monthly payment, finish earlier
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.extraOptionButton,
+                      extraPaymentOption === 'skipPayments' && styles.extraOptionButtonActive,
+                    ]}
+                    onPress={() => setExtraPaymentOption('skipPayments')}
+                  >
+                    <Ionicons
+                      name={extraPaymentOption === 'skipPayments' ? 'radio-button-on' : 'radio-button-off'}
+                      size={20}
+                      color={extraPaymentOption === 'skipPayments' ? '#000000' : 'rgba(0, 0, 0, 0.4)'}
+                    />
+                    <View style={styles.extraOptionContent}>
+                      <Text style={styles.extraOptionTitle}>Skip Next Few Payments</Text>
+                      <Text style={styles.extraOptionDescription}>
+                        Pre-pay for upcoming payments
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                  {extraPaymentOption === 'skipPayments' && (
+                    <View style={styles.skipPaymentsInput}>
+                      <Text style={styles.skipPaymentsLabel}>Number of payments to skip:</Text>
+                      <TextInput
+                        style={styles.skipPaymentsTextInput}
+                        placeholder="1"
+                        placeholderTextColor="rgba(0, 0, 0, 0.4)"
+                        keyboardType="number-pad"
+                        value={numberOfPaymentsToSkip}
+                        onChangeText={setNumberOfPaymentsToSkip}
+                      />
+                    </View>
+                  )}
+
+                  <TouchableOpacity
+                    style={[
+                      styles.extraOptionButton,
+                      extraPaymentOption === 'reducePrincipal' && styles.extraOptionButtonActive,
+                    ]}
+                    onPress={() => setExtraPaymentOption('reducePrincipal')}
+                  >
+                    <Ionicons
+                      name={extraPaymentOption === 'reducePrincipal' ? 'radio-button-on' : 'radio-button-off'}
+                      size={20}
+                      color={extraPaymentOption === 'reducePrincipal' ? '#000000' : 'rgba(0, 0, 0, 0.4)'}
+                    />
+                    <View style={styles.extraOptionContent}>
+                      <Text style={styles.extraOptionTitle}>Just Reduce Principal</Text>
+                      <Text style={styles.extraOptionDescription}>
+                        Everything stays the same, but you owe less
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                </GlassCard>
               )}
-            </View>
-          )}
 
-          {/* Amount */}
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Payment Amount</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="Enter amount"
-              placeholderTextColor="#9CA3AF"
-              keyboardType="numeric"
-              value={amount}
-              onChangeText={setAmount}
-            />
-          </View>
-
-          {/* Date */}
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Payment Date</Text>
-            <TouchableOpacity
-              style={styles.dateButton}
-              onPress={() => setShowDatePicker(true)}
-            >
-              <Text style={styles.dateText}>
-                {paymentDate.toLocaleDateString()}
-              </Text>
-              <Ionicons name="calendar" size={20} color="rgba(255,255,255,0.7)" />
-            </TouchableOpacity>
-            {showDatePicker && (
-              <DateTimePicker
-                value={paymentDate}
-                mode="date"
-                display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                onChange={(event, selectedDate) => {
-                  setShowDatePicker(Platform.OS === 'ios');
-                  if (selectedDate) setPaymentDate(selectedDate);
-                }}
-              />
-            )}
-          </View>
-
-          {/* Description */}
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Description (Optional)</Text>
-            <TextInput
-              style={[styles.input, styles.textArea]}
-              placeholder="Add notes"
-              placeholderTextColor="#9CA3AF"
-              multiline
-              numberOfLines={3}
-              value={description}
-              onChangeText={setDescription}
-            />
-          </View>
-
-          {/* Mock Payment Toggle */}
-          <View style={styles.section}>
-            <TouchableOpacity
-              style={styles.toggleRow}
-              onPress={() => setIsMock(!isMock)}
-            >
-              <View style={styles.toggleInfo}>
-                <Text style={styles.toggleTitle}>Mock/Historical Payment</Text>
-                <Text style={styles.toggleSubtitle}>
-                  Record payment without affecting account balances
-                </Text>
+              {/* Date */}
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Payment Date</Text>
+                <TouchableOpacity
+                  style={styles.dateButton}
+                  onPress={() => setShowDatePicker(true)}
+                >
+                  <Ionicons name="calendar-outline" size={20} color="#000000" />
+                  <Text style={styles.dateText}>{formatDate(paymentDate)}</Text>
+                  <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
+                </TouchableOpacity>
+                {showDatePicker && (
+                  <DateTimePicker
+                    value={paymentDate}
+                    mode="date"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onChange={(event, selectedDate) => {
+                      setShowDatePicker(Platform.OS === 'ios');
+                      if (selectedDate) setPaymentDate(selectedDate);
+                    }}
+                  />
+                )}
               </View>
-              <View
-                style={[
-                  styles.toggleSwitch,
-                  isMock && styles.toggleSwitchActive,
-                ]}
+
+              {/* Description */}
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Description (Optional)</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Add notes about this payment"
+                  placeholderTextColor="rgba(0, 0, 0, 0.4)"
+                  multiline
+                  numberOfLines={3}
+                  value={description}
+                  onChangeText={setDescription}
+                />
+              </View>
+            </ScrollView>
+
+            {/* Footer with Submit Button */}
+            <View style={styles.footer}>
+              <TouchableOpacity
+                style={[styles.submitButton, saving && styles.submitButtonDisabled]}
+                onPress={handlePayment}
+                disabled={saving || !selectedAccountId || !selectedFundBucket || !amount || (isExtraPayment && !showExtraPaymentOptions)}
               >
-                <View style={[styles.toggleDot, isMock && styles.toggleDotActive]} />
-              </View>
-            </TouchableOpacity>
+                {saving ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.submitButtonText}>
+                    {isExtraPayment && !showExtraPaymentOptions ? 'Continue' : 'Record Payment'}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
           </View>
-
-          {/* Submit Button */}
-          <TouchableOpacity
-            style={[styles.submitButton, saving && styles.submitButtonDisabled]}
-            onPress={handlePayment}
-            disabled={saving}
-          >
-            {saving ? (
-              <ActivityIndicator color="#FFFFFF" />
-            ) : (
-              <Text style={styles.submitButtonText}>Record Payment</Text>
-            )}
-          </TouchableOpacity>
-        </ScrollView>
-      </SafeAreaView>
+        </View>
+      </View>
       
       {/* Fund Picker Modal */}
       {selectedAccountId && liability && (
@@ -488,7 +725,7 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
           accountId={selectedAccountId}
           onSelect={(bucket) => {
             // Only allow personal or same liability bucket
-            if (bucket.type === 'personal' || (bucket.type === 'liability' && bucket.id === liability.id)) {
+            if (bucket.type === 'personal' || (bucket.type === 'borrowed' && bucket.id === liability.id)) {
               setSelectedFundBucket(bucket);
               setShowFundPicker(false);
             } else {
@@ -498,110 +735,164 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
           amount={parseFloat(amount) || 0}
         />
       )}
-      </LinearGradient>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  modalOverlay: {
     flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  },
+  modalContent: {
+    width: '100%',
+    maxHeight: '90%',
+    backgroundColor: 'transparent',
+    borderTopLeftRadius: 30,
+    borderTopRightRadius: 30,
+    overflow: 'hidden',
+  },
+  modalContainer: {
+    width: '100%',
+    height: '100%',
+    minHeight: 500,
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 30,
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
+    overflow: 'hidden',
+    flexDirection: 'column',
   },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
-  scrollView: {
+  container: {
     flex: 1,
-    padding: 20,
+    backgroundColor: '#FFFFFF',
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 24,
-    paddingTop: 10,
-  },
-  backButton: {
-    padding: 8,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
+    flexShrink: 0,
+    backgroundColor: 'rgba(255, 255, 255, 0.98)',
   },
   headerTitle: {
-    fontSize: 24,
+    fontSize: 20,
+    fontFamily: 'HelveticaNeue-Bold',
     fontWeight: '700',
-    color: '#FFFFFF',
+    color: '#000000',
+  },
+  closeButton: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  scrollView: {
+    flex: 1,
+    flexShrink: 1,
+  },
+  scrollContent: {
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 20,
+    flexGrow: 1,
+  },
+  footer: {
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 24,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0, 0, 0, 0.05)',
+    backgroundColor: 'rgba(255, 255, 255, 0.98)',
+    flexShrink: 0,
+    width: '100%',
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 16,
+    paddingVertical: 60,
+    minHeight: 200,
   },
   loadingText: {
-    color: '#FFFFFF',
-    marginTop: 12,
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  errorContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 16,
+    padding: 20,
+    paddingVertical: 60,
+    minHeight: 200,
   },
   errorText: {
-    color: '#FFFFFF',
     fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
     textAlign: 'center',
+  },
+  backButton: {
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
   },
   backButtonText: {
-    color: '#10B981',
     fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
-    marginTop: 16,
-    padding: 12,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 12,
-    textAlign: 'center',
-  },
-  infoCard: {
-    padding: 16,
-    marginBottom: 24,
+    color: '#000000',
   },
   infoLabel: {
-    color: 'rgba(255,255,255,0.7)',
     fontSize: 12,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.6)',
     marginBottom: 4,
   },
   infoValue: {
-    color: '#FFFFFF',
     fontSize: 20,
+    fontFamily: 'HelveticaNeue-Bold',
     fontWeight: '700',
-    marginBottom: 8,
-  },
-  infoBalance: {
-    color: 'rgba(255,255,255,0.8)',
-    fontSize: 14,
-  },
-  section: {
-    marginBottom: 24,
-  },
-  sectionTitle: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '600',
+    color: '#000000',
     marginBottom: 12,
   },
-  sourceButtons: {
+  infoRow: {
     flexDirection: 'row',
-    gap: 12,
-  },
-  sourceButton: {
-    flex: 1,
-    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    justifyContent: 'center',
-    padding: 16,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 12,
-    gap: 8,
+    marginTop: 8,
   },
-  sourceButtonActive: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.5)',
-  },
-  sourceButtonText: {
-    color: 'rgba(255,255,255,0.7)',
+  infoBalance: {
     fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
+    color: '#000000',
   },
-  sourceButtonTextActive: {
-    color: '#10B981',
+  section: {
+    marginTop: 24,
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 12,
   },
   accountList: {
     gap: 8,
@@ -611,129 +902,49 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     padding: 16,
-    backgroundColor: 'rgba(255,255,255,0.1)',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
     borderRadius: 12,
+    borderWidth: 2,
+    borderColor: 'transparent',
   },
   accountItemActive: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.5)',
+    backgroundColor: 'rgba(0, 0, 0, 0.08)',
+    borderColor: '#000000',
+  },
+  accountInfo: {
+    flex: 1,
   },
   accountName: {
-    color: '#FFFFFF',
     fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    marginBottom: 4,
+  },
+  accountNameActive: {
+    color: '#000000',
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
   },
   accountBalance: {
-    color: 'rgba(255,255,255,0.8)',
     fontSize: 14,
-  },
-  accountBreakdown: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 12,
-    marginTop: 4,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
   },
   emptyText: {
-    color: 'rgba(255,255,255,0.6)',
     fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
     textAlign: 'center',
-    padding: 20,
-  },
-  emptyContainer: {
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 12,
-    padding: 20,
-    marginTop: 8,
-  },
-  input: {
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 12,
-    padding: 16,
-    color: '#FFFFFF',
-    fontSize: 16,
-  },
-  textArea: {
-    minHeight: 80,
-    textAlignVertical: 'top',
-  },
-  dateButton: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 12,
-    padding: 16,
-  },
-  dateText: {
-    color: '#FFFFFF',
-    fontSize: 16,
-  },
-  toggleRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: 16,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 12,
-  },
-  toggleInfo: {
-    flex: 1,
-  },
-  toggleTitle: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-  toggleSubtitle: {
-    color: 'rgba(255,255,255,0.6)',
-    fontSize: 12,
-  },
-  toggleSwitch: {
-    width: 48,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    padding: 2,
-    justifyContent: 'center',
-  },
-  toggleSwitchActive: {
-    backgroundColor: 'rgba(16, 185, 129, 0.5)',
-  },
-  toggleDot: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: '#FFFFFF',
-    alignSelf: 'flex-start',
-  },
-  toggleDotActive: {
-    alignSelf: 'flex-end',
-  },
-  submitButton: {
-    backgroundColor: '#10B981',
-    borderRadius: 12,
-    padding: 18,
-    alignItems: 'center',
-    marginTop: 8,
-    marginBottom: 40,
-  },
-  submitButtonDisabled: {
-    opacity: 0.6,
-  },
-  submitButtonText: {
-    color: '#FFFFFF',
-    fontSize: 18,
-    fontWeight: '700',
   },
   fundBucketButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginTop: 8,
+    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
   },
   fundBucketInfo: {
     flexDirection: 'row',
@@ -752,31 +963,239 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   fundBucketName: {
-    color: 'white',
     fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
+    color: '#000000',
     marginBottom: 4,
   },
   fundBucketAmount: {
-    color: '#9CA3AF',
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
   },
   selectFundButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    marginTop: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.3)',
+    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
     borderStyle: 'dashed',
+    gap: 8,
   },
   selectFundText: {
-    color: '#10B981',
     fontSize: 16,
-    fontWeight: '500',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  amountInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+  },
+  currencySymbol: {
+    fontSize: 24,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginRight: 8,
+  },
+  amountInput: {
+    flex: 1,
+    paddingVertical: 16,
+    fontSize: 24,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  suggestedAmountButton: {
+    marginTop: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    alignSelf: 'flex-start',
+  },
+  suggestedAmountText: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    textDecorationLine: 'underline',
+  },
+  breakdownTitle: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 16,
+  },
+  breakdownRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  breakdownLabel: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  breakdownLabelTotal: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  breakdownValue: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  breakdownValueTotal: {
+    fontSize: 18,
+    fontFamily: 'HelveticaNeue-Bold',
+    fontWeight: '700',
+    color: '#000000',
+  },
+  breakdownDivider: {
+    height: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.1)',
+    marginVertical: 8,
+  },
+  dateButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    gap: 12,
+  },
+  dateText: {
+    flex: 1,
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
+  },
+  input: {
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    padding: 16,
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    minHeight: 80,
+    textAlignVertical: 'top',
+  },
+  submitButton: {
+    backgroundColor: '#000000',
+    borderRadius: 12,
+    padding: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+  },
+  submitButtonDisabled: {
+    backgroundColor: 'rgba(0, 0, 0, 0.2)',
+  },
+  submitButtonText: {
+    fontSize: 18,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  extraPaymentNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 12,
+    padding: 12,
+    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+    borderRadius: 8,
+  },
+  extraPaymentText: {
+    flex: 1,
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.7)',
+    lineHeight: 18,
+  },
+  extraOptionsTitle: {
+    fontSize: 18,
+    fontFamily: 'HelveticaNeue-Bold',
+    fontWeight: '700',
+    color: '#000000',
+    marginBottom: 8,
+  },
+  extraOptionsSubtitle: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    marginBottom: 16,
+  },
+  extraOptionButton: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.03)',
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: 'transparent',
+    marginBottom: 8,
+    gap: 12,
+  },
+  extraOptionButtonActive: {
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderColor: '#000000',
+  },
+  extraOptionContent: {
+    flex: 1,
+    gap: 4,
+  },
+  extraOptionTitle: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  extraOptionDescription: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  skipPaymentsInput: {
+    marginTop: 8,
+    marginLeft: 32,
+    padding: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.03)',
+    borderRadius: 8,
+  },
+  skipPaymentsLabel: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    marginBottom: 8,
+  },
+  skipPaymentsTextInput: {
+    padding: 12,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
   },
 });

@@ -1,59 +1,113 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, Alert } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Alert,
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router } from 'expo-router';
+
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { formatCurrencyAmount } from '@/utils/currency';
-import { BudgetCard } from '@/components/BudgetCard';
 import { 
+  archiveGoal,
   calculateGoalProgress, 
   calculateMonthlyNeed, 
+  checkGoalCompletion,
+  deleteGoal,
+  extendGoal,
+  fetchGoalContributions,
   getProgressColor,
   updateGoalProgress,
-  checkGoalCompletion,
-  extendGoal,
-  archiveGoal,
-  deleteGoal,
   withdrawFromGoal,
-  fetchGoalContributions
+  getGoalAccounts,
+  transferGoalFunds,
 } from '@/utils/goals';
-import { Goal, GoalContribution, GoalContributionWithTransaction } from '@/types';
+import { GoalContributionWithTransaction, Account } from '@/types';
 import AddContributionModal from '../modals/add-contribution';
+import EditGoalModal from '../modals/edit-goal';
 import GoalCelebrationScreen from '@/components/GoalCelebrationScreen';
 import WhatsNextModal from '@/components/WhatsNextModal';
 import ExtendGoalModal from '@/components/ExtendGoalModal';
 import WithdrawFundsModal from '@/components/WithdrawFundsModal';
+import TransferGoalFundsModal from '@/components/TransferGoalFundsModal';
+import { BudgetCard } from '@/components/BudgetCard';
 
-export default function GoalDetailScreen() {
+const GoalDetailScreen: React.FC = () => {
   const { id } = useLocalSearchParams();
   const { user } = useAuth();
   const { currency } = useSettings();
-  const { goals, budgets, refreshGoals, refreshBudgets } = useRealtimeData();
-  const [activeTab, setActiveTab] = useState('overview');
-  const [showAddContribution, setShowAddContribution] = useState(false);
+  const { goals, budgets, refreshGoals, accounts, globalRefresh } = useRealtimeData();
+
+  const goal = useMemo(() => goals.find((item) => item.id === id), [goals, id]);
+
   const [contributions, setContributions] = useState<GoalContributionWithTransaction[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loadingContributions, setLoadingContributions] = useState(false);
+  const [goalAccounts, setGoalAccounts] = useState<Array<{ account: Account; balance: number }>>([]);
+  const [loadingAccounts, setLoadingAccounts] = useState(false);
+  const [activeTab, setActiveTab] = useState<'transactions' | 'accounts' | 'analytics'>('transactions');
   
-  // Completion flow states
+  const [showAddContribution, setShowAddContribution] = useState(false);
+  const [showEditGoal, setShowEditGoal] = useState(false);
   const [showCelebration, setShowCelebration] = useState(false);
   const [showWhatsNext, setShowWhatsNext] = useState(false);
   const [showExtendGoal, setShowExtendGoal] = useState(false);
   const [showWithdrawFunds, setShowWithdrawFunds] = useState(false);
+  const [showTransferFunds, setShowTransferFunds] = useState(false);
+  const [transferFromAccount, setTransferFromAccount] = useState<string | null>(null);
 
-  // Find the goal by ID
-  const goal = goals.find(g => g.id === id as string);
+  const formatCurrency = useCallback(
+    (value: number) => formatCurrencyAmount(value, currency),
+    [currency]
+  );
+
+  const fetchContributions = useCallback(async () => {
+    if (!goal) return;
+
+    try {
+      setLoadingContributions(true);
+      const rows = await fetchGoalContributions(goal.id);
+      setContributions(rows);
+
+      const { isNewlyAchieved } = await updateGoalProgress(goal.id);
+      if (isNewlyAchieved) {
+          setShowCelebration(true);
+          await refreshGoals();
+        }
+      } catch (error) {
+      console.error('Error fetching goal contributions', error);
+    } finally {
+      setLoadingContributions(false);
+      }
+  }, [goal, refreshGoals]);
+
+  const fetchGoalAccounts = useCallback(async () => {
+    if (!goal) return;
+    
+    try {
+      setLoadingAccounts(true);
+      const accounts = await getGoalAccounts(goal.id);
+      setGoalAccounts(accounts);
+    } catch (error) {
+      console.error('Error fetching goal accounts', error);
+    } finally {
+      setLoadingAccounts(false);
+    }
+  }, [goal]);
 
   useEffect(() => {
     if (goal) {
       fetchContributions();
-      checkForCompletion();
+      fetchGoalAccounts();
     }
-  }, [goal]);
+  }, [goal, fetchContributions, fetchGoalAccounts]);
 
-  // Periodic check for completion (every 5 seconds when goal is active)
   useEffect(() => {
     if (!goal || goal.is_achieved) return;
 
@@ -61,522 +115,414 @@ export default function GoalDetailScreen() {
       try {
         const { isCompleted } = await checkGoalCompletion(goal.id);
         if (isCompleted) {
-          setShowCelebration(true);
-          await refreshGoals();
+        setShowCelebration(true);
+      await refreshGoals();
           clearInterval(interval);
         }
-      } catch (error) {
-        console.error('Error in periodic completion check:', error);
+    } catch (error) {
+        console.error('Error checking goal completion', error);
       }
-    }, 5000); // Check every 5 seconds
+    }, 5000);
 
     return () => clearInterval(interval);
+  }, [goal, refreshGoals]);
+
+  const progress = useMemo(() => {
+    if (!goal) return 0;
+    return calculateGoalProgress(goal.current_amount, goal.target_amount);
   }, [goal]);
 
-  const checkForCompletion = async () => {
-    if (!goal) return;
-    
-    try {
-      const { isCompleted } = await checkGoalCompletion(goal.id);
-      if (isCompleted) {
-        setShowCelebration(true);
-        await refreshGoals(); // Refresh to get updated goal data
-      }
-    } catch (error) {
-      console.error('Error checking goal completion:', error);
-    }
-  };
-
-  const fetchContributions = async () => {
-    if (!goal) return;
-    
-    try {
-      setLoading(true);
-      const contributions = await fetchGoalContributions(goal.id);
-      setContributions(contributions);
-      
-      // Update goal progress
-      const { goal: updatedGoal, isNewlyAchieved } = await updateGoalProgress(goal.id);
-      
-      if (isNewlyAchieved) {
-        setShowCelebration(true);
-      }
-      
-      // Refresh goals data
-      await refreshGoals();
-    } catch (error) {
-      console.error('Error fetching contributions:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  if (!goal) {
-    return (
-      <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
-        <SafeAreaView style={styles.safeArea}>
-          <View style={styles.errorContainer}>
-            <Ionicons name="alert-circle" size={48} color="rgba(255, 255, 255, 0.7)" />
-            <Text style={styles.errorTitle}>Goal Not Found</Text>
-            <Text style={styles.errorDescription}>
-              The goal you're looking for doesn't exist or has been deleted.
-            </Text>
-            <TouchableOpacity style={styles.errorBackButton} onPress={() => router.back()}>
-              <Text style={styles.errorBackButtonText}>Go Back</Text>
-            </TouchableOpacity>
-          </View>
-        </SafeAreaView>
-      </LinearGradient>
-    );
-  }
-
-  const formatCurrency = (amount: number) => {
-    return formatCurrencyAmount(amount, currency);
-  };
-
-  const progress = calculateGoalProgress(goal.current_amount, goal.target_amount);
   const progressColor = getProgressColor(progress);
-  const monthlyNeed = calculateMonthlyNeed(goal.current_amount, goal.target_amount, goal.target_date);
+  const monthlyNeed = useMemo(() => {
+    if (!goal) return null;
+    return calculateMonthlyNeed(goal.current_amount, goal.target_amount, goal.target_date);
+  }, [goal]);
 
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString('en-US', {
+  const linkedBudgets = useMemo(
+    () =>
+      budgets.filter(
+        (budget) => budget.budget_type === 'goal_based' && budget.goal_id === goal?.id
+      ),
+    [budgets, goal]
+  );
+
+  const remainingAmount = goal ? Math.max(0, goal.target_amount - goal.current_amount) : 0;
+  const estCompletion = goal?.target_date
+    ? new Date(goal.target_date).toLocaleDateString(undefined, {
       month: 'short',
-      day: 'numeric',
       year: 'numeric',
-    });
-  };
-
-  const getDaysRemaining = (deadline?: string) => {
-    if (!deadline) return null;
-    const today = new Date();
-    const deadlineDate = new Date(deadline);
-    const diffTime = deadlineDate.getTime() - today.getTime();
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    return diffDays;
-  };
+      })
+    : monthlyNeed
+    ? 'On track'
+    : '—';
 
   const handleAddContributionSuccess = async () => {
     await refreshGoals();
     await fetchContributions();
-    await checkForCompletion(); // Check if goal is now completed
+    await fetchGoalAccounts();
     setShowAddContribution(false);
-  };
-
-  // Completion flow handlers
-  const handleViewSummary = () => {
-    setShowCelebration(false);
-    // TODO: Navigate to summary screen
-  };
-
-  const handleWhatsNext = () => {
-    setShowCelebration(false);
-    setShowWhatsNext(true);
-  };
-
-  const handleExtendGoal = () => {
-    setShowWhatsNext(false);
-    setShowExtendGoal(true);
   };
 
   const handleArchiveGoal = async () => {
     if (!goal) return;
-    
     try {
       await archiveGoal(goal.id);
       await refreshGoals();
       setShowWhatsNext(false);
-      Alert.alert('Goal Archived', 'We\'ll tuck this away. You can revisit it anytime.');
+      Alert.alert('Goal archived', 'We tucked this goal away for later.');
       router.back();
     } catch (error) {
-      console.error('Error archiving goal:', error);
-      Alert.alert('Error', 'Failed to archive goal. Please try again.');
-    }
-  };
-
-  const handleWithdrawFunds = () => {
-    setShowWhatsNext(false);
-    setShowWithdrawFunds(true);
-  };
-
-  const handleDeleteGoal = () => {
-    setShowWhatsNext(false);
-    Alert.alert(
-      'Delete Goal',
-      'Delete this goal and all its history? This can\'t be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Delete', style: 'destructive', onPress: handleDeleteConfirm }
-      ]
-    );
-  };
-
-  const handleDeleteConfirm = async () => {
-    if (!goal) return;
-    
-    try {
-      await deleteGoal(goal.id);
-      await refreshGoals();
-      router.back();
-    } catch (error) {
-      console.error('Error deleting goal:', error);
-      Alert.alert('Error', 'Failed to delete goal. Please try again.');
+      console.error('Error archiving goal', error);
+      Alert.alert('Error', 'Failed to archive goal. Try again.');
     }
   };
 
   const handleExtendGoalConfirm = async (data: { newTarget?: number; newDate?: string }) => {
     if (!goal) return;
-    
     try {
       await extendGoal(goal.id, data.newTarget, data.newDate);
       await refreshGoals();
       setShowExtendGoal(false);
-      Alert.alert('Goal Extended', 'Dream extended — let\'s aim for your new target!');
+      Alert.alert('Goal extended', 'Your goal timeline has been updated.');
     } catch (error) {
-      console.error('Error extending goal:', error);
-      Alert.alert('Error', 'Failed to extend goal. Please try again.');
+      console.error('Error extending goal', error);
+      Alert.alert('Error', 'Could not extend goal.');
     }
   };
 
-  const handleWithdrawConfirm = async (data: { amount: number; destinationAccountId: string; note?: string }) => {
+  const handleWithdrawConfirm = async (data: {
+    amount: number;
+    sourceAccountId: string; // Account where goal fund is located
+    destinationAccountId: string; // Account where money goes
+    note?: string;
+  }) => {
     if (!goal) return;
-    
     try {
-      await withdrawFromGoal(goal.id, data.amount, data.destinationAccountId, data.note);
+      await withdrawFromGoal(goal.id, data.amount, data.sourceAccountId, data.destinationAccountId, data.note);
       await refreshGoals();
       await fetchContributions();
+      await fetchGoalAccounts();
       setShowWithdrawFunds(false);
-      Alert.alert('Funds Withdrawn', `${formatCurrency(data.amount)} withdrawn — you made it real.`);
-    } catch (error) {
-      console.error('Error withdrawing funds:', error);
-      Alert.alert('Error', 'Failed to withdraw funds. Please try again.');
+      Alert.alert('Funds withdrawn', `${formatCurrency(data.amount)} moved to your account.`);
+    } catch (error: any) {
+      console.error('Error withdrawing goal funds', error);
+      Alert.alert('Error', error.message || 'Withdrawal failed. Try again.');
     }
   };
 
-  const renderOverview = () => (
-    <View style={styles.tabContent}>
-      {/* Goal Progress Card */}
-      <View style={styles.progressCard}>
-        <View style={styles.progressHeader}>
-          <View style={[styles.goalIcon, { backgroundColor: goal.color }]}>
-            <Ionicons name={goal.icon as any} size={32} color="white" />
-          </View>
-          <View style={styles.goalInfo}>
-            <Text style={styles.goalTitle}>{goal.title}</Text>
-            <Text style={styles.goalDescription}>{goal.description}</Text>
-          </View>
-        </View>
-
-        <View style={styles.progressContainer}>
-          <View style={styles.progressBar}>
-            <View
-              style={[
-                styles.progressFill,
-                {
-                  width: `${progress}%`,
-                  backgroundColor: progressColor,
-                },
-              ]}
-            />
-          </View>
-          <Text style={styles.progressText}>{progress}%</Text>
-        </View>
-
-        <View style={styles.goalStats}>
-          <View style={styles.statItem}>
-            <Text style={styles.statLabel}>Current</Text>
-            <Text style={styles.statValue}>{formatCurrency(goal.current_amount)}</Text>
-          </View>
-          <View style={styles.statItem}>
-            <Text style={styles.statLabel}>Target</Text>
-            <Text style={styles.statValue}>{formatCurrency(goal.target_amount)}</Text>
-          </View>
-          <View style={styles.statItem}>
-            <Text style={styles.statLabel}>Remaining</Text>
-            <Text style={styles.statValue}>
-              {formatCurrency(goal.target_amount - goal.current_amount)}
-            </Text>
-          </View>
-        </View>
-      </View>
-
-      {/* Goal Timeline */}
-      <View style={styles.timelineCard}>
-        <Text style={styles.sectionTitle}>Goal Timeline</Text>
-        {goal.target_date && (
-          <View style={styles.timelineItem}>
-            <View style={styles.timelineIcon}>
-              <Ionicons name="calendar" size={20} color="#10B981" />
-            </View>
-            <View style={styles.timelineContent}>
-              <Text style={styles.timelineTitle}>Deadline</Text>
-              <Text style={styles.timelineValue}>
-                {formatDate(goal.target_date)} ({getDaysRemaining(goal.target_date)} days)
-              </Text>
-            </View>
-          </View>
-        )}
-        {monthlyNeed !== null && (
-          <View style={styles.timelineItem}>
-            <View style={styles.timelineIcon}>
-              <Ionicons name="calculator" size={20} color="#F59E0B" />
-            </View>
-            <View style={styles.timelineContent}>
-              <Text style={styles.timelineTitle}>Monthly Need</Text>
-              <Text style={styles.timelineValue}>
-                {formatCurrency(monthlyNeed)}
-              </Text>
-            </View>
-          </View>
-        )}
-      </View>
-
-      {/* Linked Budgets Section */}
-      {(() => {
-        const linkedBudgets = budgets.filter(budget => 
-          budget.budget_type === 'goal_based' && budget.goal_id === goal.id
-        );
-        
-        return (
-          <View style={styles.linkedBudgetsCard}>
-            <Text style={styles.sectionTitle}>Linked Budgets</Text>
-            {linkedBudgets.length > 0 ? (
-              <View style={styles.linkedBudgetsList}>
-                {linkedBudgets.map((budget) => (
-                  <BudgetCard
-                    key={budget.id}
-                    budget={budget}
-                    onPress={() => router.push(`/budget/${budget.id}`)}
-                  />
-                ))}
-              </View>
-            ) : (
-              <View style={styles.emptyLinkedBudgets}>
-                <Ionicons name="wallet-outline" size={48} color="rgba(255, 255, 255, 0.5)" />
-                <Text style={styles.emptyLinkedBudgetsTitle}>No Linked Budgets</Text>
-                <Text style={styles.emptyLinkedBudgetsDescription}>
-                  Create a goal-based budget to track spending and automatically contribute to this goal
-                </Text>
-                <TouchableOpacity 
-                  style={styles.createBudgetButton}
-                  onPress={() => router.push('/(tabs)/budgets')}
-                >
-                  <Text style={styles.createBudgetText}>Create Budget</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-          </View>
-        );
-      })()}
-    </View>
-  );
-
-  const renderContributions = () => (
-    <View style={styles.tabContent}>
-      <View style={styles.addContributionButton}>
-        <TouchableOpacity
-          style={styles.addButton}
-          onPress={() => setShowAddContribution(true)}
-        >
-          <Ionicons name="add" size={20} color="white" />
-          <Text style={styles.addButtonText}>Add Contribution</Text>
-        </TouchableOpacity>
-      </View>
-
-      <View style={styles.contributionsList}>
-        {loading ? (
-          <View style={styles.loadingContainer}>
-            <Text style={styles.loadingText}>Loading contributions...</Text>
-          </View>
-        ) : contributions.length > 0 ? (
-          contributions.map((contribution) => (
-            <View key={contribution.id} style={styles.contributionCard}>
-              <View style={styles.contributionHeader}>
-                <View style={styles.contributionIcon}>
-                  <Ionicons
-                    name={contribution.contribution_type === 'manual' ? 'add-circle' : 'refresh'}
-                    size={20}
-                    color="#10B981"
-                  />
-                </View>
-                <View style={styles.contributionInfo}>
-                  <Text style={styles.contributionDescription}>
-                    {contribution.contribution_type === 'manual' ? 'Manual Contribution' : 'Automatic Contribution'}
-                  </Text>
-                  <Text style={styles.contributionDate}>
-                    {formatDate(contribution.created_at)}
-                  </Text>
-                </View>
-                <Text style={styles.contributionAmount}>
-                  +{formatCurrency(contribution.amount)}
-                </Text>
-              </View>
-            </View>
-          ))
-        ) : (
-          <View style={styles.emptyContributions}>
-            <Ionicons name="add-circle-outline" size={48} color="rgba(255, 255, 255, 0.5)" />
-            <Text style={styles.emptyContributionsTitle}>No Contributions Yet</Text>
-            <Text style={styles.emptyContributionsDescription}>
-              Start contributing to your goal to see your progress here.
-            </Text>
-          </View>
-        )}
-      </View>
-    </View>
-  );
-
-  const renderMilestones = () => {
-    const milestones = [
-      { id: 1, amount: goal.target_amount * 0.25, title: '25% Complete', achieved: progress >= 25 },
-      { id: 2, amount: goal.target_amount * 0.5, title: '50% Complete', achieved: progress >= 50 },
-      { id: 3, amount: goal.target_amount * 0.75, title: '75% Complete', achieved: progress >= 75 },
-      { id: 4, amount: goal.target_amount, title: 'Goal Achieved', achieved: progress >= 100 },
-    ];
-
-    return (
-      <View style={styles.tabContent}>
-        <View style={styles.milestonesList}>
-          {milestones.map((milestone, index) => (
-            <View key={`${goal.id}-milestone-${index}`} style={styles.milestoneCard}>
-              <View style={styles.milestoneHeader}>
-                <View
-                  style={[
-                    styles.milestoneIcon,
-                    {
-                      backgroundColor: milestone.achieved ? '#10B981' : '#6B7280',
-                    },
-                  ]}
-                >
-                  <Ionicons
-                    name={milestone.achieved ? 'checkmark' : 'flag'}
-                    size={20}
-                    color="white"
-                  />
-                </View>
-                <View style={styles.milestoneInfo}>
-                  <Text style={styles.milestoneTitle}>{milestone.title}</Text>
-                  <Text style={styles.milestoneAmount}>
-                    {formatCurrency(milestone.amount)}
-                  </Text>
-                </View>
-                {milestone.achieved && (
-                  <Text style={styles.milestoneDate}>
-                    Achieved!
-                  </Text>
-                )}
-              </View>
-              {milestone.achieved && (
-                <View style={styles.milestoneProgress}>
-                  <View style={styles.milestoneProgressBar}>
-                    <View
-                      style={[
-                        styles.milestoneProgressFill,
-                        { backgroundColor: '#10B981' },
-                      ]}
-                    />
-                  </View>
-                  <Text style={styles.milestoneProgressText}>Achieved!</Text>
-                </View>
-              )}
-            </View>
-          ))}
-        </View>
-      </View>
+  const handleDeleteGoal = () => {
+    if (!goal) return;
+    Alert.alert(
+      'Delete goal?',
+      'This will remove the goal and its history permanently.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+    try {
+              await deleteGoal(goal.id);
+      await refreshGoals();
+              router.back();
+    } catch (error) {
+              console.error('Error deleting goal', error);
+              Alert.alert('Error', 'Failed to delete goal.');
+    }
+          },
+        },
+      ]
     );
   };
 
-  return (
-    <LinearGradient
-      colors={['#99D795', '#99D795', '#99D795']}
-      style={styles.container}
-    >
+  const handleTransferFunds = async (fromAccountId: string, toAccountId: string, amount: number) => {
+    if (!goal || !user) return;
+
+    try {
+      await transferGoalFunds(goal.id, fromAccountId, toAccountId, amount, user.id);
+      await fetchGoalAccounts();
+      await refreshGoals();
+      await globalRefresh();
+      setShowTransferFunds(false);
+      setTransferFromAccount(null);
+      Alert.alert('Success', 'Goal funds transferred successfully.');
+    } catch (error: any) {
+      console.error('Error transferring goal funds', error);
+      Alert.alert('Error', error.message || 'Failed to transfer goal funds.');
+    }
+  };
+
+  const renderContributionRow = (entry: GoalContributionWithTransaction) => {
+    const amount = Number(entry.amount ?? 0);
+    const isWithdraw = amount < 0;
+    const prefix = isWithdraw ? '−' : '+';
+    const title = entry.contribution_type === 'manual'
+      ? 'Monthly Contribution'
+      : isWithdraw
+      ? 'Withdrawal'
+      : 'Contribution Boost';
+    return (
+      <View key={entry.id} style={styles.transactionRow}>
+        <View style={[styles.transactionIcon, isWithdraw && styles.transactionIconWithdraw]}>
+          <Ionicons
+            name={isWithdraw ? 'remove' : 'add'}
+            size={18}
+            color={isWithdraw ? '#B83228' : '#4F6F3E'}
+            />
+          </View>
+        <View style={styles.transactionInfo}>
+          <Text style={styles.transactionTitle}>{title}</Text>
+          <Text style={styles.transactionSubtitle}>
+            {new Date(entry.created_at).toLocaleDateString(undefined, {
+              month: 'short',
+              day: 'numeric',
+              year: 'numeric',
+            })}
+          </Text>
+        </View>
+        <Text style={[styles.transactionAmount, isWithdraw && styles.transactionAmountWithdraw]}>
+          {prefix}
+          {formatCurrency(Math.abs(amount))}
+            </Text>
+          </View>
+    );
+  };
+
+  if (!goal) {
+    return (
       <SafeAreaView style={styles.safeArea}>
-        <ScrollView style={styles.scrollView}>
-          {/* Header */}
-          <View style={styles.header}>
-            <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-              <Ionicons name="arrow-back" size={24} color="white" />
+        <View style={styles.emptyState}>
+          <Ionicons name="alert-circle" size={48} color="#8BA17B" />
+          <Text style={styles.emptyTitle}>Goal not found</Text>
+          <Text style={styles.emptyMessage}>
+            The goal you’re looking for may have been deleted or moved.
+              </Text>
+          <TouchableOpacity style={styles.primaryButton} onPress={() => router.back()}>
+            <Text style={styles.primaryButtonText}>Go Back</Text>
+          </TouchableOpacity>
+            </View>
+      </SafeAreaView>
+    );
+  }
+        
+        return (
+    <SafeAreaView style={styles.safeArea}>
+      <View style={styles.container}>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scrollContent}
+        >
+          <View style={styles.headerBar}>
+            <TouchableOpacity style={styles.iconButton} onPress={() => router.back()}>
+              <Ionicons name="arrow-back" size={20} color="#0E401C" />
             </TouchableOpacity>
-            <Text style={styles.headerTitle}>Goal Details</Text>
-            <TouchableOpacity style={styles.editButton}>
-              <Ionicons name="create" size={24} color="white" />
-            </TouchableOpacity>
+            <Text style={styles.headerTitle}>{goal.title}</Text>
+            <View style={styles.headerActions}>
+              <TouchableOpacity style={styles.iconButton} onPress={() => setShowEditGoal(true)}>
+                <Ionicons name="create-outline" size={20} color="#0E401C" />
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.iconButton} onPress={() => setShowWhatsNext(true)}>
+                <Ionicons name="ellipsis-horizontal" size={20} color="#0E401C" />
+                </TouchableOpacity>
+              </View>
           </View>
 
-          {/* Tab Selector */}
-          <View style={styles.tabContainer}>
-            <TouchableOpacity
-              style={[
-                styles.tabButton,
-                activeTab === 'overview' && styles.activeTab,
-              ]}
-              onPress={() => setActiveTab('overview')}
-            >
-              <Ionicons 
-                name={activeTab === 'overview' ? 'home' : 'home-outline'} 
-                size={20} 
-                color={activeTab === 'overview' ? '#10B981' : 'rgba(255, 255, 255, 0.7)'} 
-              />
-              <Text
-                style={[
-                  styles.tabText,
-                  activeTab === 'overview' && styles.activeTabText,
-                ]}
+          <View style={styles.heroCard}>
+            <View style={styles.progressRing}>
+              <View style={[styles.progressFillRing, { borderColor: progressColor, transform: [{ rotate: `${progress * 1.8}deg` }] }]} />
+              <View style={styles.progressInner}>
+                <Text style={styles.progressValue}>{formatCurrency(goal.current_amount)}</Text>
+                <Text style={styles.progressLabel}>of {formatCurrency(goal.target_amount)}</Text>
+    </View>
+            </View>
+
+            <View style={styles.metricRow}>
+              <MetricCard label="Target Amount" value={formatCurrency(goal.target_amount)} />
+              <MetricCard label="Est. Completion" value={estCompletion} />
+            </View>
+
+            <View style={styles.actionsRow}>
+        <TouchableOpacity
+                style={[styles.primaryButton, styles.flexOne]}
+          onPress={() => setShowAddContribution(true)}
+        >
+                <Ionicons name="add" size={16} color="#FFFFFF" />
+                <Text style={styles.primaryButtonText}>Boost Goal</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.secondaryIconButton} onPress={() => setShowWithdrawFunds(true)}>
+                <Ionicons name="arrow-down" size={18} color="#4F6F3E" />
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.secondaryIconButton} onPress={handleDeleteGoal}>
+                <Ionicons name="trash-outline" size={18} color="#4F6F3E" />
+        </TouchableOpacity>
+            </View>
+      </View>
+
+          {/* Goal Funds Breakdown Section */}
+          {goalAccounts.length > 0 && (
+            <View style={styles.fundsBreakdownSection}>
+              <Text style={styles.sectionTitle}>Goal Funds Breakdown</Text>
+              <View style={styles.accountCardsContainer}>
+                {goalAccounts.map(({ account, balance }) => (
+                  <TouchableOpacity
+                    key={account.id}
+                    style={styles.accountCard}
+                    onPress={() => router.push(`/account/${account.id}`)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={[styles.accountCardIcon, { backgroundColor: account.color }]}>
+                      <Ionicons name={account.icon as any} size={24} color="white" />
+          </View>
+                    <View style={styles.accountCardInfo}>
+                      <Text style={styles.accountCardName}>{account.name}</Text>
+                      <Text style={styles.accountCardBalance}>{formatCurrency(balance)}</Text>
+                </View>
+                    <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
+                  </TouchableOpacity>
+                ))}
+                </View>
+              </View>
+          )}
+
+          <View style={styles.tabControl}>
+            {[
+              { key: 'transactions', label: 'Contributions' },
+              { key: 'accounts', label: 'Accounts' },
+              { key: 'analytics', label: 'Analytics' },
+            ].map((tab) => (
+              <TouchableOpacity
+                key={tab.key}
+                onPress={() => setActiveTab(tab.key as typeof activeTab)}
+                style={[styles.tabButton, activeTab === tab.key && styles.tabButtonActive]}
               >
-                Overview
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.tabButton,
-                activeTab === 'contributions' && styles.activeTab,
-              ]}
-              onPress={() => setActiveTab('contributions')}
-            >
-              <Ionicons 
-                name={activeTab === 'contributions' ? 'add-circle' : 'add-circle-outline'} 
-                size={20} 
-                color={activeTab === 'contributions' ? '#10B981' : 'rgba(255, 255, 255, 0.7)'} 
-              />
-              <Text
-                style={[
-                  styles.tabText,
-                  activeTab === 'contributions' && styles.activeTabText,
-                ]}
-              >
-                Contributions
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.tabButton,
-                activeTab === 'milestones' && styles.activeTab,
-              ]}
-              onPress={() => setActiveTab('milestones')}
-            >
-              <Ionicons 
-                name={activeTab === 'milestones' ? 'flag' : 'flag-outline'} 
-                size={20} 
-                color={activeTab === 'milestones' ? '#10B981' : 'rgba(255, 255, 255, 0.7)'} 
-              />
-              <Text
-                style={[
-                  styles.tabText,
-                  activeTab === 'milestones' && styles.activeTabText,
-                ]}
-              >
-                Milestones
-              </Text>
-            </TouchableOpacity>
+                <Text style={[styles.tabText, activeTab === tab.key && styles.tabTextActive]}>
+                  {tab.label}
+            </Text>
+              </TouchableOpacity>
+            ))}
           </View>
 
-          {/* Tab Content */}
-          {activeTab === 'overview' && renderOverview()}
-          {activeTab === 'contributions' && renderContributions()}
-          {activeTab === 'milestones' && renderMilestones()}
+          {activeTab === 'transactions' && (
+            <View style={styles.sectionCard}>
+              {loadingContributions ? (
+                <Text style={styles.emptyMessageText}>Loading transactions…</Text>
+              ) : contributions.length === 0 ? (
+                <Text style={styles.emptyMessageText}>No contributions yet. Add one to start tracking progress.</Text>
+              ) : (
+                contributions.map(renderContributionRow)
+        )}
+      </View>
+          )}
+
+          {activeTab === 'accounts' && (
+            <View style={styles.sectionCard}>
+              {loadingAccounts ? (
+                <Text style={styles.emptyMessageText}>Loading accounts…</Text>
+              ) : goalAccounts.length === 0 ? (
+                <View style={styles.emptyState}>
+                  <Ionicons name="wallet-outline" size={48} color="#8BA17B" />
+                  <Text style={styles.emptyMessageText}>
+                    No accounts holding funds for this goal yet.
+                  </Text>
+                  <Text style={styles.emptyMessageText}>
+                    Add a contribution to start saving in an account.
+                  </Text>
+              </View>
+              ) : (
+                <View style={{ gap: 12 }}>
+                  {goalAccounts.map(({ account, balance }) => (
+                    <View key={account.id} style={styles.accountDetailCard}>
+                      <TouchableOpacity
+                        onPress={() => router.push(`/account/${account.id}`)}
+                        activeOpacity={0.7}
+                      >
+                        <View style={styles.accountDetailHeader}>
+                          <View style={[styles.accountDetailIcon, { backgroundColor: account.color }]}>
+                            <Ionicons name={account.icon as any} size={24} color="white" />
+                  </View>
+                          <View style={styles.accountDetailInfo}>
+                            <Text style={styles.accountDetailName}>{account.name}</Text>
+                            <Text style={styles.accountDetailType}>
+                              {account.type === 'bank' ? 'Bank Account' :
+                               account.type === 'card' ? 'Card' :
+                               account.type === 'wallet' ? 'Wallet' :
+                               account.type === 'cash' ? 'Cash' : account.type}
+                            </Text>
+                </View>
+                          <View style={styles.accountDetailAmount}>
+                            <Text style={styles.accountDetailBalance}>{formatCurrency(balance)}</Text>
+                            <Text style={styles.accountDetailLabel}>Goal Funds</Text>
+            </View>
+        </View>
+                        <View style={styles.accountDetailFooter}>
+                          <Text style={styles.accountDetailTotalLabel}>Total Account Balance</Text>
+                          <Text style={styles.accountDetailTotal}>{formatCurrency(account.balance)}</Text>
+      </View>
+            </TouchableOpacity>
+                      <View style={styles.accountActions}>
+            <TouchableOpacity
+                          style={styles.accountActionButton}
+                          onPress={() => {
+                            setTransferFromAccount(account.id);
+                            setShowTransferFunds(true);
+                          }}
+            >
+                          <Ionicons name="swap-horizontal" size={18} color="#10B981" />
+                          <Text style={styles.accountActionButtonText}>Transfer</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+                          style={[styles.accountActionButton, styles.accountActionButtonSecondary]}
+                          onPress={() => {
+                            setTransferFromAccount(account.id);
+                            setShowEditGoal(true);
+                          }}
+            >
+                          <Ionicons name="settings-outline" size={18} color="#3B82F6" />
+                          <Text style={[styles.accountActionButtonText, styles.accountActionButtonTextSecondary]}>Manage</Text>
+            </TouchableOpacity>
+                      </View>
+                    </View>
+                  ))}
+                  {linkedBudgets.length > 0 && (
+                    <>
+                      <View style={styles.divider} />
+                      <Text style={styles.budgetsSectionTitle}>Linked Budgets</Text>
+                      {linkedBudgets.map((budget) => (
+                        <BudgetCard
+                          key={budget.id}
+                          budget={budget}
+                          onPress={() => router.push(`/budget/${budget.id}`)}
+                        />
+                      ))}
+                    </>
+                  )}
+                </View>
+              )}
+            </View>
+          )}
+
+          {activeTab === 'analytics' && (
+            <View style={styles.sectionCard}>
+              <Text style={styles.emptyMessageText}>Analytics coming soon.</Text>
+              {monthlyNeed && (
+                <View style={styles.analyticsCard}>
+                  <Text style={styles.analyticsLabel}>Monthly amount needed</Text>
+                  <Text style={styles.analyticsValue}>{formatCurrency(monthlyNeed)}</Text>
+                  <Text style={styles.analyticsNote}>
+                    Keep contributing this amount to stay on track for your goal.
+              </Text>
+          </View>
+              )}
+              <View style={styles.analyticsCard}>
+                <Text style={styles.analyticsLabel}>Remaining</Text>
+                <Text style={styles.analyticsValue}>{formatCurrency(remainingAmount)}</Text>
+              </View>
+            </View>
+          )}
+
+          <View style={{ height: 96 }} />
         </ScrollView>
 
-        {/* Add Contribution Modal */}
         <AddContributionModal
           visible={showAddContribution}
           onClose={() => setShowAddContribution(false)}
@@ -584,12 +530,14 @@ export default function GoalDetailScreen() {
           goal={goal}
         />
 
-        {/* Completion Flow Modals */}
         {showCelebration && (
           <GoalCelebrationScreen
             goal={goal}
-            onViewSummary={handleViewSummary}
-            onWhatsNext={handleWhatsNext}
+            onViewSummary={() => setShowCelebration(false)}
+            onWhatsNext={() => {
+              setShowCelebration(false);
+              setShowWhatsNext(true);
+            }}
             onClose={() => setShowCelebration(false)}
           />
         )}
@@ -597,9 +545,19 @@ export default function GoalDetailScreen() {
         <WhatsNextModal
           visible={showWhatsNext}
           onClose={() => setShowWhatsNext(false)}
-          onExtendGoal={handleExtendGoal}
+          onEditGoal={() => {
+            setShowWhatsNext(false);
+            setShowEditGoal(true);
+          }}
+          onExtendGoal={() => {
+            setShowWhatsNext(false);
+            setShowExtendGoal(true);
+          }}
           onArchiveGoal={handleArchiveGoal}
-          onWithdrawFunds={handleWithdrawFunds}
+          onWithdrawFunds={() => {
+            setShowWhatsNext(false);
+            setShowWithdrawFunds(true);
+          }}
           onDeleteGoal={handleDeleteGoal}
           goal={goal}
         />
@@ -617,445 +575,468 @@ export default function GoalDetailScreen() {
           onWithdraw={handleWithdrawConfirm}
           goal={goal}
         />
+
+        <EditGoalModal
+          visible={showEditGoal}
+          goal={goal}
+          onClose={() => {
+            setShowEditGoal(false);
+            setTransferFromAccount(null);
+          }}
+          onUpdate={async () => {
+            await fetchGoalAccounts();
+            await fetchContributions();
+            await refreshGoals();
+          }}
+          initialTab={transferFromAccount ? 'accounts' : 'details'}
+        />
+
+        {/* Transfer Funds Modal */}
+        {showTransferFunds && transferFromAccount && goal && (
+          <TransferGoalFundsModal
+            visible={showTransferFunds}
+            goal={goal}
+            fromAccountId={transferFromAccount}
+            goalAccounts={goalAccounts}
+            availableAccounts={accounts.filter(
+              acc => acc.currency === goal.currency && (acc.is_active || acc.is_active === null) && acc.id !== transferFromAccount
+            )}
+            onClose={() => {
+              setShowTransferFunds(false);
+              setTransferFromAccount(null);
+            }}
+            onTransfer={handleTransferFunds}
+          />
+        )}
+      </View>
       </SafeAreaView>
-    </LinearGradient>
   );
+};
+
+interface MetricCardProps {
+  label: string;
+  value: string;
 }
 
+const MetricCard: React.FC<MetricCardProps> = ({ label, value }) => (
+  <View style={styles.metricCard}>
+    <Text style={styles.metricCardLabel}>{label}</Text>
+    <Text style={styles.metricCardValue}>{value}</Text>
+  </View>
+);
+
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
-  scrollView: {
+  container: {
     flex: 1,
-    paddingHorizontal: 20,
+    backgroundColor: '#FFFFFF',
   },
-  header: {
+  scrollContent: {
+    paddingHorizontal: 20,
+    paddingBottom: 24,
+  },
+  headerBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: 20,
-    paddingBottom: 30,
-  },
-  backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
+    paddingTop: 16,
+    paddingBottom: 12,
   },
   headerTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'white',
+    fontSize: 18,
+    color: '#0E401C',
+    fontFamily: 'Archivo Black',
   },
-  editButton: {
+  headerActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  iconButton: {
     width: 40,
     height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#D7DECC',
+    alignItems: 'center',
     justifyContent: 'center',
+  },
+  heroCard: {
+    backgroundColor: '#F7F9F2',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    padding: 20,
+    gap: 16,
+  },
+  progressRing: {
+    alignSelf: 'center',
+    width: 160,
+    height: 160,
+    borderRadius: 80,
+    borderWidth: 12,
+    borderColor: '#E5ECD6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  progressFillRing: {
+    position: 'absolute',
+    top: -12,
+    left: -12,
+    width: 184,
+    height: 184,
+    borderRadius: 92,
+    borderWidth: 12,
+    borderColor: '#4F6F3E',
+    opacity: 0.2,
+  },
+  progressInner: {
     alignItems: 'center',
   },
-  tabContainer: {
+  progressValue: {
+    fontSize: 22,
+    color: '#0E401C',
+    fontFamily: 'Archivo Black',
+  },
+  progressLabel: {
+    fontSize: 12,
+    color: '#637050',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  metricRow: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(0, 0, 0, 0.2)',
-    borderRadius: 12,
+    gap: 12,
+  },
+  metricCard: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+  },
+  metricCardLabel: {
+    fontSize: 11,
+    color: '#637050',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  metricCardValue: {
+    fontSize: 15,
+    color: '#1F3A24',
+    fontFamily: 'Poppins-SemiBold',
+    marginTop: 6,
+  },
+  actionsRow: {
+    flexDirection: 'row',
+    gap: 12,
+    alignItems: 'center',
+  },
+  primaryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#4F6F3E',
+    paddingVertical: 14,
+    borderRadius: 16,
+    paddingHorizontal: 20,
+  },
+  primaryButtonText: {
+    fontSize: 14,
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-SemiBold',
+  },
+  secondaryIconButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#D7DECC',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+  },
+  flexOne: {
+    flex: 1,
+  },
+  tabControl: {
+    marginTop: 24,
+    flexDirection: 'row',
+    backgroundColor: '#F2F5EC',
+    borderRadius: 999,
     padding: 4,
-    marginBottom: 20,
+    gap: 4,
   },
   tabButton: {
     flex: 1,
-    flexDirection: 'row',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
+    borderRadius: 999,
+    paddingVertical: 10,
     alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 8,
   },
-  activeTab: {
-    backgroundColor: 'rgba(16, 185, 129, 0.3)',
+  tabButtonActive: {
+    backgroundColor: '#4F6F3E',
   },
   tabText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: 'rgba(255, 255, 255, 0.7)',
-    marginLeft: 6,
+    fontSize: 13,
+    color: '#4F6F3E',
+    fontFamily: 'Poppins-SemiBold',
   },
-  activeTabText: {
-    color: 'white',
+  tabTextActive: {
+    color: '#FFFFFF',
   },
-  tabContent: {
-    marginBottom: 20,
-  },
-  progressCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
+  sectionCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
     padding: 20,
-    marginBottom: 20,
-  },
-  progressHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  goalIcon: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  goalInfo: {
-    flex: 1,
-  },
-  goalTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'white',
-    marginBottom: 4,
-  },
-  goalDescription: {
-    fontSize: 14,
-    color: '#9CA3AF',
-  },
-  progressContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  progressBar: {
-    flex: 1,
-    height: 12,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 6,
-    marginRight: 12,
-  },
-  progressFill: {
-    height: '100%',
-    borderRadius: 6,
-  },
-  progressText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    minWidth: 50,
-    textAlign: 'right',
-  },
-  goalStats: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  statItem: {
-    alignItems: 'center',
-  },
-  statLabel: {
-    fontSize: 12,
-    color: '#9CA3AF',
-    marginBottom: 4,
-  },
-  statValue: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-  },
-  timelineCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 20,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
-    marginBottom: 16,
-  },
-  timelineItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  timelineIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  timelineContent: {
-    flex: 1,
-  },
-  timelineTitle: {
-    fontSize: 14,
-    color: '#9CA3AF',
-    marginBottom: 2,
-  },
-  timelineValue: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-  },
-  addContributionButton: {
-    marginBottom: 20,
-  },
-  addButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#10B981',
-    borderRadius: 12,
-    padding: 16,
-  },
-  addButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginLeft: 8,
-  },
-  contributionsList: {
-    marginBottom: 20,
-  },
-  contributionCard: {
-    backgroundColor: '#000000',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-  },
-  contributionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  contributionIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  contributionInfo: {
-    flex: 1,
-  },
-  contributionDescription: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginBottom: 2,
-  },
-  contributionDate: {
-    fontSize: 14,
-    color: '#9CA3AF',
-  },
-  contributionAmount: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#10B981',
-  },
-  milestonesList: {
-    marginBottom: 20,
-  },
-  milestoneCard: {
-    backgroundColor: '#000000',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-  },
-  milestoneHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  milestoneIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  milestoneInfo: {
-    flex: 1,
-  },
-  milestoneTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginBottom: 2,
-  },
-  milestoneAmount: {
-    fontSize: 14,
-    color: '#9CA3AF',
-  },
-  milestoneDate: {
-    fontSize: 12,
-    color: '#10B981',
-    fontWeight: '600',
-  },
-  milestoneProgress: {
-    marginTop: 12,
-  },
-  milestoneProgressBar: {
-    height: 4,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 2,
-    marginBottom: 8,
-  },
-  milestoneProgressFill: {
-    height: '100%',
-    borderRadius: 2,
-  },
-  milestoneProgressText: {
-    fontSize: 12,
-    color: '#10B981',
-    fontWeight: '600',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'flex-end',
-  },
-  modalContent: {
-    backgroundColor: '#000000',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  modalTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
-  },
-  modalBody: {
-    marginBottom: 20,
-  },
-  inputLabel: {
-    fontSize: 14,
-    color: '#9CA3AF',
-    marginBottom: 8,
-  },
-  amountInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    fontSize: 16,
-    color: 'white',
-    marginBottom: 20,
-  },
-  addContributionText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-  },
-  errorContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-  },
-  errorTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'white',
     marginTop: 16,
-    marginBottom: 8,
-  },
-  errorDescription: {
-    fontSize: 16,
-    color: 'rgba(255, 255, 255, 0.7)',
-    textAlign: 'center',
-    lineHeight: 24,
-    marginBottom: 24,
-  },
-  errorBackButton: {
-    backgroundColor: '#10B981',
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 8,
-  },
-  errorBackButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-  },
-  emptyContributions: {
-    alignItems: 'center',
-    paddingVertical: 40,
-    paddingHorizontal: 20,
-  },
-  emptyContributionsTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  emptyContributionsDescription: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
-    textAlign: 'center',
-    lineHeight: 20,
-  },
-  loadingContainer: {
-    alignItems: 'center',
-    paddingVertical: 40,
-    paddingHorizontal: 20,
-  },
-  loadingText: {
-    fontSize: 16,
-    color: 'rgba(255, 255, 255, 0.7)',
-    textAlign: 'center',
-  },
-  linkedBudgetsCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 20,
-  },
-  linkedBudgetsList: {
     gap: 12,
   },
-  emptyLinkedBudgets: {
+  transactionRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 40,
-    paddingHorizontal: 20,
+    gap: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#EFF3E6',
+    paddingVertical: 10,
   },
-  emptyLinkedBudgetsTitle: {
+  transactionIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    backgroundColor: '#E7EDDD',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  transactionIconWithdraw: {
+    backgroundColor: '#F5E2DF',
+  },
+  transactionInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  transactionTitle: {
+    fontSize: 14,
+    color: '#1F3A24',
+    fontFamily: 'Poppins-SemiBold',
+  },
+  transactionSubtitle: {
+    fontSize: 12,
+    color: '#637050',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  transactionAmount: {
+    fontSize: 13,
+    color: '#2B8A3E',
+    fontFamily: 'Poppins-SemiBold',
+  },
+  transactionAmountWithdraw: {
+    color: '#B83228',
+  },
+  analyticsCard: {
+    backgroundColor: '#F7F9F2',
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    gap: 6,
+  },
+  analyticsLabel: {
+    fontSize: 12,
+    color: '#637050',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  analyticsValue: {
     fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
-    marginTop: 16,
+    color: '#0E401C',
+    fontFamily: 'Poppins-SemiBold',
+  },
+  analyticsNote: {
+    fontSize: 12,
+    color: '#7C8C6B',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  emptyState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    paddingHorizontal: 32,
+  },
+  emptyTitle: {
+    fontSize: 18,
+    color: '#0E401C',
+    fontFamily: 'Archivo Black',
+  },
+  emptyMessage: {
+    fontSize: 14,
+    color: '#637050',
+    textAlign: 'center',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  emptyMessageText: {
+    fontSize: 13,
+    color: '#637050',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  fundsBreakdownSection: {
+    marginTop: 24,
+    marginBottom: 16,
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#0E401C',
+    marginBottom: 12,
+  },
+  accountCardsContainer: {
+    gap: 12,
+  },
+  accountCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F7F9F2',
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    gap: 12,
+  },
+  accountCardIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  accountCardInfo: {
+    flex: 1,
+    gap: 4,
+  },
+  accountCardName: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#1F3A24',
+  },
+  accountCardBalance: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#4F6F3E',
+  },
+  accountDetailCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    padding: 16,
+    gap: 12,
+  },
+  accountDetailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  accountDetailIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  accountDetailInfo: {
+    flex: 1,
+    gap: 4,
+  },
+  accountDetailName: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#1F3A24',
+  },
+  accountDetailType: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
+  },
+  accountDetailAmount: {
+    alignItems: 'flex-end',
+    gap: 4,
+  },
+  accountDetailBalance: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#4F6F3E',
+  },
+  accountDetailLabel: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
+  },
+  accountDetailFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#E5ECD6',
+  },
+  accountDetailTotalLabel: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
+  },
+  accountDetailTotal: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#1F3A24',
+  },
+  accountActions: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#E5ECD6',
+  },
+  accountActionButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ECFDF5',
+    borderRadius: 8,
+    padding: 10,
+    gap: 6,
+    borderWidth: 1,
+    borderColor: '#10B981',
+  },
+  accountActionButtonSecondary: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#3B82F6',
+  },
+  accountActionButtonText: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    fontWeight: '400',
+    color: '#10B981',
+  },
+  accountActionButtonTextSecondary: {
+    color: '#3B82F6',
+  },
+  divider: {
+    height: 1,
+    backgroundColor: '#E5ECD6',
+    marginVertical: 16,
+  },
+  budgetsSectionTitle: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#0E401C',
     marginBottom: 8,
   },
-  emptyLinkedBudgetsDescription: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
-    textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 20,
-  },
-  createBudgetButton: {
-    backgroundColor: '#10B981',
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 8,
-  },
-  createBudgetText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-  },
 });
+
+export default GoalDetailScreen;

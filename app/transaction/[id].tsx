@@ -2,12 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, Modal, Alert } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { useLocalSearchParams, router } from 'expo-router';
+import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { supabase } from '@/lib/supabase';
 import { formatCurrencyAmount } from '@/utils/currency';
 import EditTransactionModal from '../modals/edit-transaction';
+import { useRealtimeData } from '@/hooks/useRealtimeData';
 
 interface Transaction {
   id: string;
@@ -38,6 +39,7 @@ export default function TransactionDetailScreen() {
   const { id } = useLocalSearchParams();
   const { user } = useAuth();
   const { currency } = useSettings();
+  const { accounts, refreshAccounts } = useRealtimeData();
   const [transaction, setTransaction] = useState<Transaction | null>(null);
   const [loading, setLoading] = useState(true);
   const [relatedTransactions, setRelatedTransactions] = useState<Transaction[]>([]);
@@ -45,6 +47,45 @@ export default function TransactionDetailScreen() {
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [beforeBalance, setBeforeBalance] = useState<number | null>(null);
   const [afterBalance, setAfterBalance] = useState<number | null>(null);
+  const [currentAccountBalance, setCurrentAccountBalance] = useState<number | null>(null);
+
+  // Update current account balance from real-time accounts data
+  const updateCurrentAccountBalance = React.useCallback(() => {
+    if (transaction?.account_id && accounts && accounts.length > 0) {
+      const account = accounts.find(acc => acc.id === transaction.account_id);
+      if (account) {
+        const newBalance = Number(account.balance) || 0;
+        console.log('✅ Updating current account balance from real-time data:', {
+          accountId: transaction.account_id,
+          accountName: account.name,
+          oldBalance: currentAccountBalance,
+          newBalance: newBalance,
+          afterBalance: afterBalance,
+          matchesAfter: Math.abs(newBalance - (afterBalance || 0)) < 0.01
+        });
+        setCurrentAccountBalance(newBalance);
+      } else {
+        console.warn('⚠️ Account not found in real-time data:', transaction.account_id);
+      }
+    } else if (transaction?.account_id && (!accounts || accounts.length === 0)) {
+      console.warn('⚠️ Accounts data not available yet, will retry when available');
+    }
+  }, [transaction?.account_id, accounts]);
+
+  // Update balance when accounts data changes or transaction loads
+  useEffect(() => {
+    updateCurrentAccountBalance();
+  }, [updateCurrentAccountBalance]);
+
+  // Refresh account balance when page is focused (to get latest balance)
+  useFocusEffect(
+    React.useCallback(() => {
+      // Refresh accounts to ensure we have the latest balance
+      refreshAccounts().then(() => {
+        // Balance will be updated via useEffect after accounts are refreshed
+      });
+    }, [refreshAccounts])
+  );
 
   useEffect(() => {
     if (id && user) {
@@ -79,10 +120,15 @@ export default function TransactionDetailScreen() {
 
       setTransaction(transactionData);
 
+      // Refresh accounts to ensure we have the latest balance
+      await refreshAccounts();
+
       // Calculate before and after balance
       if (transactionData) {
         await calculateBalanceImpact(transactionData);
       }
+      
+      // Current account balance will be updated via useEffect when accounts data is available
 
       // Fetch related transactions (same day)
       if (transactionData) {
@@ -135,10 +181,10 @@ export default function TransactionDetailScreen() {
       }
 
       // Fallback: For old transactions without stored balances, calculate from history
-      // Get all transactions for this account, ordered chronologically
+      // Get all transactions for this account with type information, ordered chronologically
       const { data: allTransactions, error: transactionsError } = await supabase
         .from('transactions')
-        .select('id, amount, date, created_at, balance_before, balance_after')
+        .select('id, amount, type, date, created_at, balance_before, balance_after')
         .eq('account_id', transaction.account_id)
         .order('date', { ascending: true })
         .order('created_at', { ascending: true });
@@ -155,11 +201,16 @@ export default function TransactionDetailScreen() {
       if (accountError) throw accountError;
 
       const currentBalance = Number(accountData.balance) || 0;
-
-      // Calculate initial balance: current balance minus all transaction amounts
-      // Transaction amounts are already signed (negative for expenses, positive for income)
-      const sumOfAllTransactions = (allTransactions || []).reduce(
-        (sum, t) => sum + (Number(t.amount) || 0),
+      
+      // Calculate signed transaction amounts based on type
+      // Expenses are negative, income is positive
+      const signedTransactions = (allTransactions || []).map(t => ({
+        ...t,
+        signedAmount: t.type === 'expense' ? -Math.abs(Number(t.amount) || 0) : Math.abs(Number(t.amount) || 0)
+      }));
+      
+      const sumOfAllTransactions = signedTransactions.reduce(
+        (sum, t) => sum + t.signedAmount,
         0
       );
       const initialBalance = currentBalance - sumOfAllTransactions;
@@ -173,8 +224,8 @@ export default function TransactionDetailScreen() {
       let afterBalance = initialBalance;
       let foundTransaction = false;
 
-      // Calculate running balance chronologically
-      for (const txn of allTransactions || []) {
+      // Calculate running balance chronologically using signed transactions
+      for (const txn of signedTransactions) {
         const txnDate = txn.date;
         const txnCreatedAt = txn.created_at || txn.date;
         
@@ -190,8 +241,8 @@ export default function TransactionDetailScreen() {
           } else {
             // This is our transaction - balance before it
             beforeBalance = runningBalance;
-            // Apply transaction to get balance after
-            afterBalance = runningBalance + Number(txn.amount);
+            // Apply signed transaction amount to get balance after
+            afterBalance = runningBalance + txn.signedAmount;
           }
           foundTransaction = true;
           break;
@@ -207,7 +258,7 @@ export default function TransactionDetailScreen() {
               runningBalance = Number(txn.balance_after);
             } else {
               // This transaction happened before our target - include it in running balance
-              runningBalance = runningBalance + Number(txn.amount);
+              runningBalance = runningBalance + txn.signedAmount;
             }
           } else {
             // This transaction happened after our target - we've passed it
@@ -219,7 +270,7 @@ export default function TransactionDetailScreen() {
       // If we didn't find the transaction in the list (shouldn't happen), use fallback
       if (!foundTransaction) {
         // Fallback: calculate from current balance and transactions after
-        const transactionsAfter = (allTransactions || []).filter(t => {
+        const transactionsAfter = signedTransactions.filter(t => {
           if (t.id === transaction.id) return false;
           const txnDate = t.date;
           const txnCreatedAt = t.created_at || t.date;
@@ -230,12 +281,17 @@ export default function TransactionDetailScreen() {
         });
 
         const sumAfter = transactionsAfter.reduce(
-          (sum, t) => sum + (Number(t.amount) || 0),
+          (sum, t) => sum + t.signedAmount,
           0
         );
         
+        // Get signed amount for current transaction
+        const transactionSignedAmount = transaction.type === 'expense' 
+          ? -Math.abs(Number(transaction.amount) || 0) 
+          : Math.abs(Number(transaction.amount) || 0);
+        
         afterBalance = currentBalance - sumAfter;
-        beforeBalance = afterBalance - Number(transaction.amount);
+        beforeBalance = afterBalance - transactionSignedAmount;
       }
 
       setBeforeBalance(beforeBalance);
@@ -439,7 +495,7 @@ export default function TransactionDetailScreen() {
               {beforeBalance !== null && afterBalance !== null ? (
                 <>
                   <View style={styles.balanceRow}>
-                    <Text style={styles.balanceLabel}>Before:</Text>
+                    <Text style={styles.balanceLabel}>Before (at time of transaction):</Text>
                     <Text style={styles.balanceValue}>{formatCurrency(beforeBalance)}</Text>
                   </View>
                   
@@ -453,9 +509,43 @@ export default function TransactionDetailScreen() {
                     </Text>
                   </View>
                   
-                  <View style={[styles.balanceRow, styles.balanceRowFinal]}>
-                    <Text style={styles.balanceLabel}>After:</Text>
+                  <View style={styles.balanceRow}>
+                    <Text style={styles.balanceLabel}>After (at time of transaction):</Text>
                     <Text style={[styles.balanceValue, styles.afterBalanceValue]}>{formatCurrency(afterBalance)}</Text>
+                  </View>
+                  
+                  {currentAccountBalance !== null && (
+                    <View style={[styles.balanceRow, styles.currentBalanceRow]}>
+                      <Text style={styles.currentBalanceLabel}>Current Account Balance:</Text>
+                      <Text style={styles.currentBalanceValue}>{formatCurrency(currentAccountBalance)}</Text>
+                    </View>
+                  )}
+                  
+                  {/* Verify calculation */}
+                  <View style={styles.verificationNote}>
+                    <Ionicons name="information-circle" size={16} color="#9CA3AF" />
+                    <Text style={styles.verificationText}>
+                      {(() => {
+                        // Calculate expected after balance based on transaction type
+                        const transactionAmount = Number(transaction?.amount || 0);
+                        const expectedAfterBalance = transaction?.type === 'expense' 
+                          ? beforeBalance - Math.abs(transactionAmount)
+                          : transaction?.type === 'income'
+                          ? beforeBalance + Math.abs(transactionAmount)
+                          : beforeBalance;
+                        
+                        const isVerified = Math.abs(afterBalance - expectedAfterBalance) < 0.01;
+                        const currentMatchesAfter = currentAccountBalance !== null && Math.abs(currentAccountBalance - afterBalance) < 0.01;
+                        
+                        if (isVerified && currentMatchesAfter) {
+                          return 'Balance calculation verified ✓';
+                        } else if (isVerified && !currentMatchesAfter) {
+                          return `Balance at transaction time verified ✓. Current balance may differ due to subsequent transactions.`;
+                        } else {
+                          return 'Note: Balance shown reflects the account state at the time of this transaction';
+                        }
+                      })()}
+                    </Text>
                   </View>
                 </>
               ) : (
@@ -700,19 +790,59 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     marginTop: 8,
   },
+  currentBalanceRow: {
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.2)',
+    marginTop: 12,
+    paddingTop: 12,
+    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+  },
   balanceLabel: {
     fontSize: 14,
     color: '#9CA3AF',
+    flex: 1,
   },
   balanceValue: {
     fontSize: 16,
     color: 'white',
     fontWeight: 'bold',
+    flex: 1,
+    textAlign: 'right',
   },
   afterBalanceValue: {
     fontSize: 18,
     color: '#10B981',
     fontWeight: 'bold',
+  },
+  currentBalanceLabel: {
+    fontSize: 14,
+    color: '#3B82F6',
+    fontWeight: '600',
+    flex: 1,
+  },
+  currentBalanceValue: {
+    fontSize: 18,
+    color: '#3B82F6',
+    fontWeight: 'bold',
+    flex: 1,
+    textAlign: 'right',
+  },
+  verificationNote: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginTop: 12,
+    padding: 12,
+    backgroundColor: 'rgba(156, 163, 175, 0.1)',
+    borderRadius: 8,
+    gap: 8,
+  },
+  verificationText: {
+    flex: 1,
+    fontSize: 12,
+    color: '#9CA3AF',
+    lineHeight: 16,
   },
   dailyActivity: {
     flexDirection: 'row',

@@ -1,20 +1,21 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo } from 'react';
 import { Modal, StyleSheet, Text, View, TouchableOpacity, ScrollView } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLiabilities } from '@/contexts/LiabilitiesContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
-import { supabase } from '@/lib/supabase';
 import { formatCurrencyAmount } from '@/utils/currency';
 import { useSettings } from '@/contexts/SettingsContext';
 
-export type FundBucketType = 'personal' | 'liability' | 'goal';
+export type FundBucketType = 'personal' | 'goal' | 'borrowed' | 'reserved' | 'sinking';
 
 export interface FundBucket {
   type: FundBucketType;
-  id: string; // liability_id or goal_id, or 'personal' for personal funds
+  id: string;
   name: string;
   amount: number;
   color?: string;
+  spendable: boolean;
+  lockedReason?: string;
 }
 
 interface FundPickerProps {
@@ -23,6 +24,9 @@ interface FundPickerProps {
   accountId: string;
   onSelect: (bucket: FundBucket) => void;
   amount?: number; // Optional: amount being spent/transferred
+  excludeGoalFunds?: boolean; // If true, exclude goal funds from selection (for payments/transfers)
+  allowGoalFunds?: boolean; // If true, allow goal funds (for withdrawals only)
+  excludeBorrowedFunds?: boolean; // If true, exclude borrowed/liability funds from selection (for income allocation)
 }
 
 export default function FundPicker({
@@ -31,90 +35,110 @@ export default function FundPicker({
   accountId,
   onSelect,
   amount = 0,
+  excludeGoalFunds = true, // Default: exclude goal funds (they cannot be spent/transferred)
+  allowGoalFunds = false, // Default: don't allow goal funds
+  excludeBorrowedFunds = false, // Default: allow borrowed funds (for payments)
 }: FundPickerProps) {
   const { currency } = useSettings();
-  const { getAccountBreakdown } = useLiabilities();
-  const { goals } = useRealtimeData();
-  const [breakdown, setBreakdown] = useState<any>(null);
-  const [goalPortions, setGoalPortions] = useState<Array<{ goal_id: string; amount: number }>>([]);
-  const [loading, setLoading] = useState(false);
+  const { liabilities } = useLiabilities();
+  const { accountFunds, goals } = useRealtimeData();
 
-  useEffect(() => {
-    if (visible && accountId) {
-      loadBreakdown();
-    }
-  }, [visible, accountId]);
-
-  const loadBreakdown = async () => {
-    if (!accountId) return;
-    setLoading(true);
-    try {
-      const accountBreakdown = await getAccountBreakdown(accountId);
-      setBreakdown(accountBreakdown);
-
-      // Also fetch goal portions for this account
-      const { data: goalPortionsData } = await supabase
-        .from('account_goal_portions')
-        .select('goal_id, amount')
-        .eq('account_id', accountId);
-
-      setGoalPortions(goalPortionsData || []);
-    } catch (error) {
-      console.error('Error loading account breakdown:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const accountFundsForAccount = useMemo(() => {
+    if (!accountId) return [];
+    return (accountFunds || []).filter((fund) => fund.account_id === accountId);
+  }, [accountFunds, accountId]);
 
   const buildBuckets = (): FundBucket[] => {
+    if (!accountId) return [];
+
     const buckets: FundBucket[] = [];
+    const liabilitiesById = new Map(liabilities.map((liability) => [liability.id, liability]));
+    const goalsById = new Map(goals.map((goal) => [goal.id, goal]));
 
-    // Personal funds
-    if (breakdown && breakdown.personal > 0) {
-      buckets.push({
-        type: 'personal',
-        id: 'personal',
-        name: 'Personal Funds',
-        amount: breakdown.personal,
-      });
-    }
+    accountFundsForAccount.forEach((fund) => {
+      const balance = typeof fund.balance === 'string' ? parseFloat(fund.balance) : fund.balance ?? 0;
+      if (balance <= 0) return;
 
-    // Liability portions
-    if (breakdown?.liabilityPortions) {
-      breakdown.liabilityPortions.forEach((portion: any) => {
-        if (portion.amount > 0) {
-          buckets.push({
-            type: 'liability',
-            id: portion.liabilityId,
-            name: portion.liabilityName || 'Liability',
-            amount: portion.amount,
-            color: '#EF4444',
-          });
+      // STRICT RULE: Goal funds are NEVER selectable in FundPicker for payments/transfers
+      // They are locked and can only be withdrawn (not spent/transferred)
+      // Goal funds should never appear for payments, transfers, or bill payments
+      if (fund.fund_type === 'goal') {
+        // Only include goal funds if explicitly allowed (withdrawals don't use FundPicker)
+        if (!(allowGoalFunds === true && excludeGoalFunds === false)) {
+          return; // Skip goal funds - they cannot be used for spending/transfers
         }
-      });
-    }
+      }
 
-    // Goal portions
-    if (goalPortions.length > 0) {
-      goalPortions.forEach((gp) => {
-        const goal = goals.find((g) => g.id === gp.goal_id);
-        if (goal && parseFloat(gp.amount) > 0) {
-          buckets.push({
-            type: 'goal',
-            id: gp.goal_id,
-            name: goal.name || 'Goal',
-            amount: parseFloat(gp.amount),
-            color: goal.color || '#10B981',
-          });
+      // Exclude borrowed/liability funds if requested (e.g., for income allocation)
+      if (excludeBorrowedFunds && (fund.fund_type === 'borrowed' || fund.fund_type === 'liability')) {
+        return; // Skip borrowed funds - income cannot be allocated to liability funds
+      }
+
+      const bucket: FundBucket = {
+        type: fund.fund_type as FundBucketType,
+        // For personal funds, use 'personal' as ID
+        // For liability funds, use linked_liability_id as ID (for matching with liability)
+        // For goal funds, use linked_goal_id as ID (for matching with goal)
+        // For other funds, use fund.id
+        id: fund.fund_type === 'personal' 
+          ? 'personal' 
+          : fund.fund_type === 'borrowed' && fund.linked_liability_id
+          ? fund.linked_liability_id
+          : fund.fund_type === 'goal' && fund.linked_goal_id
+          ? fund.linked_goal_id
+          : fund.id,
+        name: fund.display_name || fund.name,
+        amount: balance,
+        color: fund.metadata?.color,
+        spendable: fund.spendable,
+        lockedReason: undefined,
+      };
+
+      if (bucket.type === 'goal') {
+        // This should only happen if allowGoalFunds is explicitly true (rare case)
+        const goal = fund.linked_goal_id ? goalsById.get(fund.linked_goal_id) : undefined;
+        bucket.name = goal?.title || bucket.name || 'Goal Fund';
+        bucket.color = goal?.color || '#F59E0B';
+        bucket.lockedReason = 'Goal funds are locked. Withdraw to personal funds to use this money.';
+        bucket.spendable = false; // Goal funds are never spendable
+      } else if (bucket.type === 'borrowed') {
+        const liability = fund.linked_liability_id
+          ? liabilitiesById.get(fund.linked_liability_id)
+          : undefined;
+        bucket.name = liability?.title || bucket.name || 'Borrowed Funds';
+        bucket.color = '#EF4444';
+        bucket.lockedReason = fund.spendable
+          ? undefined
+          : 'Review the loan to unlock spendable balance.';
+      } else if (bucket.type === 'reserved') {
+        bucket.color = '#1C4B6C';
+        if (!fund.spendable) {
+          bucket.lockedReason = 'Reserved funds need to be released before spending.';
         }
-      });
-    }
+      } else if (bucket.type === 'sinking') {
+        bucket.color = '#4F6F3E';
+        if (!fund.spendable) {
+          bucket.lockedReason = 'Convert a portion to personal funds before spending.';
+        }
+      } else if (bucket.type === 'personal') {
+        bucket.name = fund.display_name || 'Personal Funds';
+        bucket.color = '#10B981';
+      }
 
-    return buckets;
+      buckets.push(bucket);
+    });
+
+    return buckets.sort((a, b) => {
+      if (a.spendable === b.spendable) {
+        return a.name.localeCompare(b.name);
+      }
+      return a.spendable ? -1 : 1;
+    });
   };
 
   const buckets = buildBuckets();
   const hasEnoughFunds = (bucket: FundBucket) => {
+    if (!bucket.spendable) return false;
     if (amount === 0) return true;
     return bucket.amount >= amount;
   };
@@ -142,11 +166,7 @@ export default function FundPicker({
               </TouchableOpacity>
             </View>
 
-            {loading ? (
-              <View style={styles.loadingContainer}>
-                <Text style={styles.loadingText}>Loading...</Text>
-              </View>
-            ) : buckets.length === 0 ? (
+            {buckets.length === 0 ? (
               <View style={styles.emptyContainer}>
                 <Ionicons name="wallet-outline" size={48} color="rgba(255,255,255,0.5)" />
                 <Text style={styles.emptyText}>No funds available</Text>
@@ -155,6 +175,22 @@ export default function FundPicker({
               <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
                 {buckets.map((bucket) => {
                   const canUse = hasEnoughFunds(bucket);
+                  const palette = (() => {
+                    if (bucket.type === 'goal') {
+                      return { icon: 'lock-closed-outline', color: bucket.color || '#F59E0B' };
+                    }
+                    if (bucket.type === 'borrowed') {
+                      return { icon: 'card-outline', color: bucket.color || '#EF4444' };
+                    }
+                    if (bucket.type === 'reserved') {
+                      return { icon: 'shield-outline', color: bucket.color || '#1C4B6C' };
+                    }
+                    if (bucket.type === 'sinking') {
+                      return { icon: 'calendar-outline', color: bucket.color || '#4F6F3E' };
+                    }
+                    return { icon: 'wallet-outline', color: bucket.color || '#10B981' };
+                  })();
+
                   return (
                     <TouchableOpacity
                       key={`${bucket.type}-${bucket.id}`}
@@ -172,28 +208,27 @@ export default function FundPicker({
                     >
                       <View style={styles.bucketInfo}>
                         <View style={styles.bucketHeader}>
-                          <View style={[styles.bucketIcon, { backgroundColor: (bucket.color || '#6366F1') + '20' }]}>
+                          <View style={[styles.bucketIcon, { backgroundColor: (palette.color || '#6366F1') + '20' }]}>
                             <Ionicons
-                              name={
-                                bucket.type === 'personal'
-                                  ? 'person'
-                                  : bucket.type === 'liability'
-                                  ? 'card'
-                                  : 'flag'
-                              }
+                              name={palette.icon as any}
                               size={20}
-                              color={bucket.color || '#6366F1'}
+                              color={palette.color || '#6366F1'}
                             />
                           </View>
+                          <View style={styles.bucketCopy}>
                           <Text style={styles.bucketName}>{bucket.name}</Text>
+                            {!bucket.spendable ? (
+                              <Text style={styles.bucketBadge}>Locked</Text>
+                            ) : null}
+                          </View>
                         </View>
                         <Text style={[styles.bucketAmount, !canUse && styles.bucketAmountDisabled]}>
                           {formatCurrencyAmount(bucket.amount, currency)}
                         </Text>
                       </View>
-                      {amount > 0 && !canUse && (
+                      {(!bucket.spendable || (amount > 0 && !canUse)) && (
                         <Text style={styles.insufficientText}>
-                          Insufficient funds
+                          {bucket.spendable ? 'Insufficient funds' : bucket.lockedReason || 'Locked fund'}
                         </Text>
                       )}
                     </TouchableOpacity>
@@ -274,6 +309,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flex: 1,
   },
+  bucketCopy: {
+    flex: 1,
+  },
   bucketIcon: {
     width: 36,
     height: 36,
@@ -295,6 +333,12 @@ const styles = StyleSheet.create({
   },
   bucketAmountDisabled: {
     color: 'rgba(255, 255, 255, 0.5)',
+  },
+  bucketBadge: {
+    marginTop: 4,
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.7)',
+    fontStyle: 'italic',
   },
   insufficientText: {
     fontSize: 12,

@@ -2,13 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
+import { Calendar } from 'react-native-calendars';
 import { router, useFocusEffect } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
 import { useBackgroundMode } from '@/contexts/BackgroundModeContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { useSettings } from '@/contexts/SettingsContext';
 import { formatCurrencyAmount } from '@/utils/currency';
-import { getBillsForNotification, generateBillNotificationMessage } from '@/utils/bills';
+import { getBillsForNotification, generateBillNotificationMessage, fetchBills, calculateBillStatus } from '@/utils/bills';
 import PayModal from '../modals/pay';
 import ReceiveModal from '../modals/receive';
 import TransferModal from '../modals/transfer';
@@ -23,7 +24,7 @@ import { textStyles, viewStyles } from '@/utils/themeUtils';
 export default function HomeScreen() {
   const { user } = useAuth();
   const { backgroundMode } = useBackgroundMode();
-  const { accounts, totalBalance, loading, refreshAccounts } = useRealtimeData();
+  const { accounts, totalBalance, loading, refreshAccounts, globalRefresh } = useRealtimeData();
   const { currency } = useSettings();
   const [payModalVisible, setPayModalVisible] = useState(false);
   const [receiveModalVisible, setReceiveModalVisible] = useState(false);
@@ -35,36 +36,54 @@ export default function HomeScreen() {
     upcoming: any[];
   }>({ dueToday: [], overdue: [], upcoming: [] });
   const [billsLoading, setBillsLoading] = useState(false);
+  const [upcomingBills, setUpcomingBills] = useState<any[]>([]);
+  const [showBillsCalendar, setShowBillsCalendar] = useState(false);
 
   const formatCurrency = (amount: number) => {
     return formatCurrencyAmount(amount, currency);
   };
 
-  // Refresh accounts when screen comes into focus to ensure latest balances
-  useFocusEffect(
-    React.useCallback(() => {
-      refreshAccounts().catch(console.error);
-    }, [refreshAccounts])
-  );
+  // Note: Real-time subscriptions handle account updates automatically
+  // Only refresh on focus if explicitly needed (removed to prevent excessive reloading)
 
-  // Load bills alerts
+  // Load bills alerts and upcoming bills for calendar
   useEffect(() => {
-    const loadBillsAlerts = async () => {
+    const loadBillsData = async () => {
       if (!user?.id) return;
       
       try {
         setBillsLoading(true);
         const alerts = await getBillsForNotification(user.id);
         setBillsAlerts(alerts);
+        
+        // Load upcoming bills for calendar (next 30 days)
+        const billsData = await fetchBills(user.id);
+        const today = new Date();
+        const thirtyDaysLater = new Date();
+        thirtyDaysLater.setDate(today.getDate() + 30);
+        
+        const upcoming = billsData
+          .filter(bill => {
+            const billStatus = calculateBillStatus(bill);
+            if (billStatus === 'paid' || billStatus === 'cancelled') return false;
+            const dueDate = new Date(bill.due_date);
+            return dueDate >= today && dueDate <= thirtyDaysLater;
+          })
+          .map(bill => ({
+            ...bill,
+            status: calculateBillStatus(bill),
+          }));
+        
+        setUpcomingBills(upcoming);
       } catch (error) {
-        console.error('Error loading bills alerts:', error);
+        console.error('Error loading bills data:', error);
       } finally {
         setBillsLoading(false);
       }
     };
 
-    loadBillsAlerts();
-  }, [user?.id]);
+    loadBillsData();
+  }, [user?.id, globalRefresh]);
 
   const renderBackground = () => {
     if (backgroundMode === BACKGROUND_MODES.IOS_GRADIENT) {
@@ -228,6 +247,113 @@ export default function HomeScreen() {
             )}
           </View>
 
+          {/* Bills Calendar Widget */}
+          {upcomingBills.length > 0 && (
+            <View style={styles.billsCalendarSection}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>Upcoming Bills</Text>
+                <TouchableOpacity 
+                  style={styles.viewAllButton}
+                  onPress={() => {
+                    setShowBillsCalendar(!showBillsCalendar);
+                  }}
+                >
+                  <Text style={styles.viewAllText}>{showBillsCalendar ? 'Hide' : 'Show'} Calendar</Text>
+                  <Ionicons name={showBillsCalendar ? 'chevron-up' : 'chevron-down'} size={16} color="#FFFFFF" />
+                </TouchableOpacity>
+              </View>
+              
+              {showBillsCalendar && (
+                <GlassmorphCard style={styles.calendarCard}>
+                  <Calendar
+                    onDayPress={(day) => {
+                      // Navigate to bills page with selected date
+                      router.push(`/(tabs)/bills` as any);
+                    }}
+                    markedDates={(() => {
+                      const markedDates: any = {};
+                      const dateBills: { [key: string]: any[] } = {};
+                      
+                      // Group bills by due date
+                      upcomingBills.forEach(bill => {
+                        const date = bill.due_date;
+                        if (!dateBills[date]) {
+                          dateBills[date] = [];
+                        }
+                        dateBills[date].push(bill);
+                      });
+                      
+                      // Mark dates with bills
+                      Object.keys(dateBills).forEach(date => {
+                        const billsForDate = dateBills[date];
+                        const overdueCount = billsForDate.filter(b => b.status === 'overdue').length;
+                        const dueTodayCount = billsForDate.filter(b => b.status === 'due_today').length;
+                        
+                        let color = '#3B82F6'; // Blue for upcoming
+                        if (overdueCount > 0) {
+                          color = '#EF4444'; // Red for overdue
+                        } else if (dueTodayCount > 0) {
+                          color = '#F59E0B'; // Orange for due today
+                        }
+                        
+                        markedDates[date] = {
+                          marked: true,
+                          dotColor: color,
+                          customStyles: {
+                            container: {
+                              borderRadius: 16,
+                            },
+                            text: {
+                              fontWeight: overdueCount > 0 || dueTodayCount > 0 ? 'bold' : 'normal',
+                            },
+                          },
+                        };
+                      });
+                      
+                      return markedDates;
+                    })()}
+                    theme={{
+                      backgroundColor: 'transparent',
+                      calendarBackground: 'transparent',
+                      textSectionTitleColor: '#FFFFFF',
+                      selectedDayBackgroundColor: '#10B981',
+                      selectedDayTextColor: '#FFFFFF',
+                      todayTextColor: '#10B981',
+                      dayTextColor: '#FFFFFF',
+                      textDisabledColor: 'rgba(255, 255, 255, 0.3)',
+                      dotColor: '#10B981',
+                      selectedDotColor: '#FFFFFF',
+                      arrowColor: '#FFFFFF',
+                      monthTextColor: '#FFFFFF',
+                      indicatorColor: '#10B981',
+                      textDayFontFamily: 'Poppins-SemiBold',
+                      textMonthFontFamily: 'HelveticaNeue-Bold',
+                      textDayHeaderFontFamily: 'Poppins-SemiBold',
+                      textDayFontSize: 16,
+                      textMonthFontSize: 18,
+                      textDayHeaderFontSize: 13,
+                    }}
+                    style={styles.homeCalendar}
+                  />
+                  <View style={styles.calendarLegend}>
+                    <View style={styles.legendItem}>
+                      <View style={[styles.legendDot, { backgroundColor: '#EF4444' }]} />
+                      <Text style={styles.legendText}>Overdue</Text>
+                    </View>
+                    <View style={styles.legendItem}>
+                      <View style={[styles.legendDot, { backgroundColor: '#F59E0B' }]} />
+                      <Text style={styles.legendText}>Due Today</Text>
+                    </View>
+                    <View style={styles.legendItem}>
+                      <View style={[styles.legendDot, { backgroundColor: '#3B82F6' }]} />
+                      <Text style={styles.legendText}>Upcoming</Text>
+                    </View>
+                  </View>
+                </GlassmorphCard>
+              )}
+            </View>
+          )}
+
           {/* Bills Alerts Section */}
           {(billsAlerts.overdue.length > 0 || billsAlerts.dueToday.length > 0 || billsAlerts.upcoming.length > 0) && (
             <View style={styles.billsAlertsSection}>
@@ -307,11 +433,8 @@ export default function HomeScreen() {
              setPayModalVisible(false);
            }}
            onSuccess={async () => {
-             // Refresh accounts and transactions to update balances immediately
-             await Promise.all([
-               refreshAccounts(),
-               // Transactions refresh is handled by the modal, but we ensure accounts refresh
-             ]);
+             // Global refresh to update all data including balances
+             await globalRefresh();
            }}
          />
          <ReceiveModal 
@@ -320,11 +443,8 @@ export default function HomeScreen() {
              setReceiveModalVisible(false);
            }}
            onSuccess={async () => {
-             // Refresh accounts and transactions to update balances immediately
-             await Promise.all([
-               refreshAccounts(),
-               // Transactions refresh is handled by the modal, but we ensure accounts refresh
-             ]);
+             // Global refresh to update all data including balances
+             await globalRefresh();
            }}
          />
          <TransferModal 
@@ -333,11 +453,8 @@ export default function HomeScreen() {
              setTransferModalVisible(false);
            }}
            onSuccess={async () => {
-             // Refresh accounts and transactions to update balances immediately
-             await Promise.all([
-               refreshAccounts(),
-               // Transactions refresh is handled by the modal, but we ensure accounts refresh
-             ]);
+             // Global refresh to update all data including balances
+             await globalRefresh();
            }}
          />
          <AddAccountModal 
@@ -629,5 +746,42 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 18,
     fontWeight: '700',
+  },
+  billsCalendarSection: {
+    marginTop: 20,
+    paddingHorizontal: 20,
+  },
+  calendarCard: {
+    padding: 16,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  homeCalendar: {
+    borderRadius: 16,
+  },
+  calendarLegend: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginTop: 16,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  legendItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  legendDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  legendText: {
+    color: 'rgba(255, 255, 255, 0.8)',
+    fontSize: 12,
+    fontFamily: 'Poppins-SemiBold',
   },
 });

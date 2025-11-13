@@ -1,16 +1,26 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, TextInput, Modal, Alert, Platform } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  StyleSheet,
+  Text,
+  View,
+  TouchableOpacity,
+  ScrollView,
+  SafeAreaView,
+  TextInput,
+  Modal,
+  Alert,
+  Platform,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/contexts/AuthContext';
 import { useNotification } from '@/contexts/NotificationContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
-import { useLiabilities } from '@/contexts/LiabilitiesContext';
 import { supabase } from '@/lib/supabase';
 import { formatCurrencyAmount } from '@/utils/currency';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import FundPicker, { FundBucket } from '@/components/FundPicker';
+import InlineAccountSelector from '@/components/InlineAccountSelector';
 
 interface PayModalProps {
   visible: boolean;
@@ -19,56 +29,200 @@ interface PayModalProps {
   preselectedAccountId?: string;
 }
 
+// Subcategory mappings (simplified - will be replaced with database structure later)
+const SUBCATEGORY_MAP: Record<string, Array<{ name: string; icon: string }>> = {
+  Food: [
+    { name: 'Dining', icon: 'restaurant' },
+    { name: 'Lunch', icon: 'fast-food' },
+    { name: 'Drinks', icon: 'wine' },
+    { name: 'Groceries', icon: 'basket' },
+    { name: 'Coffee', icon: 'cafe' },
+  ],
+  Transport: [
+    { name: 'Taxi', icon: 'car' },
+    { name: 'Public Transport', icon: 'bus' },
+    { name: 'Fuel', icon: 'car-sport' },
+    { name: 'Parking', icon: 'parking' },
+  ],
+  Bills: [
+    { name: 'Electricity', icon: 'flash' },
+    { name: 'Water', icon: 'water' },
+    { name: 'Internet', icon: 'wifi' },
+    { name: 'Phone', icon: 'call' },
+  ],
+  Shopping: [
+    { name: 'Clothing', icon: 'shirt' },
+    { name: 'Electronics', icon: 'phone-portrait' },
+    { name: 'Home', icon: 'home' },
+  ],
+  Entertainment: [
+    { name: 'Movies', icon: 'film' },
+    { name: 'Music', icon: 'musical-notes' },
+    { name: 'Games', icon: 'game-controller' },
+  ],
+  Health: [
+    { name: 'Medicine', icon: 'medical' },
+    { name: 'Doctor', icon: 'person' },
+    { name: 'Gym', icon: 'fitness' },
+  ],
+};
+
 export default function PayModal({ visible, onClose, onSuccess, preselectedAccountId }: PayModalProps) {
   const { user } = useAuth();
   const { showNotification } = useNotification();
   const { currency } = useSettings();
-  const { globalRefresh, refreshAccounts } = useRealtimeData();
-  const { getAccountBreakdown } = useLiabilities();
+  const {
+    accounts: realtimeAccounts,
+    accountFunds,
+    getFundsForAccount,
+    globalRefresh,
+    refreshAccounts,
+    refreshTransactions,
+    refreshAccountFunds,
+  } = useRealtimeData();
+
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState('');
+  const [subcategory, setSubcategory] = useState('');
   const [account, setAccount] = useState('');
   const [date, setDate] = useState(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [accounts, setAccounts] = useState<any[]>([]);
   const [categories, setCategories] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [errors, setErrors] = useState<{[key: string]: string}>({});
-  
-  // Fund selection state
+  const [errors, setErrors] = useState<{ [key: string]: string }>({});
   const [selectedFundBucket, setSelectedFundBucket] = useState<FundBucket | null>(null);
   const [showFundPicker, setShowFundPicker] = useState(false);
+  const [showNoteInput, setShowNoteInput] = useState(false);
+  const [showAmountInput, setShowAmountInput] = useState(false);
+
+  // Get frequently used categories (top 3 by transaction count)
+  const frequentlyUsedCategories = useMemo(() => {
+    return [...categories]
+      .sort((a, b) => (b.transaction_count || 0) - (a.transaction_count || 0))
+      .slice(0, 3);
+  }, [categories]);
+
+  // Get subcategories for selected category
+  const availableSubcategories = useMemo(() => {
+    if (!category) return [];
+    const selectedCategory = categories.find((cat) => cat.id === category);
+    if (!selectedCategory) return [];
+    return SUBCATEGORY_MAP[selectedCategory.name] || [];
+  }, [category, categories]);
 
   // Fetch user accounts
   useEffect(() => {
     if (visible && user) {
       fetchAccounts();
       fetchCategories();
+      // Also refresh accounts from realtime data
+      refreshAccounts();
     }
-  }, [visible, user]);
+  }, [visible, user, refreshAccounts]);
 
-  // Set preselected account when modal opens
+  // Sync local accounts with realtime accounts (use realtimeAccounts as primary source)
   useEffect(() => {
-    if (visible && preselectedAccountId) {
+    if (realtimeAccounts && realtimeAccounts.length > 0) {
+      setAccounts(realtimeAccounts);
+    } else if (realtimeAccounts && realtimeAccounts.length === 0 && accounts.length === 0) {
+      // If realtimeAccounts is empty, keep trying to fetch
+      fetchAccounts();
+    }
+  }, [realtimeAccounts]);
+
+  // Set preselected account and auto-select first account if none selected
+  useEffect(() => {
+    if (visible) {
+      const availableAccounts = (realtimeAccounts || accounts || []).filter((acc) => 
+        acc.type !== 'goals_savings' && 
+        acc.type !== 'liability' &&
+        (acc.is_active === true || acc.is_active === undefined || acc.is_active === null)
+      );
+      
+      if (preselectedAccountId && availableAccounts.some(acc => acc.id === preselectedAccountId)) {
       setAccount(preselectedAccountId);
-      setSelectedFundBucket(null); // Reset fund bucket when account changes
+        setSelectedFundBucket(null);
+      } else if (availableAccounts.length > 0 && !account) {
+        // Auto-select first available account if none preselected
+        setAccount(availableAccounts[0].id);
+      }
     }
-  }, [visible, preselectedAccountId]);
+  }, [visible, preselectedAccountId, realtimeAccounts, accounts, account]);
 
-  // When account is selected, show fund picker if not already selected
+  // Check if account has any funds in account_funds table
+  // If account has funds, show picker; otherwise default to personal fund (will be created by RPC if needed)
+  const accountHasFunds = useMemo(() => {
+    if (!account) return false;
+    const funds = getFundsForAccount(account, { includeLocked: true });
+    // Check if account has ANY funds (personal, borrowed, goal, reserved, sinking)
+    return funds.length > 0;
+  }, [account, getFundsForAccount, accountFunds]);
+
+  // Check if account has any non-personal funds (for showing fund picker)
+  const accountHasOtherFunds = useMemo(() => {
+    if (!account) return false;
+    const funds = getFundsForAccount(account, { includeLocked: true });
+    // Check if account has any non-personal funds (borrowed, goal, reserved, sinking) with balance > 0
+    return funds.some(
+      (fund) =>
+        fund.fund_type !== 'personal' &&
+        (typeof fund.balance === 'string' ? parseFloat(fund.balance) : fund.balance || 0) > 0
+    );
+  }, [account, getFundsForAccount, accountFunds]);
+
+  // Handle fund selection when account changes
   useEffect(() => {
-    if (visible && account && !selectedFundBucket) {
-      // Auto-show fund picker when account is selected
-      setShowFundPicker(true);
+    if (!account) {
+      setSelectedFundBucket(null);
+      setShowFundPicker(false);
+      return;
     }
-  }, [visible, account]);
+
+    // Reset fund bucket when account changes
+    setSelectedFundBucket(null);
+
+    // Check if account has any funds in account_funds table
+    if (!accountHasFunds) {
+      // No funds in account_funds: account might be new or not initialized
+      // Default to personal fund (RPC will handle creating it if needed)
+      setSelectedFundBucket({
+        type: 'personal',
+        id: 'personal',
+        name: 'Personal Funds',
+        amount: 0,
+        spendable: true,
+      });
+      setShowFundPicker(false);
+    } else if (!accountHasOtherFunds) {
+      // Has funds but only personal: default to personal fund, don't show picker
+      setSelectedFundBucket({
+        type: 'personal',
+        id: 'personal',
+        name: 'Personal Funds',
+        amount: 0,
+        spendable: true,
+      });
+      setShowFundPicker(false);
+    } else {
+      // Has other funds: show picker for user to choose
+      // Don't auto-open picker, let user click to open it
+      setShowFundPicker(false);
+    }
+  }, [account, accountHasFunds, accountHasOtherFunds]);
+
+
+  // Initialize amount input state when modal opens
+  useEffect(() => {
+    if (visible && !amount) {
+      setShowAmountInput(true);
+    }
+  }, [visible]);
 
   // Reset fund bucket when account changes
   useEffect(() => {
     if (account && selectedFundBucket) {
-      // Keep fund bucket only if it's still valid for the account
-      // For now, reset it when account changes
       setSelectedFundBucket(null);
     }
   }, [account]);
@@ -97,6 +251,7 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
         .eq('user_id', user?.id)
         .contains('activity_types', ['expense'])
         .eq('is_deleted', false)
+        .order('transaction_count', { ascending: false })
         .order('name');
 
       if (error) throw error;
@@ -106,10 +261,8 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
     }
   };
 
-
-
   const validateForm = () => {
-    const newErrors: {[key: string]: string} = {};
+    const newErrors: { [key: string]: string } = {};
 
     if (!amount.trim()) {
       newErrors.amount = 'Amount is required';
@@ -121,16 +274,26 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
       newErrors.account = 'Please select an account';
     }
 
+    // Only require fund selection if account has other funds besides personal
+    // Otherwise, default to personal fund (already set)
     if (!selectedFundBucket) {
-      newErrors.fundBucket = 'Please select a fund source';
+      if (accountHasFunds && accountHasOtherFunds) {
+        // Account has funds and other funds exist: require selection
+        newErrors.fundBucket = 'Please select a fund source';
+      } else {
+        // No funds or only personal funds: default to personal fund
+        setSelectedFundBucket({
+          type: 'personal',
+          id: 'personal',
+          name: 'Personal Funds',
+          amount: 0,
+          spendable: true,
+        });
+      }
     }
 
     if (!category) {
       newErrors.category = 'Please select a category';
-    }
-
-    if (!description.trim()) {
-      newErrors.description = 'Description is required';
     }
 
     setErrors(newErrors);
@@ -144,77 +307,75 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
 
     try {
       const amountValue = parseFloat(amount);
-      
-      // Get category name from category ID
-      const selectedCategory = categories.find(cat => cat.id === category);
+      const selectedCategory = categories.find((cat) => cat.id === category);
       const categoryName = selectedCategory?.name || null;
 
-      if (!selectedFundBucket) {
+      // If no fund bucket selected but account has no funds or only personal funds, default to personal
+      let fundBucket = selectedFundBucket;
+      if (!fundBucket && (!accountHasFunds || !accountHasOtherFunds)) {
+        fundBucket = {
+          type: 'personal',
+          id: 'personal',
+          name: 'Personal Funds',
+          amount: 0,
+          spendable: true,
+        };
+      }
+
+      if (!fundBucket) {
         throw new Error('No fund source selected');
       }
 
-      // Use spend_from_account_bucket RPC (expects p_bucket as JSONB)
       const bucketParam = {
-        type: selectedFundBucket.type,
-        id: selectedFundBucket.type !== 'personal' ? selectedFundBucket.id : null,
+        type: fundBucket.type === 'borrowed' ? 'liability' : fundBucket.type,
+        id: fundBucket.type !== 'personal' ? fundBucket.id : null,
       };
 
-      // Get category ID for the RPC (it expects category_id, not category name)
-      const selectedCategoryId = categories.find(cat => cat.id === category)?.id || null;
-
-      console.log('📤 Calling spend_from_account_bucket RPC:', {
-        p_user_id: user?.id,
-        p_account_id: account,
-        p_bucket: bucketParam,
-        p_amount: amountValue,
-        p_category: selectedCategoryId,
-      });
+      const selectedAccountObj = accounts.find((acc) => acc.id.toString() === account);
+      const accountName = selectedAccountObj?.name || 'Account';
 
       const { data: rpcData, error } = await supabase.rpc('spend_from_account_bucket', {
         p_user_id: user?.id,
         p_account_id: account,
         p_bucket: bucketParam,
         p_amount: amountValue,
-        p_category: selectedCategoryId,
-        p_description: description.trim(),
+        p_category: categoryName,
+        p_description: description.trim() || categoryName || 'Payment',
         p_date: date.toISOString().split('T')[0],
-        p_currency: currency
+        p_currency: currency,
       });
 
       if (error) {
         console.error('❌ RPC Error:', error);
+        Alert.alert('Error', error.message || 'Failed to record payment. Please try again.');
         throw error;
       }
 
-      console.log('✅ RPC Success, refreshing account data...');
+      console.log('✅ Payment RPC successful, refreshing data...');
       
-      // Force immediate account refresh to get updated balance
-      await refreshAccounts();
+      // Wait for database commit - increased delay for reliability
+      await new Promise(resolve => setTimeout(resolve, 500));
       
-      // Small delay to ensure database has committed and state has updated
-      await new Promise(resolve => setTimeout(resolve, 200));
+      // Refresh all data in parallel for faster updates
+      await Promise.all([
+        refreshAccounts(),
+        refreshAccountFunds(),
+        refreshTransactions(),
+      ]);
+      
+      console.log('✅ Data refreshed after payment');
 
-      // Get account name for notification (fetch fresh account data directly from DB)
-      const { data: freshAccountData } = await supabase
-        .from('accounts')
-        .select('name, balance')
-        .eq('id', account)
-        .single();
-      
-      const accountName = freshAccountData?.name || 'Account';
-
-      // Category name already retrieved above
       const displayCategoryName = categoryName || 'Uncategorized';
-
-      // Build notification description based on fund source
       let descriptionText = displayCategoryName;
-      if (selectedFundBucket.type === 'liability') {
-        descriptionText += ` (from ${selectedFundBucket.name})`;
-      } else if (selectedFundBucket.type === 'goal') {
-        descriptionText += ` (from ${selectedFundBucket.name})`;
+      if (subcategory) {
+        descriptionText += ` - ${subcategory}`;
+      }
+      if (fundBucket.type === 'borrowed') {
+        descriptionText += ` (from ${fundBucket.name})`;
+      } else if (fundBucket.type === 'goal') {
+        descriptionText += ` (from ${fundBucket.name})`;
       }
 
-      // Show success notification
       showNotification({
         type: 'success',
         title: 'Paid',
@@ -225,24 +386,21 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
         date: date.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }),
       });
 
-      // Global refresh to update all data (accounts already refreshed above)
+      // Final global refresh to sync everything
       await globalRefresh();
-
-      // Additional delay to ensure all UI components have refreshed
-      await new Promise(resolve => setTimeout(resolve, 200));
-
-      onSuccess?.(); // Call success callback for immediate UI update
+      onSuccess?.();
       
       // Reset form
       setAmount('');
       setDescription('');
       setCategory('');
+      setSubcategory('');
       setAccount('');
       setDate(new Date());
       setSelectedFundBucket(null);
       setErrors({});
+      setShowNoteInput(false);
       onClose();
-
     } catch (error) {
       console.error('Error creating transaction:', error);
       Alert.alert('Error', 'Failed to record payment. Please try again.');
@@ -251,19 +409,25 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
     }
   };
 
-  const selectedAccount = accounts.find(acc => acc.id.toString() === account);
+  const selectedAccount = accounts.find((acc) => acc.id.toString() === account);
   const amountValue = parseFloat(amount) || 0;
-  const beforeBalance = selectedAccount?.balance || 0;
-  const afterBalance = beforeBalance - amountValue;
-  const totalBeforeBalance = accounts.reduce((sum, acc) => sum + (acc.balance || 0), 0);
-  const totalAfterBalance = totalBeforeBalance - amountValue;
+  const selectedCategoryObj = categories.find((cat) => cat.id === category);
 
   const formatDate = (date: Date) => {
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    if (date.toDateString() === today.toDateString()) {
+      return 'Today';
+    } else if (date.toDateString() === yesterday.toDateString()) {
+      return 'Yesterday';
+    } else {
     return date.toLocaleDateString('en-US', {
-      year: 'numeric',
       month: 'short',
-      day: 'numeric'
+        day: 'numeric',
     });
+    }
   };
 
   const onDateChange = (event: any, selectedDate?: Date) => {
@@ -273,604 +437,470 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
     }
   };
 
+  const handleAmountChange = (text: string) => {
+    // Remove any non-numeric characters except decimal point
+    const cleaned = text.replace(/[^0-9.]/g, '');
+    // Allow only one decimal point
+    const parts = cleaned.split('.');
+    if (parts.length > 2) {
+      return;
+    }
+    // Limit decimal places to 2
+    if (parts[1] && parts[1].length > 2) {
+      return;
+    }
+    setAmount(cleaned);
+  };
+
+  // Reset subcategory when category changes
+  useEffect(() => {
+    setSubcategory('');
+  }, [category]);
+
   return (
-    <Modal
-      visible={visible}
-      animationType="slide"
-      presentationStyle="pageSheet"
-    >
-    <LinearGradient
-      colors={['#99D795', '#99D795', '#99D795']}
-      style={styles.container}
-    >
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
         <SafeAreaView style={styles.safeArea}>
-          <ScrollView style={styles.scrollView}>
-            {/* Header */}
-            <View style={styles.header}>
-              <TouchableOpacity style={styles.closeButton} onPress={onClose}>
-                <Ionicons name="close" size={24} color="white" />
-              </TouchableOpacity>
-              <Text style={styles.headerTitle}>Pay Money</Text>
+        <View style={styles.container}>
+          {/* Amount Display */}
               <TouchableOpacity 
-                style={[styles.saveButton, isLoading && styles.disabledButton]}
-                onPress={handleSubmit}
-                disabled={isLoading}
-              >
-                <Text style={styles.saveText}>
-                  {isLoading ? 'Recording...' : 'Record Payment'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Amount Input */}
-            <View style={styles.inputCard}>
-              <Text style={styles.inputLabel}>Amount</Text>
-              <View style={styles.amountInput}>
-                <Text style={styles.currencySymbol}>{formatCurrencyAmount(0, currency).charAt(0)}</Text>
+            style={styles.amountContainer}
+            onPress={() => setShowAmountInput(true)}
+            activeOpacity={0.7}
+          >
+            {showAmountInput ? (
                 <TextInput
-                  style={[styles.amountTextInput, errors.amount && styles.errorInput]}
+                style={styles.amountInput}
                   value={amount}
-                  onChangeText={setAmount}
+                onChangeText={handleAmountChange}
                   placeholder="0.00"
-                  placeholderTextColor="#6B7280"
-                  keyboardType="numeric"
-                />
-              </View>
-              {errors.amount && <Text style={styles.errorText}>{errors.amount}</Text>}
-            </View>
-
-            {/* Description Input */}
-            <View style={styles.inputCard}>
-              <Text style={styles.inputLabel}>Description</Text>
-              <TextInput
-                style={[styles.textInput, errors.description && styles.errorInput]}
-                value={description}
-                onChangeText={setDescription}
-                placeholder="What did you pay for?"
-                placeholderTextColor="#6B7280"
-                multiline
+                placeholderTextColor="#9AA88B"
+                keyboardType="decimal-pad"
+                autoFocus
+                onSubmitEditing={() => {
+                  if (amount.trim()) {
+                    setShowAmountInput(false);
+                  }
+                }}
+                onBlur={() => {
+                  if (amount.trim()) {
+                    setShowAmountInput(false);
+                  }
+                }}
               />
-              {errors.description && <Text style={styles.errorText}>{errors.description}</Text>}
-            </View>
+            ) : (
+              <Text style={styles.amountText}>
+                {amount ? formatCurrencyAmount(amountValue, currency) : formatCurrencyAmount(0, currency)}
+              </Text>
+            )}
+          </TouchableOpacity>
 
-            {/* Category Selection */}
-            <View style={styles.inputCard}>
-              <Text style={styles.inputLabel}>Category</Text>
-              <View style={styles.categoryGrid}>
+          <ScrollView
+            style={styles.scrollView}
+            contentContainerStyle={styles.scrollContent}
+            showsVerticalScrollIndicator={false}
+          >
+            {/* Suggestions Section */}
+            {frequentlyUsedCategories.length > 0 && (
+              <View style={styles.section}>
+                <Text style={styles.sectionLabel}>Suggestions</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.pillScroll}>
+                  {frequentlyUsedCategories.map((cat) => (
+                    <TouchableOpacity
+                      key={cat.id}
+                      style={[styles.pillButton, category === cat.id && styles.pillButtonActive]}
+                      onPress={() => setCategory(cat.id)}
+                    >
+                      <Ionicons
+                        name={(cat.icon as any) || 'folder-outline'}
+                        size={16}
+                        color={category === cat.id ? '#4F6F3E' : '#6B7D5D'}
+                      />
+                      <Text style={[styles.pillText, category === cat.id && styles.pillTextActive]}>
+                        {cat.name}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+            </View>
+            )}
+
+            {/* Categories Section */}
+            <View style={styles.section}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionLabel}>Categories</Text>
+                <TouchableOpacity onPress={() => {}}>
+                  <Text style={styles.viewAllText}>View All →</Text>
+                </TouchableOpacity>
+              </View>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.pillScroll}>
                 {categories.map((cat) => (
                   <TouchableOpacity
                     key={cat.id}
-                    style={[
-                      styles.categoryButton,
-                      category === cat.id && styles.selectedCategory
-                    ]}
+                    style={[styles.pillButton, category === cat.id && styles.pillButtonActive]}
                     onPress={() => setCategory(cat.id)}
                   >
-                    <Text style={[
-                      styles.categoryText,
-                      category === cat.id && styles.selectedCategoryText
-                    ]}>
+                    <Ionicons
+                      name={(cat.icon as any) || 'folder-outline'}
+                      size={16}
+                      color={category === cat.id ? '#4F6F3E' : '#6B7D5D'}
+                    />
+                    <Text style={[styles.pillText, category === cat.id && styles.pillTextActive]}>
                       {cat.name}
                     </Text>
                   </TouchableOpacity>
                 ))}
-              </View>
+              </ScrollView>
             </View>
 
-            {/* Account Selection */}
-            <View style={styles.inputCard}>
-              <Text style={styles.inputLabel}>From Account</Text>
-              <View style={styles.accountList}>
-                {accounts.map((acc) => (
+            {/* Sub-categories Section */}
+            {availableSubcategories.length > 0 && (
+              <View style={styles.section}>
+                <Text style={styles.sectionLabel}>Sub-categories</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.pillScroll}>
+                  {availableSubcategories.map((subcat, index) => (
                   <TouchableOpacity
-                    key={acc.id}
-                    style={[
-                      styles.accountButton,
-                      account === acc.id.toString() && styles.selectedAccount
-                    ]}
-                    onPress={() => {
-                      setAccount(acc.id.toString());
-                      setSelectedFundBucket(null); // Reset fund bucket when account changes
-                    }}
-                  >
-                    <View style={styles.accountInfo}>
-                      <Text style={[
-                        styles.accountName,
-                        account === acc.id.toString() && styles.selectedAccountText
-                      ]}>
-                        {acc.name}
+                      key={index}
+                      style={[styles.pillButton, subcategory === subcat.name && styles.pillButtonActive]}
+                      onPress={() => setSubcategory(subcategory === subcat.name ? '' : subcat.name)}
+                    >
+                      <Ionicons
+                        name={subcat.icon as any}
+                        size={16}
+                        color={subcategory === subcat.name ? '#4F6F3E' : '#6B7D5D'}
+                      />
+                      <Text style={[styles.pillText, subcategory === subcat.name && styles.pillTextActive]}>
+                        {subcat.name}
                       </Text>
-                      <Text style={[
-                        styles.accountBalance,
-                        account === acc.id.toString() && styles.selectedAccountText
-                      ]}>
-                        {formatCurrencyAmount(acc.balance, currency)}
-                      </Text>
-                    </View>
-                    {account === acc.id.toString() && (
-                      <Ionicons name="checkmark-circle" size={20} color="#10B981" />
-                    )}
                   </TouchableOpacity>
                 ))}
-              </View>
-              {errors.account && <Text style={styles.errorText}>{errors.account}</Text>}
-            </View>
-
-            {/* Selected Fund Source */}
-            {account && (
-              <View style={styles.inputCard}>
-                <Text style={styles.inputLabel}>Fund Source</Text>
-                {selectedFundBucket ? (
-                  <TouchableOpacity
-                    style={styles.fundBucketButton}
-                    onPress={() => setShowFundPicker(true)}
-                  >
-                    <View style={styles.fundBucketInfo}>
-                      <View style={[styles.fundBucketIcon, { backgroundColor: (selectedFundBucket.color || '#6366F1') + '20' }]}>
-                        <Ionicons
-                          name={
-                            selectedFundBucket.type === 'personal'
-                              ? 'person'
-                              : selectedFundBucket.type === 'liability'
-                              ? 'card'
-                              : 'flag'
-                          }
-                          size={20}
-                          color={selectedFundBucket.color || '#6366F1'}
-                        />
-                      </View>
-                      <View style={styles.fundBucketDetails}>
-                        <Text style={styles.fundBucketName}>{selectedFundBucket.name}</Text>
-                        <Text style={styles.fundBucketAmount}>
-                          Available: {formatCurrencyAmount(selectedFundBucket.amount, currency)}
-                        </Text>
-                      </View>
-                    </View>
-                    <Ionicons name="chevron-forward" size={20} color="rgba(255,255,255,0.7)" />
-                  </TouchableOpacity>
-                ) : (
-                  <TouchableOpacity
-                    style={styles.selectFundButton}
-                    onPress={() => setShowFundPicker(true)}
-                  >
-                    <Ionicons name="wallet-outline" size={20} color="#10B981" />
-                    <Text style={styles.selectFundText}>Select Fund Source</Text>
-                  </TouchableOpacity>
-                )}
-                {errors.fundBucket && <Text style={styles.errorText}>{errors.fundBucket}</Text>}
+                </ScrollView>
               </View>
             )}
 
-            {/* Date Input */}
-            <View style={styles.inputCard}>
-              <Text style={styles.inputLabel}>Date</Text>
-              <TouchableOpacity 
-                style={styles.dateButton}
-                onPress={() => setShowDatePicker(true)}
-              >
-                <Text style={styles.dateText}>{formatDate(date)}</Text>
-                <Ionicons name="calendar-outline" size={20} color="#6B7280" />
+            {/* Account Selection */}
+            <InlineAccountSelector
+              accounts={(realtimeAccounts && realtimeAccounts.length > 0 ? realtimeAccounts : accounts || []).filter((acc) => 
+                acc.type !== 'goals_savings' && 
+                acc.type !== 'liability' &&
+                (acc.is_active === true || acc.is_active === undefined || acc.is_active === null)
+              )}
+              selectedAccountId={account}
+              onSelect={(acc) => setAccount(acc.id)}
+              label="Pay From Account"
+              showBalance={true}
+            />
+
+            {/* Transaction Details */}
+            <View style={styles.detailsSection}>
+              {/* Date */}
+              <TouchableOpacity style={styles.detailRow} onPress={() => setShowDatePicker(true)}>
+                <Ionicons name="calendar-outline" size={20} color="#1F3A24" />
+                <Text style={styles.detailText}>{formatDate(date)}</Text>
+                <Ionicons name="chevron-forward" size={18} color="#9AA88B" />
               </TouchableOpacity>
+
+              {/* Note */}
+                  <TouchableOpacity
+                style={styles.detailRow}
+                onPress={() => setShowNoteInput(!showNoteInput)}
+                  >
+                <Ionicons name="create-outline" size={20} color="#1F3A24" />
+                {showNoteInput ? (
+                  <TextInput
+                    style={styles.noteInput}
+                    value={description}
+                    onChangeText={setDescription}
+                    placeholder="e.g., Lunch with team"
+                    placeholderTextColor="#9AA88B"
+                    autoFocus
+                    onBlur={() => {
+                      if (!description.trim()) {
+                        setShowNoteInput(false);
+                      }
+                    }}
+                  />
+                ) : (
+                  <Text style={[styles.detailText, !description && styles.detailTextPlaceholder]}>
+                    {description || 'e.g., Lunch with team'}
+                        </Text>
+                )}
+                {!showNoteInput && <Ionicons name="chevron-forward" size={18} color="#9AA88B" />}
+                  </TouchableOpacity>
+
+              {/* Fund Source - Show picker if account has other funds besides personal */}
+              {account && accountHasFunds && accountHasOtherFunds && (
+                  <TouchableOpacity
+                  style={styles.detailRow}
+                    onPress={() => setShowFundPicker(true)}
+                  >
+                  <Ionicons name="wallet-outline" size={20} color="#1F3A24" />
+                  <Text style={styles.detailText}>
+                    {selectedFundBucket?.name || 'Select Fund Source'}
+                  </Text>
+                  <Ionicons name="chevron-forward" size={18} color="#9AA88B" />
+                  </TouchableOpacity>
+                )}
+              {account && (!accountHasFunds || !accountHasOtherFunds) && (
+                <View style={styles.detailRow}>
+                  <Ionicons name="wallet-outline" size={20} color="#1F3A24" />
+                  <Text style={styles.detailText}>Personal Funds</Text>
+              </View>
+            )}
+            </View>
+
+            {errors.account && <Text style={styles.errorText}>{errors.account}</Text>}
+            {errors.category && <Text style={styles.errorText}>{errors.category}</Text>}
+            {errors.fundBucket && <Text style={styles.errorText}>{errors.fundBucket}</Text>}
+          </ScrollView>
+
+          {/* Action Buttons */}
+          <View style={styles.footer}>
+            <TouchableOpacity style={styles.cancelButton} onPress={onClose}>
+              <Text style={styles.cancelButtonText}>Cancel</Text>
+            </TouchableOpacity>
+              <TouchableOpacity 
+              style={[styles.confirmButton, isLoading && styles.confirmButtonDisabled]}
+              onPress={handleSubmit}
+              disabled={isLoading}
+              >
+              <Text style={styles.confirmButtonText}>{isLoading ? 'Processing...' : 'Confirm'}</Text>
+              </TouchableOpacity>
+          </View>
+
+          {/* Date Picker */}
               {showDatePicker && (
                 <DateTimePicker
                   value={date}
                   mode="date"
                   display="default"
                   onChange={onDateChange}
+              maximumDate={new Date()}
                 />
               )}
             </View>
 
-            {/* Balance Impact */}
-            <View style={styles.balanceCard}>
-              <Text style={styles.balanceTitle}>Balance Impact</Text>
-              
-              <View style={styles.balanceRow}>
-                <View style={styles.balanceBox}>
-                  <Text style={styles.balanceLabel}>Account Balance</Text>
-                  <Text style={styles.balanceBefore}>${beforeBalance.toLocaleString()}</Text>
-                  <Text style={styles.balanceAfter}>${afterBalance.toLocaleString()}</Text>
-                </View>
-                
-                <View style={styles.balanceBox}>
-                  <Text style={styles.balanceLabel}>Total Balance</Text>
-                  <Text style={styles.balanceBefore}>${totalBeforeBalance.toLocaleString()}</Text>
-                  <Text style={styles.balanceAfter}>${totalAfterBalance.toLocaleString()}</Text>
-                </View>
-              </View>
-            </View>
 
-          </ScrollView>
-        </SafeAreaView>
-      </LinearGradient>
-
-      {/* Fund Picker Modal */}
+        {/* Fund Picker Modal - Only show if account has funds and other funds besides personal */}
+        {accountHasFunds && accountHasOtherFunds && (
       <FundPicker
         visible={showFundPicker}
         onClose={() => setShowFundPicker(false)}
         accountId={account}
+            amount={amountValue}
+            excludeGoalFunds={true} // Goal funds cannot be used for payments
+            allowGoalFunds={false}
         onSelect={(bucket) => {
           setSelectedFundBucket(bucket);
           setShowFundPicker(false);
         }}
-        amount={parseFloat(amount) || 0}
       />
+        )}
+      </SafeAreaView>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
+  container: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
+  amountContainer: {
+    paddingHorizontal: 24,
+    paddingTop: 32,
+    paddingBottom: 24,
+    alignItems: 'center',
+  },
+  amountText: {
+    fontSize: 48,
+    fontFamily: 'Archivo Black',
+    color: '#0E401C',
+  },
+  amountInput: {
+    fontSize: 48,
+    fontFamily: 'Archivo Black',
+    color: '#0E401C',
+    textAlign: 'center',
+    minWidth: 200,
   },
   scrollView: {
     flex: 1,
+  },
+  scrollContent: {
     paddingHorizontal: 20,
+    paddingBottom: 100,
   },
-  header: {
+  section: {
+    marginBottom: 24,
+  },
+  sectionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingTop: 20,
-    paddingBottom: 30,
-  },
-  closeButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 12,
-  },
-  headerTitle: {
-    fontSize: 20,
-    color: 'white',
-    fontWeight: 'bold',
-  },
-  saveButton: {
-    backgroundColor: '#10B981',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  saveText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  disabledButton: {
-    opacity: 0.6,
-  },
-  errorInput: {
-    borderColor: '#EF4444',
-    borderWidth: 1,
-  },
-  errorText: {
-    color: '#EF4444',
-    fontSize: 12,
-    marginTop: 4,
-  },
-  dateButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  dateText: {
-    color: 'white',
-    fontSize: 16,
-  },
-  inputCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 16,
-  },
-  inputLabel: {
-    fontSize: 16,
-    color: 'white',
-    fontWeight: 'bold',
     marginBottom: 12,
   },
-  amountInput: {
+  sectionLabel: {
+    fontSize: 13,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#637050',
+    marginBottom: 12,
+  },
+  viewAllText: {
+    fontSize: 13,
+    fontFamily: 'Poppins-Medium',
+    color: '#4F6F3E',
+  },
+  pillScroll: {
+    marginHorizontal: -4,
+  },
+  pillButton: {
     flexDirection: 'row',
     alignItems: 'center',
-  },
-  currencySymbol: {
-    fontSize: 32,
-    color: 'white',
-    fontWeight: 'bold',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
     marginRight: 8,
   },
-  amountTextInput: {
-    flex: 1,
-    fontSize: 32,
-    color: 'white',
-    fontWeight: 'bold',
+  pillButtonActive: {
+    backgroundColor: '#F7F9F2',
+    borderColor: '#4F6F3E',
   },
-  textInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    color: 'white',
-    fontSize: 16,
-  },
-  categoryGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  categoryButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    marginBottom: 8,
-  },
-  selectedCategory: {
-    backgroundColor: '#10B981',
-  },
-  categoryText: {
-    color: 'white',
+  pillText: {
     fontSize: 14,
-    fontWeight: '500',
+    fontFamily: 'Poppins-Medium',
+    color: '#6B7D5D',
   },
-  selectedCategoryText: {
-    color: 'white',
-    fontWeight: 'bold',
+  pillTextActive: {
+    color: '#4F6F3E',
+    fontFamily: 'Poppins-SemiBold',
   },
-  accountList: {
-    gap: 8,
-  },
-  accountButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  selectedAccount: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    borderWidth: 1,
-    borderColor: '#10B981',
-  },
-  accountInfo: {
-    flex: 1,
-  },
-  accountName: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginBottom: 4,
-  },
-  accountBalance: {
-    color: '#9CA3AF',
-    fontSize: 14,
-  },
-  accountBreakdown: {
-    marginTop: 4,
-    gap: 2,
-  },
-  accountBalanceText: {
-    fontSize: 12,
-    color: 'rgba(255,255,255,0.7)',
-    fontWeight: '600',
-  },
-  personalFundsText: {
-    fontSize: 11,
-    color: '#10B981',
-    marginTop: 2,
-  },
-  liabilityFundsText: {
-    fontSize: 11,
-    color: '#EF4444',
-    marginTop: 2,
-  },
-  selectedAccountText: {
-    color: '#10B981',
-  },
-  balanceCard: {
-    backgroundColor: '#000000',
+  detailsSection: {
+    marginTop: 8,
+    gap: 1,
+    backgroundColor: '#F7F9F2',
     borderRadius: 16,
-    padding: 20,
-    marginBottom: 30,
-  },
-  balanceTitle: {
-    fontSize: 18,
-    color: 'white',
-    fontWeight: 'bold',
-    marginBottom: 16,
-    textAlign: 'center',
-  },
-  balanceRow: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  balanceBox: {
-    flex: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
-    padding: 16,
-    alignItems: 'center',
-  },
-  balanceLabel: {
-    color: '#9CA3AF',
-    fontSize: 12,
-    marginBottom: 8,
-  },
-  balanceBefore: {
-    color: '#6B7280',
-    fontSize: 14,
-    textDecorationLine: 'line-through',
-    marginBottom: 4,
-  },
-  balanceAfter: {
-    color: '#10B981',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  sourceToggle: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 4,
-  },
-  sourceButton: {
-    flex: 1,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  selectedSource: {
-    backgroundColor: '#10B981',
-  },
-  sourceText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '500',
-  },
-  selectedSourceText: {
-    color: 'white',
-    fontWeight: 'bold',
-  },
-  liabilityList: {
-    gap: 8,
-  },
-  liabilityButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  selectedLiability: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    borderWidth: 1,
-    borderColor: '#10B981',
-  },
-  liabilityInfo: {
-    flex: 1,
-  },
-  liabilityName: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginBottom: 4,
-  },
-  liabilityBalance: {
-    color: '#9CA3AF',
-    fontSize: 14,
-  },
-  selectedLiabilityText: {
-    color: '#10B981',
-  },
-  liabilityPortionText: {
-    color: '#F59E0B',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  checkboxRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  checkboxLabel: {
-    color: 'white',
-    fontSize: 14,
-    marginLeft: 8,
-  },
-  dateButtonText: {
-    color: 'white',
-    fontSize: 16,
-  },
-  dateButtonPlaceholder: {
-    color: 'rgba(255,255,255,0.7)',
-  },
-  segmentedControl: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
     overflow: 'hidden',
   },
-  segment: {
-    flex: 1,
+  detailRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
     paddingHorizontal: 16,
+    paddingVertical: 16,
+    backgroundColor: '#FFFFFF',
+    gap: 12,
   },
-  activeSegment: {
-    backgroundColor: '#10B981',
-  },
-  segmentDivider: {
-    width: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-  },
-  fundBucketButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  fundBucketInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  detailText: {
     flex: 1,
+    fontSize: 15,
+    fontFamily: 'Poppins-Regular',
+    color: '#1F3A24',
   },
-  fundBucketIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
+  detailTextPlaceholder: {
+    color: '#9AA88B',
   },
-  fundBucketDetails: {
+  noteInput: {
     flex: 1,
+    fontSize: 15,
+    fontFamily: 'Poppins-Regular',
+    color: '#1F3A24',
+    padding: 0,
   },
-  fundBucketName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#fff',
-    marginBottom: 4,
-  },
-  fundBucketAmount: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
-  },
-  selectFundButton: {
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-    borderRadius: 12,
-    padding: 16,
+  footer: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    paddingBottom: 32,
+    gap: 12,
+    backgroundColor: '#FFFFFF',
+    borderTopWidth: 1,
+    borderTopColor: '#E5ECD6',
+  },
+  cancelButton: {
+    flex: 1,
+    paddingVertical: 16,
+    borderRadius: 16,
+    backgroundColor: '#FFFFFF',
     borderWidth: 1,
-    borderColor: '#10B981',
-    borderStyle: 'dashed',
+    borderColor: '#E5ECD6',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  selectFundText: {
-    color: '#10B981',
+  cancelButtonText: {
     fontSize: 16,
-    fontWeight: '600',
-    marginLeft: 8,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#1F3A24',
   },
-  segmentText: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 14,
-    fontWeight: '500',
-    marginLeft: 8,
+  confirmButton: {
+    flex: 1,
+    paddingVertical: 16,
+    borderRadius: 16,
+    backgroundColor: '#4F6F3E',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  activeSegmentText: {
-    color: 'white',
-    fontWeight: 'bold',
+  confirmButtonDisabled: {
+    opacity: 0.5,
+  },
+  confirmButtonText: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#FFFFFF',
+  },
+  errorText: {
+    fontSize: 12,
+    fontFamily: 'Poppins-Regular',
+    color: '#B83228',
+    marginTop: 8,
+    marginLeft: 16,
+  },
+  pickerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'flex-end',
+  },
+  pickerContainer: {
+    backgroundColor: '#FFFFFF',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    maxHeight: '80%',
+  },
+  pickerHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5ECD6',
+  },
+  pickerTitle: {
+    fontSize: 18,
+    fontFamily: 'Archivo Black',
+    color: '#0E401C',
+  },
+  pickerItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F7F9F2',
+  },
+  pickerItemActive: {
+    backgroundColor: '#F7F9F2',
+  },
+  pickerItemText: {
+    fontSize: 16,
+    fontFamily: 'Poppins-Regular',
+    color: '#1F3A24',
   },
 });

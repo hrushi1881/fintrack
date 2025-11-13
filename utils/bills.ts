@@ -18,7 +18,7 @@ export interface CreateBillData {
   amount?: number;
   currency: string;
   category_id?: string;
-  bill_type: 'one_time' | 'recurring_fixed' | 'recurring_variable' | 'goal_linked';
+  bill_type: 'one_time' | 'recurring_fixed' | 'recurring_variable' | 'goal_linked' | 'liability_linked';
   recurrence_pattern?: 'daily' | 'weekly' | 'monthly' | 'yearly' | 'custom';
   recurrence_interval?: number;
   custom_recurrence_config?: any;
@@ -27,6 +27,11 @@ export interface CreateBillData {
   recurrence_end_date?: string;
   goal_id?: string;
   linked_account_id?: string;
+  liability_id?: string;
+  interest_amount?: number;
+  principal_amount?: number;
+  payment_number?: number;
+  interest_included?: boolean;
   color: string;
   icon: string;
   reminder_days: number[];
@@ -193,6 +198,11 @@ export async function createBill(data: CreateBillData): Promise<Bill> {
         recurrence_end_date: data.recurrence_end_date || null,
         goal_id: data.goal_id || null,
         linked_account_id: data.linked_account_id || null,
+        liability_id: data.liability_id || null,
+        interest_amount: data.interest_amount || null,
+        principal_amount: data.principal_amount || null,
+        payment_number: data.payment_number || null,
+        interest_included: data.interest_included !== undefined ? data.interest_included : true,
         color: data.color,
         icon: data.icon,
         reminder_days: data.reminder_days,

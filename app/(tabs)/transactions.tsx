@@ -8,8 +8,12 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useBackgroundMode } from '@/contexts/BackgroundModeContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { useSettings } from '@/contexts/SettingsContext';
+import { useLiabilities } from '@/contexts/LiabilitiesContext';
 import { formatCurrencyAmount } from '@/utils/currency';
-import GlassmorphCard from '@/components/GlassmorphCard';
+import { fetchUpcomingSchedules } from '@/utils/liabilitySchedules';
+import { supabase } from '@/lib/supabase';
+import { calculateBillStatus } from '@/utils/bills';
+import GlassCard from '@/components/GlassCard';
 import TransactionCard from '@/components/TransactionCard';
 import IOSGradientBackground from '@/components/iOSGradientBackground';
 import { theme, BACKGROUND_MODES } from '@/theme';
@@ -40,12 +44,46 @@ export default function TransactionsScreen() {
   const { backgroundMode } = useBackgroundMode();
   const { transactions, loading, refreshTransactions, refreshAccounts } = useRealtimeData();
   const { currency } = useSettings();
+  const { liabilities } = useLiabilities();
   const [selectedDate, setSelectedDate] = useState('');
   const [viewMode, setViewMode] = useState('list'); // 'list' or 'calendar'
   const [filterType, setFilterType] = useState('all'); // 'all', 'income', 'expense', 'transfer'
   const [payModalVisible, setPayModalVisible] = useState(false);
   const [receiveModalVisible, setReceiveModalVisible] = useState(false);
   const [transferModalVisible, setTransferModalVisible] = useState(false);
+  const [bills, setBills] = useState<any[]>([]);
+
+  // Fetch bills for calendar (always fetch, refresh when transactions change)
+  useEffect(() => {
+    if (user) {
+      const loadBills = async () => {
+        try {
+          // Fetch all bills (not just liability schedules)
+          const { data: billsData, error } = await supabase
+            .from('bills')
+            .select('*')
+            .eq('user_id', user.id)
+            .eq('is_deleted', false)
+            .eq('is_active', true)
+            .order('due_date', { ascending: true });
+          
+          if (error) throw error;
+          
+          // Calculate status for each bill based on due date
+          const billsWithStatus = (billsData || []).map(bill => ({
+            ...bill,
+            status: calculateBillStatus(bill),
+          }));
+          
+          setBills(billsWithStatus);
+        } catch (error) {
+          console.error('Error fetching bills:', error);
+          setBills([]);
+        }
+      };
+      loadBills();
+    }
+  }, [user, transactions]);
 
   const onDayPress = (day: any) => {
     setSelectedDate(day.dateString);
@@ -180,30 +218,76 @@ export default function TransactionsScreen() {
                 markedDates={(() => {
                   const markedDates: any = {};
                   
-                  // Mark selected date
-                  if (selectedDate) {
-                    markedDates[selectedDate] = { 
-                      selected: true, 
-                      selectedColor: '#10B981',
-                      selectedTextColor: '#ffffff'
-                    };
-                  }
+                  // First, collect all dots for each date
+                  const dateDots: { [key: string]: Array<{ color: string; key: string }> } = {};
                   
                   // Mark dates with transactions
                   transactions.forEach(transaction => {
                     const date = transaction.date;
                     const color = transaction.type === 'income' ? '#10B981' : transaction.type === 'expense' ? '#EF4444' : '#3B82F6';
-                    if (!markedDates[date]) {
-                      markedDates[date] = {
-                        marked: true,
-                        dotColor: color
-                      };
-                    } else {
-                      // If date is selected, also show the dot
-                      markedDates[date].marked = true;
-                      markedDates[date].dotColor = color;
+                    if (!dateDots[date]) {
+                      dateDots[date] = [];
+                    }
+                    // Add transaction dot if not already added
+                    if (!dateDots[date].find(d => d.key === 'transaction')) {
+                      dateDots[date].push({ color, key: 'transaction' });
                     }
                   });
+                  
+                  // Mark dates with bills (due dates)
+                  bills.forEach(bill => {
+                    if (bill.status !== 'paid' && bill.status !== 'cancelled') {
+                      const date = bill.due_date;
+                      let color = '#F59E0B'; // Orange for upcoming bills
+                      
+                      // Color code by status
+                      if (bill.status === 'overdue') {
+                        color = '#EF4444'; // Red for overdue
+                      } else if (bill.status === 'due_today') {
+                        color = '#F59E0B'; // Orange for due today
+                      } else if (bill.status === 'upcoming') {
+                        color = '#3B82F6'; // Blue for upcoming
+                      }
+                      
+                      if (!dateDots[date]) {
+                        dateDots[date] = [];
+                      }
+                      // Add bill dot if not already added
+                      if (!dateDots[date].find(d => d.key === 'bill')) {
+                        dateDots[date].push({ color, key: 'bill' });
+                      }
+                    }
+                  });
+                  
+                  // Build markedDates with dots and selection
+                  Object.keys(dateDots).forEach(date => {
+                    markedDates[date] = {
+                      marked: true,
+                      dots: dateDots[date],
+                      ...(selectedDate === date && {
+                        selected: true,
+                        selectedColor: '#10B981',
+                        selectedTextColor: '#ffffff'
+                      })
+                    };
+                  });
+                  
+                  // Mark selected date (even if no transactions or bills)
+                  if (selectedDate && !markedDates[selectedDate]) {
+                    markedDates[selectedDate] = {
+                      selected: true,
+                      selectedColor: '#10B981',
+                      selectedTextColor: '#ffffff'
+                    };
+                  } else if (selectedDate && markedDates[selectedDate]) {
+                    // Ensure selected date shows selection even with dots
+                    markedDates[selectedDate] = {
+                      ...markedDates[selectedDate],
+                      selected: true,
+                      selectedColor: '#10B981',
+                      selectedTextColor: '#ffffff'
+                    };
+                  }
                   
                   return markedDates;
                 })()}
@@ -231,13 +315,72 @@ export default function TransactionsScreen() {
           {selectedDate && viewMode === 'calendar' && (
             <View style={styles.selectedDateInfo}>
               <Text style={styles.selectedDateText}>
-                Transactions for {new Date(selectedDate).toLocaleDateString()}
+                {new Date(selectedDate).toLocaleDateString()}
               </Text>
               {filteredTransactions.length > 0 && (
                 <Text style={styles.selectedDateCount}>
                   {filteredTransactions.length} transaction{filteredTransactions.length !== 1 ? 's' : ''}
                 </Text>
               )}
+              {bills.filter(b => b.due_date === selectedDate && b.status !== 'paid' && b.status !== 'cancelled').length > 0 && (
+                <Text style={styles.selectedDateCount}>
+                  {bills.filter(b => b.due_date === selectedDate && b.status !== 'paid' && b.status !== 'cancelled').length} bill{bills.filter(b => b.due_date === selectedDate && b.status !== 'paid' && b.status !== 'cancelled').length !== 1 ? 's' : ''} due
+                </Text>
+              )}
+            </View>
+          )}
+
+          {/* Bills for Selected Date */}
+          {selectedDate && viewMode === 'calendar' && bills.filter(b => b.due_date === selectedDate && b.status !== 'paid' && b.status !== 'cancelled').length > 0 && (
+            <View style={styles.billsSection}>
+              <Text style={styles.billsSectionTitle}>Bills Due</Text>
+              {bills
+                .filter(b => {
+                  const billStatus = calculateBillStatus(b);
+                  return b.due_date === selectedDate && billStatus !== 'paid' && billStatus !== 'cancelled';
+                })
+                .map((bill) => (
+                  <TouchableOpacity
+                    key={bill.id}
+                    style={[
+                      styles.billCard,
+                      bill.status === 'overdue' && styles.billCardOverdue,
+                    ]}
+                    onPress={() => {
+                      // Navigate to bill or liability detail page
+                      if (bill.liability_id) {
+                        router.push(`/liability/${bill.liability_id}`);
+                      } else {
+                        router.push(`/bill/${bill.id}` as any);
+                      }
+                    }}
+                  >
+                    <View style={styles.billIcon}>
+                      <Ionicons 
+                        name={bill.icon as any || 'receipt-outline'} 
+                        size={20} 
+                        color={bill.status === 'overdue' ? '#EF4444' : '#F59E0B'} 
+                      />
+                    </View>
+                    <View style={styles.billInfo}>
+                      <Text style={styles.billTitle}>{bill.title}</Text>
+                      <Text style={styles.billAmount}>{formatCurrency(bill.amount || 0)}</Text>
+                      {bill.principal_amount && bill.interest_amount && bill.interest_amount > 0 && (
+                        <Text style={styles.billBreakdown}>
+                          Principal: {formatCurrency(bill.principal_amount)} • Interest: {formatCurrency(bill.interest_amount)}
+                        </Text>
+                      )}
+                      <Text style={[
+                        styles.billStatus,
+                        bill.status === 'overdue' && styles.billStatusOverdue,
+                        bill.status === 'due_today' && styles.billStatusDueToday,
+                      ]}>
+                        {bill.status === 'overdue' ? '⚠️ Overdue' : bill.status === 'due_today' ? 'Due Today' : 'Upcoming'}
+                      </Text>
+                    </View>
+                    <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
+                  </TouchableOpacity>
+                ))}
             </View>
           )}
 
@@ -257,13 +400,15 @@ export default function TransactionsScreen() {
                   onPress={() => router.push(`/transaction/${transaction.id}`)}
                 />
               ))
-            ) : (
-              <GlassmorphCard style={styles.emptyTransactionsContainer}>
-                <Ionicons name="receipt-outline" size={48} color="rgba(255,255,255,0.5)" />
-                <Text style={styles.emptyTransactionsTitle}>No Transactions Yet</Text>
-                <Text style={styles.emptyTransactionsDescription}>
-                  Start by adding money or making a transaction
-                </Text>
+            ) : (!selectedDate || (selectedDate && filteredTransactions.length === 0 && bills.filter(b => b.due_date === selectedDate && b.status !== 'paid' && b.status !== 'cancelled').length === 0)) ? (
+              <GlassCard padding={24} marginVertical={12}>
+                <View style={styles.emptyStateContent}>
+                  <Ionicons name="receipt-outline" size={48} color="rgba(0, 0, 0, 0.4)" />
+                  <Text style={styles.emptyTransactionsTitle}>No Transactions Yet</Text>
+                  <Text style={styles.emptyTransactionsDescription}>
+                    Start by adding money or making a transaction
+                  </Text>
+                </View>
                 <View style={styles.emptyActions}>
                   <TouchableOpacity
                     style={styles.emptyActionButton}
@@ -278,8 +423,8 @@ export default function TransactionsScreen() {
                     <Text style={styles.emptyActionButtonText}>Spend Money</Text>
                   </TouchableOpacity>
                 </View>
-              </GlassmorphCard>
-            )}
+              </GlassCard>
+            ) : null}
           </View>
 
           {/* Quick Actions */}
@@ -347,9 +492,9 @@ export default function TransactionsScreen() {
     return (
       <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
         <SafeAreaView style={styles.safeArea}>
-          <GlassmorphCard style={styles.loadingContainer}>
+          <GlassCard padding={24} marginVertical={12}>
             <Text style={styles.loadingText}>Loading transactions...</Text>
-          </GlassmorphCard>
+          </GlassCard>
         </SafeAreaView>
       </LinearGradient>
     );
@@ -512,27 +657,116 @@ const styles = StyleSheet.create({
     marginTop: 16,
     marginBottom: 8,
   },
+  emptyStateContent: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 16,
+  },
+  emptyTransactionsTitle: {
+    fontSize: 20,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
   emptyTransactionsDescription: {
     fontSize: 14,
-    color: '#6B7280',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
     textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 20,
   },
   emptyActions: {
     flexDirection: 'row',
     gap: 12,
+    marginTop: 16,
   },
   emptyActionButton: {
-    backgroundColor: '#F59E0B',
+    backgroundColor: '#000000',
     borderRadius: 12,
     paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingVertical: 10,
   },
   emptyActionButtonText: {
     color: '#FFFFFF',
-    fontSize: 12,
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
+  },
+  billsSection: {
+    marginTop: 24,
+    marginBottom: 16,
+    paddingHorizontal: 20,
+  },
+  billsSectionTitle: {
+    fontSize: 18,
+    fontFamily: 'HelveticaNeue-Bold',
+    fontWeight: '700',
+    color: '#000000',
+    marginBottom: 12,
+  },
+  billCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 16,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    marginBottom: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  billCardOverdue: {
+    borderColor: '#EF4444',
+    borderWidth: 2,
+    backgroundColor: 'rgba(239, 68, 68, 0.05)',
+  },
+  billIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  billInfo: {
+    flex: 1,
+    gap: 4,
+  },
+  billTitle: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  billAmount: {
+    fontSize: 18,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  billBreakdown: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginTop: 2,
+  },
+  billStatus: {
+    fontSize: 12,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#F59E0B',
+    marginTop: 2,
+  },
+  billStatusOverdue: {
+    color: '#EF4444',
+  },
+  billStatusDueToday: {
+    color: '#F59E0B',
   },
   filterContainer: {
     marginBottom: 20,
@@ -571,5 +805,11 @@ const styles = StyleSheet.create({
   activeFilterButtonText: {
     color: '#10B981',
     fontWeight: '600',
+  },
+  loadingText: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
+    textAlign: 'center',
   },
 });

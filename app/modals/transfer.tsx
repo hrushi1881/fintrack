@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, TextInput, Modal, Alert, Platform } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, TextInput, Modal, Alert, Platform, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/contexts/AuthContext';
 import { useNotification } from '@/contexts/NotificationContext';
@@ -11,6 +10,8 @@ import { supabase } from '@/lib/supabase';
 import { formatCurrencyAmount } from '@/utils/currency';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import FundPicker, { FundBucket } from '@/components/FundPicker';
+import GlassCard from '@/components/GlassCard';
+import { adjustFundBalance } from '@/utils/funds';
 
 interface TransferModalProps {
   visible: boolean;
@@ -25,7 +26,7 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
   const { user } = useAuth();
   const { showNotification } = useNotification();
   const { currency } = useSettings();
-  const { globalRefresh, refreshAccounts } = useRealtimeData();
+  const { accounts: realtimeAccounts, globalRefresh, refreshAccounts, refreshTransactions, refreshAccountFunds, recalculateAllBalances } = useRealtimeData();
   const { convertLiabilityToPersonal } = useLiabilities();
   
   const [transferType, setTransferType] = useState<TransferType>('between_accounts');
@@ -43,6 +44,9 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
   const [fromFundBucket, setFromFundBucket] = useState<FundBucket | null>(null);
   const [showFromFundPicker, setShowFromFundPicker] = useState(false);
   
+  // Account breakdown state for "To Account" display
+  const [accountBreakdowns, setAccountBreakdowns] = useState<{[key: string]: any}>({});
+  
   // Conversion-specific state
   const [conversionStep, setConversionStep] = useState<'account' | 'details' | 'confirm'>('account');
   const [selectedConversionAccount, setSelectedConversionAccount] = useState<string | null>(null);
@@ -51,6 +55,9 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
   const [conversionAmount, setConversionAmount] = useState('');
   const [conversionNotes, setConversionNotes] = useState('');
   
+  const mapBucketTypeForBackend = (type: FundBucket['type']) =>
+    type === 'borrowed' ? 'liability' : type;
+  
 
   // Fetch user accounts
   useEffect(() => {
@@ -58,6 +65,13 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
       fetchAccounts();
     }
   }, [visible, user]);
+
+  // Sync local accounts with realtime accounts when they update
+  useEffect(() => {
+    if (realtimeAccounts && realtimeAccounts.length > 0) {
+      setAccounts(realtimeAccounts);
+    }
+  }, [realtimeAccounts]);
 
   // Set preselected account when modal opens
   useEffect(() => {
@@ -116,7 +130,7 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
           const amt = parseFloat(conversionAmount);
           if (isNaN(amt) || amt <= 0) {
             newErrors.conversionAmount = 'Please enter a valid amount';
-          } else if (selectedConversionFundBucket && selectedConversionFundBucket.type === 'liability') {
+          } else if (selectedConversionFundBucket && selectedConversionFundBucket.type === 'borrowed') {
             // Validation will be handled by FundPicker showing available amounts
             // Additional validation can be added here if needed
           }
@@ -146,9 +160,10 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
         // Then add the amount to the destination account as personal funds
         if (fromFundBucket.type !== 'personal') {
           // Spend from the fund bucket first
+          const backendType = mapBucketTypeForBackend(fromFundBucket.type);
           const bucketParam = {
-            type: fromFundBucket.type,
-            id: fromFundBucket.type !== 'personal' ? fromFundBucket.id : null,
+            type: backendType,
+            id: backendType !== 'personal' ? fromFundBucket.id : null,
           };
 
           // Spend from bucket
@@ -211,27 +226,86 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
           if (receiveError) throw receiveError;
         }
 
-        // Force immediate account refresh to get updated balances
-        await refreshAccounts();
+        // Verify balances were updated
+        console.log('✅ Transfer RPCs Success, verifying balance updates...');
         
-        // Small delay to ensure database has committed and state has updated
-        await new Promise(resolve => setTimeout(resolve, 200));
+        let retries = 0;
+        let balancesVerified = false;
+        let fromAccountData: any = null;
+        let toAccountData: any = null;
+        
+        while (retries < 5 && !balancesVerified) {
+          await new Promise(resolve => setTimeout(resolve, 100 * (retries + 1)));
+          
+          const { data: fromData, error: fromError } = await supabase
+            .from('accounts')
+            .select('name, balance')
+            .eq('id', fromAccount)
+            .single();
+          const { data: toData, error: toError } = await supabase
+            .from('accounts')
+            .select('name, balance')
+            .eq('id', toAccount)
+            .single();
+          
+          if (!fromError && !toError && fromData && toData) {
+            fromAccountData = fromData;
+            toAccountData = toData;
+            const fromExpected = fromBeforeBalance - amountValue;
+            const toExpected = toBeforeBalance + amountValue;
+            
+            if (Math.abs(fromAccountData.balance - fromExpected) < 0.01 &&
+                Math.abs(toAccountData.balance - toExpected) < 0.01) {
+              balancesVerified = true;
+              console.log('✅ Transfer balances verified');
+            }
+          }
+          retries++;
+        }
+        
+        // If verification failed, fetch accounts anyway for display
+        if (!fromAccountData || !toAccountData) {
+          const { data: fromData } = await supabase
+            .from('accounts')
+            .select('name')
+            .eq('id', fromAccount)
+            .single();
+          const { data: toData } = await supabase
+            .from('accounts')
+            .select('name')
+            .eq('id', toAccount)
+            .single();
+          fromAccountData = fromAccountData || fromData;
+          toAccountData = toAccountData || toData;
+        }
+        
+        if (!balancesVerified) {
+          console.warn('⚠️ Transfer balance verification failed, but RPCs succeeded');
+        }
 
-        // Fetch fresh account data directly from DB for notifications
-        const { data: fromAccountData } = await supabase
-          .from('accounts')
-          .select('name')
-          .eq('id', fromAccount)
-          .single();
-        const { data: toAccountData } = await supabase
-          .from('accounts')
-          .select('name')
-          .eq('id', toAccount)
-          .single();
+        console.log('✅ Transfer RPC successful, refreshing data...');
+        
+        // Wait for database commit - increased delay for reliability
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Refresh all data in parallel for faster updates
+        await Promise.all([
+          refreshAccounts(),
+          refreshAccountFunds(),
+          refreshTransactions(),
+        ]);
+        
+        // Re-fetch accounts in modal to get latest balances
+        await fetchAccounts();
+        
+        console.log('✅ Data refreshed after transfer');
         
         const fromAccountName = fromAccountData?.name || 'Account';
         const toAccountName = toAccountData?.name || 'Account';
 
+        // Trigger success callback to update parent UI
+        onSuccess?.();
+        
         showNotification({
           type: 'success',
           title: 'Transferred',
@@ -241,6 +315,9 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
           account: `${fromAccountName} → ${toAccountName}`,
           date: date.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }),
         });
+        
+        // Small delay to allow UI to update before closing
+        await new Promise(resolve => setTimeout(resolve, 300));
       } else {
         // Conversion flow
         if (conversionStep === 'details') {
@@ -254,7 +331,7 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
             throw new Error('Missing conversion details');
           }
 
-          if (selectedConversionFundBucket.type !== 'liability') {
+          if (selectedConversionFundBucket.type !== 'borrowed') {
             throw new Error('Can only convert liability funds to personal');
           }
 
@@ -278,8 +355,12 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
 
       // Global refresh to update all data
       await globalRefresh();
-
+      
+      // Trigger success callback to update parent UI
       onSuccess?.();
+      
+      // Small delay to allow UI to update with new balances
+      await new Promise(resolve => setTimeout(resolve, 300));
       
       // Reset form
       setAmount('');
@@ -319,7 +400,7 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
 
   // Handle fund bucket selection from FundPicker for conversion
   useEffect(() => {
-    if (selectedConversionFundBucket && selectedConversionFundBucket.type === 'liability' && conversionStep === 'account') {
+    if (selectedConversionFundBucket && selectedConversionFundBucket.type === 'borrowed' && conversionStep === 'account') {
       setConversionStep('details');
     }
   }, [selectedConversionFundBucket]);
@@ -342,81 +423,69 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
       visible={visible}
       animationType="slide"
       presentationStyle="pageSheet"
+      onRequestClose={onClose}
     >
-    <LinearGradient
-      colors={['#99D795', '#99D795', '#99D795']}
-      style={styles.container}
-    >
-        <SafeAreaView style={styles.safeArea}>
-          <ScrollView style={styles.scrollView}>
-            {/* Header */}
-            <View style={styles.header}>
-              <TouchableOpacity style={styles.closeButton} onPress={onClose}>
-                <Ionicons name="close" size={24} color="white" />
-              </TouchableOpacity>
-              <Text style={styles.headerTitle}>
-                {transferType === 'liability_to_personal' ? 'Convert to Personal Funds' : 'Transfer Money'}
-              </Text>
-              <TouchableOpacity 
-                style={[styles.saveButton, isLoading && styles.disabledButton]}
-                onPress={transferType === 'liability_to_personal' && conversionStep !== 'confirm' ? handleConversionContinue : handleSubmit}
-                disabled={isLoading}
-              >
-                <Text style={styles.saveText}>
-                  {isLoading ? 'Processing...' : 
-                   transferType === 'liability_to_personal' && conversionStep !== 'confirm' ? 'Continue' :
-                   transferType === 'liability_to_personal' && conversionStep === 'confirm' ? 'Convert' :
-                   'Transfer'}
-                </Text>
-              </TouchableOpacity>
-            </View>
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.container}>
+          {/* Header */}
+          <View style={styles.header}>
+            <TouchableOpacity onPress={onClose} style={styles.closeButton}>
+              <Ionicons name="close" size={24} color="#000000" />
+            </TouchableOpacity>
+            <Text style={styles.headerTitle}>
+              {transferType === 'liability_to_personal' ? 'Convert Funds' : 'Transfer Money'}
+            </Text>
+            <View style={styles.closeButton} />
+          </View>
 
-            {/* Transfer Type Selection (only show if not in conversion flow) */}
-            {transferType === 'between_accounts' && (
-              <View style={styles.inputCard}>
-                <Text style={styles.inputLabel}>Transfer Type</Text>
+          <ScrollView 
+            style={styles.scrollView}
+            contentContainerStyle={styles.scrollContent}
+            showsVerticalScrollIndicator={false}
+          >
+
+            {/* Transfer Type Selection (show when in between_accounts mode or at start) */}
+            {transferType === 'between_accounts' && !fromAccount && (
+              <GlassCard padding={20} marginVertical={12}>
+                <Text style={styles.sectionTitle}>Transfer Type</Text>
                 <View style={styles.transferTypeToggle}>
                   <TouchableOpacity
                     style={[
                       styles.transferTypeButton,
-                      transferType === 'between_accounts' && styles.selectedTransferType
+                      styles.selectedTransferType
                     ]}
                     onPress={() => setTransferType('between_accounts')}
                   >
-                    <Ionicons name="swap-horizontal" size={24} color={transferType === 'between_accounts' ? 'white' : 'rgba(255,255,255,0.7)'} />
+                    <Ionicons name="swap-horizontal" size={24} color="#000000" />
                     <View style={{ flex: 1, marginLeft: 12 }}>
-                      <Text style={[styles.transferTypeText, transferType === 'between_accounts' && styles.selectedTransferTypeText]}>
+                      <Text style={[styles.transferTypeText, styles.selectedTransferTypeText]}>
                         Between Accounts
                       </Text>
-                      <Text style={[styles.transferTypeSubtext, transferType === 'between_accounts' && styles.selectedTransferTypeSubtext]}>
+                      <Text style={[styles.transferTypeSubtext, styles.selectedTransferTypeSubtext]}>
                         Move money from one account to another
                       </Text>
                     </View>
                   </TouchableOpacity>
                   
                   <TouchableOpacity
-                    style={[
-                      styles.transferTypeButton,
-                      transferType === 'liability_to_personal' && styles.selectedTransferType
-                    ]}
+                    style={styles.transferTypeButton}
                     onPress={() => {
                       setTransferType('liability_to_personal');
                       setConversionStep('account');
-                      loadLiabilityAccounts();
                     }}
                   >
-                    <Ionicons name="arrow-forward-circle" size={24} color={transferType === 'liability_to_personal' ? 'white' : 'rgba(255,255,255,0.7)'} />
+                    <Ionicons name="arrow-forward-circle" size={24} color="rgba(0, 0, 0, 0.6)" />
                     <View style={{ flex: 1, marginLeft: 12 }}>
-                      <Text style={[styles.transferTypeText, transferType === 'liability_to_personal' && styles.selectedTransferTypeText]}>
+                      <Text style={styles.transferTypeText}>
                         Liability → Personal Funds
                       </Text>
-                      <Text style={[styles.transferTypeSubtext, transferType === 'liability_to_personal' && styles.selectedTransferTypeSubtext]}>
+                      <Text style={styles.transferTypeSubtext}>
                         Convert borrowed money to personal (doesn't reduce loan debt)
                       </Text>
                     </View>
                   </TouchableOpacity>
                 </View>
-              </View>
+              </GlassCard>
             )}
 
             {/* Conversion Flow UI */}
@@ -424,8 +493,8 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
               <>
                 {/* Step 1: Select Account */}
                 {conversionStep === 'account' && (
-                  <View style={styles.inputCard}>
-                    <Text style={styles.inputLabel}>Which account has liability funds?</Text>
+                  <GlassCard padding={20} marginVertical={12}>
+                    <Text style={styles.sectionTitle}>Which account has liability funds?</Text>
                     <View style={styles.accountList}>
                       {accounts.map((acc) => (
                         <TouchableOpacity
@@ -434,10 +503,8 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
                             styles.accountButton,
                             selectedConversionAccount === acc.id && styles.selectedAccount
                           ]}
-                          onPress={async () => {
+                          onPress={() => {
                             setSelectedConversionAccount(acc.id);
-                            const breakdown = await getAccountBreakdown(acc.id);
-                            setAccountBreakdown(breakdown);
                           }}
                         >
                           <View style={styles.accountInfo}>
@@ -449,75 +516,88 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
                             </Text>
                           </View>
                           {selectedConversionAccount === acc.id && (
-                            <Ionicons name="checkmark-circle" size={20} color="#10B981" />
+                            <Ionicons name="checkmark-circle" size={24} color="#000000" />
                           )}
                         </TouchableOpacity>
                       ))}
                     </View>
-                  </View>
+                  </GlassCard>
                 )}
 
                 {/* Step 2: Conversion Details */}
-                {conversionStep === 'details' && selectedConversionAccount && selectedConversionFundBucket && selectedConversionFundBucket.type === 'liability' && (
-                  <View style={styles.inputCard}>
-                    <Text style={styles.inputLabel}>How much to convert?</Text>
-                    <View style={styles.amountInput}>
-                      <Text style={styles.currencySymbol}>{currency === 'USD' ? '$' : '₹'}</Text>
-                      <TextInput
-                        style={[styles.amountTextInput, errors.conversionAmount && styles.errorInput]}
-                        value={conversionAmount}
-                        onChangeText={setConversionAmount}
-                        placeholder="0.00"
-                        placeholderTextColor="#6B7280"
-                        keyboardType="numeric"
-                      />
-                    </View>
-                    {errors.conversionAmount && <Text style={styles.errorText}>{errors.conversionAmount}</Text>}
-                    
-                    {selectedConversionFundBucket && (
-                      <View style={styles.selectedFundInfo}>
-                        <Ionicons name="card" size={16} color="#10B981" />
-                        <Text style={styles.selectedFundText}>
-                          Converting from: {selectedConversionFundBucket.name}
-                        </Text>
-                        <TouchableOpacity onPress={() => setShowConversionFundPicker(true)}>
-                          <Text style={styles.changeFundText}>Change</Text>
-                        </TouchableOpacity>
+                {conversionStep === 'details' && selectedConversionAccount && selectedConversionFundBucket && selectedConversionFundBucket.type === 'borrowed' && (
+                  <View style={styles.section}>
+                    <GlassCard padding={20} marginVertical={12}>
+                      <Text style={styles.sectionTitle}>How much to convert?</Text>
+                      <View style={styles.amountInputContainer}>
+                        <Text style={styles.currencySymbol}>{currency === 'USD' ? '$' : '₹'}</Text>
+                        <TextInput
+                          style={[styles.amountInput, errors.conversionAmount && styles.errorInput]}
+                          value={conversionAmount}
+                          onChangeText={setConversionAmount}
+                          placeholder="0.00"
+                          placeholderTextColor="rgba(0, 0, 0, 0.4)"
+                          keyboardType="decimal-pad"
+                        />
                       </View>
-                    )}
+                      {errors.conversionAmount && <Text style={styles.errorText}>{errors.conversionAmount}</Text>}
+                      
+                      {selectedConversionFundBucket && (
+                        <TouchableOpacity
+                          style={styles.fundBucketButton}
+                          onPress={() => setShowConversionFundPicker(true)}
+                        >
+                          <View style={styles.fundBucketInfo}>
+                            <View style={[styles.fundBucketIcon, { backgroundColor: (selectedConversionFundBucket.color || '#6366F1') + '20' }]}>
+                              <Ionicons name="card-outline" size={20} color={selectedConversionFundBucket.color || '#6366F1'} />
+                            </View>
+                            <View style={styles.fundBucketDetails}>
+                              <Text style={styles.fundBucketName}>{selectedConversionFundBucket.name}</Text>
+                              <Text style={styles.fundBucketAmount}>
+                                Available: {formatCurrencyAmount(selectedConversionFundBucket.amount, currency)}
+                              </Text>
+                            </View>
+                          </View>
+                          <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
+                        </TouchableOpacity>
+                      )}
+                    </GlassCard>
 
-                    <View style={{ marginTop: 16 }}>
-                      <Text style={styles.inputLabel}>Notes (Optional)</Text>
+                    <GlassCard padding={20} marginVertical={12}>
+                      <Text style={styles.sectionTitle}>Notes (Optional)</Text>
                       <TextInput
                         style={styles.textInput}
                         value={conversionNotes}
                         onChangeText={setConversionNotes}
                         placeholder="e.g., Earned enough to cover this"
-                        placeholderTextColor="#6B7280"
+                        placeholderTextColor="rgba(0, 0, 0, 0.4)"
                         multiline
+                        numberOfLines={3}
                       />
-                    </View>
+                    </GlassCard>
 
                     {/* Preview Note */}
                     {conversionAmount && (
-                      <View style={styles.warningBox}>
-                        <Ionicons name="information-circle" size={20} color="#F59E0B" />
-                        <Text style={styles.warningText}>
-                          Your account balance won't change. Your loan debt stays the same. This only changes how you track what's "yours" vs "borrowed".
-                        </Text>
-                      </View>
+                      <GlassCard padding={16} marginVertical={12}>
+                        <View style={styles.infoBox}>
+                          <Ionicons name="information-circle-outline" size={20} color="#F59E0B" />
+                          <Text style={styles.infoText}>
+                            Your account balance won't change. Your loan debt stays the same. This only changes how you track what's "yours" vs "borrowed".
+                          </Text>
+                        </View>
+                      </GlassCard>
                     )}
                   </View>
                 )}
 
                 {/* Step 4: Confirmation */}
                 {conversionStep === 'confirm' && (
-                  <View style={styles.inputCard}>
-                    <Text style={styles.inputLabel}>Confirm Conversion</Text>
+                  <GlassCard padding={24} marginVertical={12}>
+                    <Text style={styles.sectionTitle}>Confirm Conversion</Text>
                     <Text style={styles.confirmationText}>
                       Convert {formatCurrencyAmount(parseFloat(conversionAmount) || 0, currency)} from liability funds to personal funds?
                     </Text>
-                  </View>
+                  </GlassCard>
                 )}
               </>
             )}
@@ -526,39 +606,40 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
             {transferType === 'between_accounts' && (
               <>
                 {/* Amount Input */}
-                <View style={styles.inputCard}>
-                <Text style={styles.inputLabel}>Amount</Text>
-                <View style={styles.amountInput}>
-                  <Text style={styles.currencySymbol}>$</Text>
-                  <TextInput
-                    style={[styles.amountTextInput, errors.amount && styles.errorInput]}
-                    value={amount}
-                    onChangeText={setAmount}
-                    placeholder="0.00"
-                    placeholderTextColor="#6B7280"
-                    keyboardType="numeric"
-                  />
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Amount</Text>
+                  <View style={styles.amountInputContainer}>
+                    <Text style={styles.currencySymbol}>{currency === 'USD' ? '$' : '₹'}</Text>
+                    <TextInput
+                      style={[styles.amountInput, errors.amount && styles.errorInput]}
+                      value={amount}
+                      onChangeText={setAmount}
+                      placeholder="0.00"
+                      placeholderTextColor="rgba(0, 0, 0, 0.4)"
+                      keyboardType="decimal-pad"
+                    />
+                  </View>
+                  {errors.amount && <Text style={styles.errorText}>{errors.amount}</Text>}
                 </View>
-                {errors.amount && <Text style={styles.errorText}>{errors.amount}</Text>}
-              </View>
 
               {/* Description Input */}
-              <View style={styles.inputCard}>
-                <Text style={styles.inputLabel}>Description</Text>
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Description</Text>
                 <TextInput
                   style={[styles.textInput, errors.description && styles.errorInput]}
                   value={description}
                   onChangeText={setDescription}
                   placeholder="What is this transfer for?"
-                  placeholderTextColor="#6B7280"
+                  placeholderTextColor="rgba(0, 0, 0, 0.4)"
                   multiline
+                  numberOfLines={3}
                 />
                 {errors.description && <Text style={styles.errorText}>{errors.description}</Text>}
               </View>
 
               {/* From Account Selection */}
-              <View style={styles.inputCard}>
-                <Text style={styles.inputLabel}>From Account</Text>
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>From Account</Text>
                 <View style={styles.accountList}>
                   {accounts.map((acc) => (
                     <TouchableOpacity
@@ -591,7 +672,7 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
                         </Text>
                       </View>
                       {fromAccount === acc.id && (
-                        <Ionicons name="checkmark-circle" size={20} color="#10B981" />
+                        <Ionicons name="checkmark-circle" size={24} color="#000000" />
                       )}
                     </TouchableOpacity>
                   ))}
@@ -601,8 +682,8 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
 
               {/* Selected Fund Source */}
               {fromAccount && (
-                <View style={styles.inputCard}>
-                  <Text style={styles.inputLabel}>Fund Source</Text>
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Fund Source</Text>
                   {fromFundBucket ? (
                     <TouchableOpacity
                       style={styles.fundBucketButton}
@@ -613,10 +694,10 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
                           <Ionicons
                             name={
                               fromFundBucket.type === 'personal'
-                                ? 'person'
-                                : fromFundBucket.type === 'liability'
-                                ? 'card'
-                                : 'flag'
+                                ? 'wallet-outline'
+                                : fromFundBucket.type === 'borrowed'
+                                ? 'card-outline'
+                                : 'flag-outline'
                             }
                             size={20}
                             color={fromFundBucket.color || '#6366F1'}
@@ -629,14 +710,14 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
                           </Text>
                         </View>
                       </View>
-                      <Ionicons name="chevron-forward" size={20} color="rgba(255,255,255,0.7)" />
+                      <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
                     </TouchableOpacity>
                   ) : (
                     <TouchableOpacity
                       style={styles.selectFundButton}
                       onPress={() => setShowFromFundPicker(true)}
                     >
-                      <Ionicons name="wallet-outline" size={20} color="#10B981" />
+                      <Ionicons name="wallet-outline" size={20} color="#000000" />
                       <Text style={styles.selectFundText}>Select Fund Source</Text>
                     </TouchableOpacity>
                   )}
@@ -645,69 +726,31 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
               )}
 
               {/* To Account Selection */}
-              <View style={styles.inputCard}>
-                <Text style={styles.inputLabel}>To Account</Text>
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>To Account</Text>
                 {fromAccount ? (
                   <View style={styles.accountList}>
-                    {/* Show accounts with liability portions first */}
-                    {accountsWithLiabilities
-                      .filter(acc => acc.id !== fromAccount)
-                      .map((acc) => {
-                        const breakdown = accountBreakdowns[acc.id];
-                        return (
-                      <TouchableOpacity
-                        key={acc.id}
-                        style={[
-                          styles.accountButton,
-                          toAccount === acc.id && styles.selectedAccount
-                        ]}
-                        onPress={() => setToAccount(acc.id)}
-                      >
-                        <View style={styles.accountInfo}>
-                          <Text style={[
-                            styles.accountName,
-                            toAccount === acc.id && styles.selectedAccountText
-                          ]}>
-                            {acc.name}
-                          </Text>
-                              {breakdown ? (
-                                <View>
-                                  <Text style={[
-                                    styles.accountBalance,
-                                    toAccount === acc.id && styles.selectedAccountText
-                                  ]}>
-                                    Total: {formatCurrencyAmount(breakdown.total, currency)}
-                                  </Text>
-                                  <Text style={styles.accountBreakdown}>
-                                    💵 Personal: {formatCurrencyAmount(breakdown.personal, currency)} • 🏦 Liability: {formatCurrencyAmount(breakdown.totalLiability, currency)}
-                                  </Text>
-                                </View>
-                              ) : (
-                                <Text style={[
-                                  styles.accountBalance,
-                                  toAccount === acc.id && styles.selectedAccountText
-                                ]}>
-                                  {formatCurrencyAmount(acc.balance, currency)}
-                                </Text>
-                              )}
-                            </View>
-                            {toAccount === acc.id && (
-                              <Ionicons name="checkmark-circle" size={20} color="#10B981" />
-                            )}
-                          </TouchableOpacity>
-                        );
-                      })}
-                    {/* Show regular accounts without liability portions */}
-                    {availableToAccounts
-                      .filter(acc => !accountsWithLiabilities.find(aw => aw.id === acc.id))
-                      .map((acc) => (
+                    {availableToAccounts.map((acc) => {
+                      const breakdown = accountBreakdowns[acc.id];
+                      return (
                         <TouchableOpacity
                           key={acc.id}
                           style={[
                             styles.accountButton,
                             toAccount === acc.id && styles.selectedAccount
                           ]}
-                          onPress={() => setToAccount(acc.id)}
+                          onPress={async () => {
+                            setToAccount(acc.id);
+                            // Load breakdown if not already loaded
+                            if (!accountBreakdowns[acc.id]) {
+                              try {
+                                const breakdown = await getAccountBreakdown(acc.id);
+                                setAccountBreakdowns(prev => ({ ...prev, [acc.id]: breakdown }));
+                              } catch (error) {
+                                console.error('Error loading account breakdown:', error);
+                              }
+                            }
+                          }}
                         >
                           <View style={styles.accountInfo}>
                             <Text style={[
@@ -716,48 +759,60 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
                             ]}>
                               {acc.name}
                             </Text>
-                          <Text style={[
-                            styles.accountBalance,
-                            toAccount === acc.id && styles.selectedAccountText
-                          ]}>
-                            {formatCurrencyAmount(acc.balance, currency)}
-                          </Text>
-                        </View>
-                        {toAccount === acc.id && (
-                          <Ionicons name="checkmark-circle" size={20} color="#10B981" />
-                        )}
-                      </TouchableOpacity>
-                    ))}
+                            {breakdown && breakdown.totalLiability > 0 ? (
+                              <View>
+                                <Text style={[
+                                  styles.accountBalance,
+                                  toAccount === acc.id && styles.selectedAccountText
+                                ]}>
+                                  Total: {formatCurrencyAmount(breakdown.total, currency)}
+                                </Text>
+                                <Text style={styles.accountBreakdown}>
+                                  Personal: {formatCurrencyAmount(breakdown.personal, currency)} • Liability: {formatCurrencyAmount(breakdown.totalLiability, currency)}
+                                </Text>
+                              </View>
+                            ) : (
+                              <Text style={[
+                                styles.accountBalance,
+                                toAccount === acc.id && styles.selectedAccountText
+                              ]}>
+                                {formatCurrencyAmount(acc.balance, currency)}
+                              </Text>
+                            )}
+                          </View>
+                          {toAccount === acc.id && (
+                            <Ionicons name="checkmark-circle" size={24} color="#000000" />
+                          )}
+                        </TouchableOpacity>
+                      );
+                    })}
                   </View>
                 ) : (
-                  <View style={styles.placeholderContainer}>
+                  <GlassCard padding={20} marginVertical={12}>
                     <Text style={styles.placeholderText}>
                       Select a "From Account" first
                     </Text>
-                  </View>
+                  </GlassCard>
                 )}
                 {errors.toAccount && <Text style={styles.errorText}>{errors.toAccount}</Text>}
               </View>
 
               {/* Date Input */}
-              <View style={styles.inputCard}>
-                <Text style={styles.inputLabel}>Date</Text>
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Date</Text>
                 <TouchableOpacity 
                   style={styles.dateButton}
                   onPress={() => setShowDatePicker(true)}
                 >
-                  <View style={styles.dateButtonContent}>
-                    <Ionicons name="calendar" size={20} color="#10B981" />
-                    <Text style={styles.dateText}>
-                      {date.toLocaleDateString('en-US', {
-                        weekday: 'short',
-                        year: 'numeric',
-                        month: 'short',
-                        day: 'numeric'
-                      })}
-                    </Text>
-                    <Ionicons name="chevron-down" size={16} color="#9CA3AF" />
-                  </View>
+                  <Ionicons name="calendar-outline" size={20} color="#000000" />
+                  <Text style={styles.dateText}>
+                    {date.toLocaleDateString('en-US', {
+                      year: 'numeric',
+                      month: 'short',
+                      day: 'numeric'
+                    })}
+                  </Text>
+                  <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
                 </TouchableOpacity>
                 
                 {showDatePicker && (
@@ -776,33 +831,100 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
                 )}
               </View>
 
-              {/* Balance Impact */}
-              {fromAccount && toAccount && (
-                <View style={styles.balanceCard}>
-                  <Text style={styles.balanceTitle}>Balance Impact</Text>
+              {/* Balance Impact Preview */}
+              {fromAccount && toAccount && amount && parseFloat(amount) > 0 && (
+                <GlassCard padding={20} marginVertical={12}>
+                  <Text style={styles.sectionTitle}>Balance Impact Preview</Text>
                   
                   <View style={styles.balanceRow}>
                     <View style={styles.balanceBox}>
                       <Text style={styles.balanceLabel}>From Account</Text>
-                      <Text style={styles.accountName}>{fromAccountData?.name}</Text>
-                      <Text style={styles.balanceBefore}>${fromBeforeBalance.toLocaleString()}</Text>
-                      <Text style={styles.balanceAfter}>${fromAfterBalance.toLocaleString()}</Text>
+                      <Text style={styles.balanceAccountName}>
+                        {accounts.find(acc => acc.id === fromAccount)?.name || 'Account'}
+                      </Text>
+                      <View style={styles.balanceChange}>
+                        <Text style={styles.balanceBeforeLabel}>Current:</Text>
+                        <Text style={styles.balanceBefore}>
+                          {formatCurrencyAmount(accounts.find(acc => acc.id === fromAccount)?.balance || 0, currency)}
+                        </Text>
+                      </View>
+                      <View style={styles.balanceChange}>
+                        <Text style={styles.balanceAfterLabel}>After Transfer:</Text>
+                        <Text style={styles.balanceAfter}>
+                          {formatCurrencyAmount((accounts.find(acc => acc.id === fromAccount)?.balance || 0) - parseFloat(amount || '0'), currency)}
+                        </Text>
+                      </View>
                     </View>
                     
                     <View style={styles.balanceBox}>
                       <Text style={styles.balanceLabel}>To Account</Text>
-                      <Text style={styles.accountName}>{toAccountData?.name}</Text>
-                      <Text style={styles.balanceBefore}>${toBeforeBalance.toLocaleString()}</Text>
-                      <Text style={styles.balanceAfter}>${toAfterBalance.toLocaleString()}</Text>
+                      <Text style={styles.balanceAccountName}>
+                        {accounts.find(acc => acc.id === toAccount)?.name || 'Account'}
+                      </Text>
+                      <View style={styles.balanceChange}>
+                        <Text style={styles.balanceBeforeLabel}>Current:</Text>
+                        <Text style={styles.balanceBefore}>
+                          {formatCurrencyAmount(accounts.find(acc => acc.id === toAccount)?.balance || 0, currency)}
+                        </Text>
+                      </View>
+                      <View style={styles.balanceChange}>
+                        <Text style={styles.balanceAfterLabel}>After Transfer:</Text>
+                        <Text style={styles.balanceAfter}>
+                          {formatCurrencyAmount((accounts.find(acc => acc.id === toAccount)?.balance || 0) + parseFloat(amount || '0'), currency)}
+                        </Text>
+                      </View>
                     </View>
                   </View>
-                </View>
+                </GlassCard>
               )}
+
+              {/* Submit Button */}
+              <TouchableOpacity
+                style={[styles.submitButton, (isLoading || !fromAccount || !toAccount || !fromFundBucket || !amount) && styles.submitButtonDisabled]}
+                onPress={handleSubmit}
+                disabled={isLoading || !fromAccount || !toAccount || !fromFundBucket || !amount}
+              >
+                {isLoading ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.submitButtonText}>Transfer Money</Text>
+                )}
+              </TouchableOpacity>
               </>
             )}
+
+            {/* Conversion Submit Button */}
+            {transferType === 'liability_to_personal' && conversionStep === 'confirm' && (
+              <TouchableOpacity
+                style={[styles.submitButton, (isLoading || !selectedConversionAccount || !selectedConversionFundBucket || !conversionAmount) && styles.submitButtonDisabled]}
+                onPress={handleSubmit}
+                disabled={isLoading || !selectedConversionAccount || !selectedConversionFundBucket || !conversionAmount}
+              >
+                {isLoading ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.submitButtonText}>Convert Funds</Text>
+                )}
+              </TouchableOpacity>
+            )}
+
+            {/* Conversion Continue Button */}
+            {transferType === 'liability_to_personal' && conversionStep !== 'confirm' && (
+              <TouchableOpacity
+                style={[styles.submitButton, (isLoading || (conversionStep === 'account' && !selectedConversionAccount) || (conversionStep === 'details' && (!conversionAmount || !selectedConversionFundBucket))) && styles.submitButtonDisabled]}
+                onPress={handleConversionContinue}
+                disabled={isLoading || (conversionStep === 'account' && !selectedConversionAccount) || (conversionStep === 'details' && (!conversionAmount || !selectedConversionFundBucket))}
+              >
+                {isLoading ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.submitButtonText}>Continue</Text>
+                )}
+              </TouchableOpacity>
+            )}
           </ScrollView>
-        </SafeAreaView>
-      </LinearGradient>
+        </View>
+      </SafeAreaView>
 
       {/* Fund Picker Modal for Between Accounts */}
       {transferType === 'between_accounts' && fromAccount && (
@@ -825,8 +947,8 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
           onClose={() => setShowConversionFundPicker(false)}
           accountId={selectedConversionAccount}
           onSelect={(bucket) => {
-            // Only allow liability buckets for conversion
-            if (bucket.type === 'liability') {
+            // Only allow borrowed (liability) buckets for conversion
+            if (bucket.type === 'borrowed') {
               setSelectedConversionFundBucket(bucket);
               setShowConversionFundPicker(false);
             } else {
@@ -841,294 +963,256 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
-  scrollView: {
+  container: {
     flex: 1,
-    paddingHorizontal: 20,
+    backgroundColor: '#FFFFFF',
   },
   header: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingTop: 20,
-    paddingBottom: 30,
-  },
-  closeButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 12,
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
   },
   headerTitle: {
     fontSize: 20,
-    color: 'white',
-    fontWeight: 'bold',
+    fontFamily: 'HelveticaNeue-Bold',
+    fontWeight: '700',
+    color: '#000000',
   },
-  saveButton: {
-    backgroundColor: '#10B981',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+  closeButton: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  saveText: {
-    color: 'white',
+  scrollView: {
+    flex: 1,
+  },
+  scrollContent: {
+    paddingHorizontal: 20,
+    paddingBottom: 24,
+  },
+  section: {
+    marginTop: 24,
+  },
+  sectionTitle: {
     fontSize: 16,
-    fontWeight: 'bold',
-  },
-  disabledButton: {
-    backgroundColor: '#6B7280',
-    opacity: 0.6,
-  },
-  inputCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 16,
-  },
-  inputLabel: {
-    fontSize: 16,
-    color: 'white',
-    fontWeight: 'bold',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
     marginBottom: 12,
   },
-  amountInput: {
+  amountInputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
   },
   currencySymbol: {
-    fontSize: 32,
-    color: 'white',
-    fontWeight: 'bold',
+    fontSize: 24,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
     marginRight: 8,
   },
-  amountTextInput: {
+  amountInput: {
     flex: 1,
-    fontSize: 32,
-    color: 'white',
-    fontWeight: 'bold',
+    paddingVertical: 16,
+    fontSize: 24,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
   },
   textInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
     borderRadius: 12,
     padding: 16,
-    color: 'white',
-    fontSize: 16,
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    minHeight: 80,
+    textAlignVertical: 'top',
   },
   accountList: {
     gap: 8,
   },
   accountButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: 'transparent',
   },
   selectedAccount: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    borderWidth: 1,
-    borderColor: '#10B981',
+    backgroundColor: 'rgba(0, 0, 0, 0.08)',
+    borderColor: '#000000',
   },
   accountInfo: {
     flex: 1,
   },
   accountName: {
-    color: 'white',
     fontSize: 16,
-    fontWeight: 'bold',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
     marginBottom: 4,
   },
   accountBalance: {
-    color: '#9CA3AF',
     fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
   },
   accountBreakdown: {
-    color: 'rgba(255,255,255,0.6)',
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
     marginTop: 2,
   },
   selectedAccountText: {
-    color: '#10B981',
-  },
-  placeholderContainer: {
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
-    padding: 20,
-    alignItems: 'center',
+    color: '#000000',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
   },
   placeholderText: {
-    color: '#6B7280',
     fontSize: 14,
-    fontStyle: 'italic',
-  },
-  balanceCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 30,
-  },
-  balanceTitle: {
-    fontSize: 18,
-    color: 'white',
-    fontWeight: 'bold',
-    marginBottom: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
     textAlign: 'center',
   },
   balanceRow: {
     flexDirection: 'row',
     gap: 12,
+    marginTop: 16,
   },
   balanceBox: {
     flex: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    backgroundColor: 'rgba(0, 0, 0, 0.03)',
     borderRadius: 12,
     padding: 16,
     alignItems: 'center',
   },
   balanceLabel: {
-    color: '#9CA3AF',
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
     marginBottom: 8,
   },
-  balanceBefore: {
-    color: '#6B7280',
+  balanceAccountName: {
     fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 12,
+  },
+  balanceChange: {
+    marginTop: 8,
+  },
+  balanceBeforeLabel: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginBottom: 4,
+  },
+  balanceBefore: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.4)',
     textDecorationLine: 'line-through',
     marginBottom: 4,
   },
+  balanceAfterLabel: {
+    fontSize: 12,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 4,
+    marginTop: 8,
+  },
   balanceAfter: {
-    color: '#10B981',
     fontSize: 16,
-    fontWeight: 'bold',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
   },
   dateButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-  },
-  dateButtonContent: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    gap: 12,
   },
   dateText: {
-    color: 'white',
-    fontSize: 16,
     flex: 1,
-    marginLeft: 12,
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
   },
   errorInput: {
     borderColor: '#EF4444',
-    borderWidth: 1,
+    borderWidth: 2,
   },
   errorText: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
     color: '#EF4444',
-    fontSize: 12,
-    marginTop: 4,
-    marginLeft: 4,
-  },
-  sourceToggle: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 4,
-  },
-  sourceButton: {
-    flex: 1,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  selectedSource: {
-    backgroundColor: '#10B981',
-  },
-  sourceText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '500',
-  },
-  selectedSourceText: {
-    color: 'white',
-    fontWeight: 'bold',
-  },
-  liabilityList: {
-    gap: 8,
-  },
-  liabilityButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  selectedLiability: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    borderWidth: 1,
-    borderColor: '#10B981',
-  },
-  liabilityInfo: {
-    flex: 1,
-  },
-  liabilityName: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginBottom: 4,
-  },
-  liabilityBalance: {
-    color: '#9CA3AF',
-    fontSize: 14,
-  },
-  selectedLiabilityText: {
-    color: '#10B981',
-  },
-  liabilityPortionText: {
-    color: '#F59E0B',
-    fontSize: 12,
-    marginTop: 2,
+    marginTop: 8,
   },
   transferTypeToggle: {
     gap: 12,
+    marginTop: 12,
   },
   transferTypeButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
     flexDirection: 'row',
     alignItems: 'center',
+    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: 'transparent',
   },
   selectedTransferType: {
-    backgroundColor: '#10B981',
+    backgroundColor: 'rgba(0, 0, 0, 0.08)',
+    borderColor: '#000000',
   },
   transferTypeText: {
-    color: 'white',
     fontSize: 16,
-    fontWeight: 'bold',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.6)',
     marginLeft: 12,
     flex: 1,
   },
   selectedTransferTypeText: {
-    color: 'white',
+    color: '#000000',
   },
   transferTypeSubtext: {
-    color: '#9CA3AF',
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
     marginLeft: 12,
+    marginTop: 4,
   },
   selectedTransferTypeSubtext: {
-    color: 'rgba(255, 255, 255, 0.8)',
-  },
-  liabilityPortionText: {
-    color: '#F59E0B',
-    fontSize: 12,
-    marginTop: 2,
+    color: 'rgba(0, 0, 0, 0.6)',
   },
   personalFundsText: {
     color: '#10B981',
@@ -1165,36 +1249,35 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginBottom: 4,
   },
-  warningBox: {
+  infoBox: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    backgroundColor: 'rgba(245, 158, 11, 0.1)',
-    borderWidth: 1,
-    borderColor: 'rgba(245, 158, 11, 0.3)',
-    borderRadius: 12,
-    padding: 12,
-    marginTop: 12,
-    gap: 8,
+    gap: 12,
   },
-  warningText: {
+  infoText: {
     flex: 1,
-    color: 'rgba(255, 255, 255, 0.9)',
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
     lineHeight: 18,
   },
   confirmationText: {
-    color: 'white',
     fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
     marginTop: 8,
     textAlign: 'center',
   },
   fundBucketButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    marginTop: 12,
   },
   fundBucketInfo: {
     flexDirection: 'row',
@@ -1214,29 +1297,50 @@ const styles = StyleSheet.create({
   },
   fundBucketName: {
     fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
-    color: '#fff',
+    color: '#000000',
     marginBottom: 4,
   },
   fundBucketAmount: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
   },
   selectFundButton: {
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-    borderRadius: 12,
-    padding: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#10B981',
+    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
     borderStyle: 'dashed',
+    gap: 8,
   },
   selectFundText: {
-    color: '#10B981',
     fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
-    marginLeft: 8,
+    color: '#000000',
+  },
+  submitButton: {
+    backgroundColor: '#000000',
+    borderRadius: 12,
+    padding: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 24,
+    marginBottom: 40,
+  },
+  submitButtonDisabled: {
+    backgroundColor: 'rgba(0, 0, 0, 0.2)',
+  },
+  submitButtonText: {
+    fontSize: 18,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
 });

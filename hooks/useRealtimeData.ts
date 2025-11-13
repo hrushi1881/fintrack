@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
-import { Goal, Budget, Category, Bill } from '@/types';
+import { Goal, Budget, Category, Bill, AccountFund, Organization, FundType } from '@/types';
 import { fetchCategories } from '@/utils/categories';
 import { fetchBills } from '@/utils/bills';
+ 
  
 
 interface Account {
@@ -50,8 +51,125 @@ export const useRealtimeData = () => {
   const [budgets, setBudgets] = useState<Budget[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [bills, setBills] = useState<Bill[]>([]);
+  const [accountFunds, setAccountFunds] = useState<AccountFund[]>([]);
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
   
   const [loading, setLoading] = useState(true);
+
+  const parseNumeric = useCallback((value: any): number => {
+    if (value === null || value === undefined) return 0;
+    if (typeof value === 'number') return value;
+    if (typeof value === 'string') {
+      const parsed = parseFloat(value);
+      return Number.isNaN(parsed) ? 0 : parsed;
+    }
+    return 0;
+  }, []);
+
+  const normalizeFundType = useCallback((raw: any): FundType => {
+    if (typeof raw === 'string') {
+      const value = raw.toLowerCase();
+      if (value === 'goal') return 'goal';
+      if (value === 'borrowed') return 'borrowed';
+      if (value === 'liability') return 'borrowed';
+      if (value === 'reserved') return 'reserved';
+      if (value === 'sinking') return 'sinking';
+    }
+    return 'personal';
+  }, []);
+
+  const deriveFundName = useCallback(
+    (fundType: FundType, raw: any): string => {
+      if (raw?.name) return raw.name;
+      if (raw?.display_name) return raw.display_name;
+      const metadataName = raw?.metadata?.name;
+      if (metadataName) return metadataName;
+      if (fundType === 'goal') {
+        return raw?.metadata?.goal_name || 'Goal Fund';
+      }
+      if (fundType === 'borrowed') {
+        return raw?.metadata?.liability_name || 'Borrowed Funds';
+      }
+      if (fundType === 'reserved') {
+        return 'Reserved';
+      }
+      if (fundType === 'sinking') {
+        return 'Sinking Fund';
+      }
+      return 'Personal Funds';
+    },
+    []
+  );
+
+  const deriveSpendable = useCallback((fundType: FundType, raw: any): boolean => {
+    if (typeof raw?.spendable === 'boolean') {
+      return raw.spendable;
+    }
+    if (raw?.metadata && typeof raw.metadata.spendable === 'boolean') {
+      return raw.metadata.spendable;
+    }
+    if (fundType === 'goal') return false;
+    if (fundType === 'reserved' || fundType === 'sinking') return false;
+    return true; // personal & borrowed default to spendable
+  }, []);
+
+  // Recalculate account balance from transactions
+  const recalculateAccountBalance = useCallback(async (accountId: string) => {
+    if (!user) return;
+
+    try {
+      const { data, error } = await supabase.rpc('recalculate_account_balance', {
+        p_account_id: accountId,
+        p_user_id: user.id,
+      });
+
+      if (error) {
+        console.error('Error recalculating balance for account:', accountId, error);
+        return null;
+      }
+
+      return data;
+    } catch (error) {
+      console.error('Error recalculating balance:', error);
+      return null;
+    }
+  }, [user]);
+
+  // Recalculate all account balances (without refreshing accounts to avoid circular dependency)
+  const recalculateAllBalances = useCallback(async (shouldRefresh: boolean = false) => {
+    if (!user) return;
+
+    try {
+      const { data, error } = await supabase.rpc('recalculate_all_account_balances', {
+        p_user_id: user.id,
+      });
+
+      if (error) {
+        console.error('Error recalculating all balances:', error);
+        return [];
+      }
+
+      // If any balances were corrected and refresh is requested, refresh accounts
+      if (shouldRefresh && data && data.length > 0) {
+        console.log('✅ Corrected balances for accounts:', data);
+        // Use a direct fetch to avoid circular dependency
+        const { data: accountsData, error: accountsError } = await supabase
+          .from('accounts')
+          .select('*')
+          .eq('user_id', user.id)
+          .eq('is_active', true)
+          .order('name');
+        if (!accountsError && accountsData) {
+          setAccounts(accountsData);
+        }
+      }
+
+      return data || [];
+    } catch (error) {
+      console.error('Error recalculating all balances:', error);
+      return [];
+    }
+  }, [user]);
 
   // Fetch initial data
   const fetchAccounts = useCallback(async () => {
@@ -62,12 +180,20 @@ export const useRealtimeData = () => {
         .from('accounts')
         .select('*')
         .eq('user_id', user.id)
-        .eq('is_active', true)
+        .or('is_active.eq.true,is_active.is.null')
         .order('name');
       if (error) throw error;
-      setAccounts(data || []);
+      
+      // Force a new array reference to ensure React detects the change
+      const accountsData = data ? [...data] : [];
+      console.log('✅ Fetched accounts:', accountsData.length, 'accounts');
+      if (accountsData.length > 0) {
+        console.log('   Account balances:', accountsData.map(a => ({ id: a.id, name: a.name, balance: a.balance })));
+      }
+      setAccounts(accountsData);
     } catch (error) {
       console.error('Error fetching accounts:', error);
+      setAccounts([]);
     }
   }, [user]);
 
@@ -168,6 +294,89 @@ export const useRealtimeData = () => {
     }
   }, [user]);
 
+  const fetchAccountFunds = useCallback(async () => {
+    if (!user) return;
+
+    try {
+      // Fetch account funds with account currency in a single query to avoid circular dependency
+      const { data: fundsData, error: fundsError } = await supabase
+        .from('account_funds')
+        .select(`
+          *,
+          account:accounts!inner(currency)
+        `)
+        .order('created_at', { ascending: true });
+
+      if (fundsError) {
+        console.error('Error fetching account funds:', fundsError);
+        return;
+      }
+
+      const normalized = (fundsData || []).map((fund: any) => {
+        const fundType = normalizeFundType(fund?.fund_type ?? fund?.type);
+        const balance = parseNumeric(fund?.balance);
+        const derivedName = deriveFundName(fundType, fund);
+        const currency =
+          fund?.currency ??
+          fund?.metadata?.currency ??
+          fund?.account?.currency ??
+          null;
+        const referenceId = fund?.reference_id ?? null;
+        const linkedGoalId =
+          fund?.linked_goal_id ??
+          (fundType === 'goal' ? referenceId ?? fund?.metadata?.goal_id ?? null : null);
+        const linkedLiabilityId =
+          fund?.linked_liability_id ??
+          (fundType === 'borrowed'
+            ? referenceId ?? fund?.metadata?.liability_id ?? null
+            : null);
+
+        return {
+          id: fund.id,
+          account_id: fund.account_id,
+          fund_type: fundType,
+          type: fund?.type,
+          name: derivedName,
+          display_name: fund?.display_name ?? derivedName,
+          balance,
+          currency,
+          spendable: deriveSpendable(fundType, fund),
+          reference_id: referenceId,
+          linked_goal_id: linkedGoalId,
+          linked_liability_id: linkedLiabilityId,
+          metadata: fund?.metadata ?? null,
+          created_at: fund?.created_at,
+          updated_at: fund?.updated_at,
+        } as AccountFund;
+      });
+
+      setAccountFunds(normalized);
+    } catch (error) {
+      console.error('Error fetching account funds:', error);
+    }
+  }, [user, normalizeFundType, parseNumeric, deriveFundName, deriveSpendable]);
+
+  const fetchOrganizations = useCallback(async () => {
+    if (!user) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('organizations')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: true });
+
+      if (error) {
+        console.error('Error fetching organizations:', error);
+        return;
+      }
+
+      setOrganizations((data ?? []) as Organization[]);
+    } catch (error) {
+      console.error('Error fetching organizations:', error);
+    }
+  }, [user]);
+
   
 
 
@@ -178,14 +387,22 @@ export const useRealtimeData = () => {
     // Fetch initial data
     const loadData = async () => {
       setLoading(true);
+      
+      // Fetch all data first
       await Promise.all([
+        fetchTransactions(),
         fetchAccounts(), 
-        fetchTransactions(), 
         fetchGoals(), 
         fetchBudgets(),
         fetchCategoriesData(),
-        fetchBillsData()
+        fetchBillsData(),
+        fetchAccountFunds(),
+        fetchOrganizations(),
       ]);
+      
+      // Recalculate balances to fix any drift from old transactions or data issues
+      // The recalculate function now uses balance_after from transactions, so it's safe
+      await recalculateAllBalances(true);
       setLoading(false);
     };
 
@@ -205,6 +422,23 @@ export const useRealtimeData = () => {
         (payload) => {
           console.log('Account change received:', payload);
           fetchAccounts();
+        }
+      )
+      .subscribe();
+
+    const organizationsSubscription = supabase
+      .channel('organizations_changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'organizations',
+          filter: `user_id=eq.${user.id}`,
+        },
+        (payload) => {
+          console.log('Organization change received:', payload);
+          fetchOrganizations();
         }
       )
       .subscribe();
@@ -304,13 +538,23 @@ export const useRealtimeData = () => {
       supabase.removeChannel(budgetsSubscription);
       supabase.removeChannel(categoriesSubscription);
       supabase.removeChannel(billsSubscription);
+      supabase.removeChannel(organizationsSubscription);
       
     };
-  }, [user, fetchAccounts, fetchTransactions, fetchGoals, fetchBudgets, fetchCategoriesData, fetchBillsData]);
+    // Dependencies: Only include user and fetch functions
+    // Note: recalculateAllBalances is not included as it's only used on initial load
+    // The circular dependency with fetchAccountFunds has been fixed (no longer depends on accounts state)
+  }, [user, fetchAccounts, fetchTransactions, fetchGoals, fetchBudgets, fetchCategoriesData, fetchBillsData, fetchAccountFunds, fetchOrganizations]);
 
   // Manual refresh functions - return promises so they can be awaited
   const refreshAccounts = useCallback(async () => {
+    console.log('🔄 Refreshing accounts...');
+    // Always fetch accounts first to get the latest data
+    // The RPC functions update balances correctly, and recalculate_account_balance
+    // now uses balance_after from transactions, so we don't need to recalculate here
+    // Recalculation would only overwrite correct balances
     await fetchAccounts();
+    console.log('✅ Accounts refreshed');
   }, [fetchAccounts]);
 
   const refreshTransactions = useCallback(async () => {
@@ -324,6 +568,14 @@ export const useRealtimeData = () => {
   const refreshBudgets = useCallback(async () => {
     await fetchBudgets();
   }, [fetchBudgets]);
+
+  const refreshAccountFunds = useCallback(async () => {
+    await fetchAccountFunds();
+  }, [fetchAccountFunds]);
+
+  const refreshOrganizations = useCallback(async () => {
+    await fetchOrganizations();
+  }, [fetchOrganizations]);
 
   const refreshCategories = useCallback(async () => {
     await fetchCategoriesData();
@@ -342,15 +594,21 @@ export const useRealtimeData = () => {
       fetchGoals(),
       fetchBudgets(),
       fetchCategoriesData(),
-      fetchBillsData()
+      fetchBillsData(),
+      fetchAccountFunds(),
+      fetchOrganizations(),
     ]);
-  }, [fetchAccounts, fetchTransactions, fetchGoals, fetchBudgets, fetchCategoriesData, fetchBillsData]);
+  }, [fetchAccounts, fetchTransactions, fetchGoals, fetchBudgets, fetchCategoriesData, fetchBillsData, fetchAccountFunds, fetchOrganizations]);
 
   // Global refresh function that ensures all data is up to date
   const globalRefresh = useCallback(async () => {
     if (!user) return;
     
     console.log('🔄 Global refresh triggered');
+    
+    // Refresh all data to get latest state
+    // RPC functions update balances correctly, and recalculate_account_balance
+    // now uses balance_after from transactions, so recalculation will use correct values
     await refreshAll();
   }, [user, refreshAll]);
 
@@ -375,6 +633,61 @@ export const useRealtimeData = () => {
 
   const netWorth = totalAssets - totalLiabilities;
 
+  const fundsByAccount = useMemo(() => {
+    const map = new Map<string, AccountFund[]>();
+    accountFunds.forEach((fund) => {
+      if (!map.has(fund.account_id)) {
+        map.set(fund.account_id, []);
+      }
+      map.get(fund.account_id)!.push(fund);
+    });
+    return map;
+  }, [accountFunds]);
+
+  const getFundsForAccount = useCallback(
+    (accountId: string, options?: { includeLocked?: boolean }) => {
+      const includeLocked = options?.includeLocked ?? true;
+      const funds = fundsByAccount.get(accountId) ?? [];
+      if (includeLocked) {
+        return funds;
+      }
+      return funds.filter((fund) => fund.spendable);
+    },
+    [fundsByAccount]
+  );
+
+  const getFundSummary = useCallback(
+    (accountId: string) => {
+      const funds = fundsByAccount.get(accountId) ?? [];
+      return funds.reduce(
+        (acc, fund) => {
+          const balance = fund.balance ?? 0;
+          acc.total += balance;
+          if (fund.spendable) {
+            acc.spendable += balance;
+          } else {
+            acc.locked += balance;
+          }
+          if (fund.fund_type === 'goal') {
+            acc.goal += balance;
+          }
+          if (fund.fund_type === 'borrowed') {
+            acc.borrowed += balance;
+          }
+          return acc;
+        },
+        {
+          total: 0,
+          spendable: 0,
+          locked: 0,
+          goal: 0,
+          borrowed: 0,
+        }
+      );
+    },
+    [fundsByAccount]
+  );
+
   return {
     accounts,
     transactions,
@@ -382,19 +695,28 @@ export const useRealtimeData = () => {
     budgets,
     categories,
     bills,
+    accountFunds,
+    organizations,
     totalBalance,
     totalAssets,
     totalLiabilities,
     netWorth,
     loading,
+    fundsByAccount,
+    getFundsForAccount,
+    getFundSummary,
     refreshAccounts,
     refreshTransactions,
     refreshGoals,
     refreshBudgets,
     refreshCategories,
     refreshBills,
+    refreshAccountFunds,
+    refreshOrganizations,
     refreshAll,
     globalRefresh,
     getBudgetsByAccount,
+    recalculateAccountBalance,
+    recalculateAllBalances,
   };
 };

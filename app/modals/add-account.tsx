@@ -1,704 +1,509 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
-  View,
-  TouchableOpacity,
   TextInput,
-  ScrollView,
-  SafeAreaView,
-  Alert,
-  Modal,
-  Switch,
+  TouchableOpacity,
+  View,
 } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { router } from 'expo-router';
-import { useAuth } from '@/contexts/AuthContext';
-import { useBackgroundMode } from '@/contexts/BackgroundModeContext';
-import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/contexts/AuthContext';
+import { useRealtimeData } from '@/hooks/useRealtimeData';
+import { useSettings } from '@/contexts/SettingsContext';
 import { formatCurrencyAmount } from '@/utils/currency';
-import GlassmorphCard from '@/components/GlassmorphCard';
-import iOSGradientBackground from '@/components/iOSGradientBackground';
-import { theme, BACKGROUND_MODES } from '@/theme';
+import type { Account } from '@/types';
+
+export type AccountTypeOption = 'debit' | 'credit' | 'savings' | 'wallet';
+
+interface OrganizationChoice {
+  id: string;
+  name: string;
+  currency: string;
+}
 
 interface AddAccountModalProps {
   visible: boolean;
   onClose: () => void;
-  onSuccess?: () => void;
+  onSuccess?: (account: Account, organizationId: string | null) => void;
+  organizationId?: string;
+  organizationName?: string;
+  organizationOptions?: OrganizationChoice[];
+  defaultOrganizationId?: string;
 }
 
-interface AccountFormData {
+interface AccountFormState {
   name: string;
-  type: 'bank' | 'card' | 'wallet' | 'cash';
-  balance: string;
-  description: string;
-  color: string;
-  icon: string;
-  includeInTotals: boolean;
+  type: AccountTypeOption;
+  initialBalance: string;
+  creditLimit: string;
+  description?: string;
 }
 
-const ACCOUNT_TYPES = [
-  { id: 'bank', label: 'Bank', icon: 'business' as const, color: '#3B82F6' },
-  { id: 'card', label: 'Card', icon: 'card' as const, color: '#10B981' },
-  { id: 'wallet', label: 'UPI Wallet', icon: 'wallet' as const, color: '#8B5CF6' },
-  { id: 'cash', label: 'Cash', icon: 'cash' as const, color: '#F59E0B' },
+const ACCOUNT_TYPE_OPTIONS: Array<{ value: AccountTypeOption; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
+  { value: 'debit', label: 'Debit', icon: 'card-outline' },
+  { value: 'credit', label: 'Credit', icon: 'card' },
+  { value: 'savings', label: 'Savings', icon: 'cash-outline' },
+  { value: 'wallet', label: 'Wallet', icon: 'id-card-outline' },
 ];
 
-const ACCOUNT_COLORS = [
-  '#3B82F6', '#10B981', '#8B5CF6', '#F59E0B', '#EF4444', '#06B6D4', '#84CC16', '#F97316'
-];
-
-const ACCOUNT_ICONS = [
-  'business', 'card', 'wallet', 'cash', 'home', 'car', 'airplane', 'gift'
-];
-
-export default function AddAccountModal({ visible, onClose, onSuccess }: AddAccountModalProps) {
+const AddAccountModal: React.FC<AddAccountModalProps> = ({
+  visible,
+  onClose,
+  onSuccess,
+  organizationId,
+  organizationName,
+  organizationOptions = [],
+  defaultOrganizationId,
+}) => {
   const { user } = useAuth();
-  const { backgroundMode } = useBackgroundMode();
+  const { currency: userCurrency } = useSettings();
   const { globalRefresh } = useRealtimeData();
-  const [currentStep, setCurrentStep] = useState(1);
-  const [formData, setFormData] = useState<AccountFormData>({
+
+  const [formState, setFormState] = useState<AccountFormState>({
     name: '',
-    type: 'bank',
-    balance: '',
+    type: 'debit',
+    initialBalance: '',
+    creditLimit: '',
     description: '',
-    color: '#3B82F6',
-    icon: 'business',
-    includeInTotals: true,
   });
-  const [isLoading, setIsLoading] = useState(false);
-  const [errors, setErrors] = useState<Partial<AccountFormData>>({});
+  const [isSaving, setIsSaving] = useState(false);
+  const [selectedOrganizationId, setSelectedOrganizationId] = useState<string | null>(organizationId ?? null);
 
-  const validateForm = () => {
-    const newErrors: Partial<AccountFormData> = {};
+  const availableOrganizations = useMemo(() => {
+    if (!organizationOptions || organizationOptions.length === 0) return [];
+    const seen = new Set<string>();
+    return organizationOptions.filter((org) => {
+      if (seen.has(org.id)) return false;
+      seen.add(org.id);
+      return true;
+    });
+  }, [organizationOptions]);
 
-    if (!formData.name.trim()) {
-      newErrors.name = 'Account name is required';
+  const resolvedSelectionId =
+    selectedOrganizationId ?? organizationId ?? availableOrganizations[0]?.id ?? null;
+
+  const canSubmit = useMemo(() => {
+    if (!formState.name.trim()) return false;
+    if (formState.type === 'credit') {
+      const limit = parseFloat(formState.creditLimit || '0');
+      if (!formState.creditLimit || Number.isNaN(limit) || limit <= 0) return false;
     }
+    if (availableOrganizations.length === 0) return true;
+    return resolvedSelectionId !== undefined;
+  }, [formState, availableOrganizations.length, resolvedSelectionId]);
 
-    if (formData.balance && isNaN(parseFloat(formData.balance))) {
-      newErrors.balance = 'Please enter a valid number';
-    }
-
-    setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
+  const handleChange = <Field extends keyof AccountFormState>(field: Field, value: AccountFormState[Field]) => {
+    setFormState((prev) => ({ ...prev, [field]: value }));
   };
 
-  const handleNext = () => {
-    console.log('handleNext called, currentStep:', currentStep);
-    console.log('formData:', formData);
-    
-    if (currentStep === 2) {
-      if (!formData.name.trim()) {
-        console.log('Name validation failed');
-        setErrors({ name: 'Account name is required' });
-        return;
-      }
-      setErrors({});
-    }
-    
-    if (currentStep < 4) {
-      console.log('Moving to step:', currentStep + 1);
-      setCurrentStep(currentStep + 1);
-    }
+  const handleClose = () => {
+    setFormState({
+      name: '',
+      type: 'debit',
+      initialBalance: '',
+      creditLimit: '',
+      description: '',
+    });
+    setIsSaving(false);
+    setSelectedOrganizationId(organizationId ?? null);
+    onClose();
   };
 
-  const handleBack = () => {
-    if (currentStep > 1) {
-      setCurrentStep(currentStep - 1);
+  useEffect(() => {
+    if (visible) {
+      setSelectedOrganizationId(organizationId ?? null);
     }
-  };
+  }, [organizationId, visible]);
+
+  useEffect(() => {
+    if (!visible) return;
+    if (!selectedOrganizationId && availableOrganizations.length > 0) {
+      setSelectedOrganizationId(availableOrganizations[0]?.id ?? null);
+    }
+  }, [availableOrganizations, organizationId, visible, selectedOrganizationId]);
 
   const handleCreateAccount = async () => {
-    if (!validateForm()) return;
+    if (!user || !canSubmit) return;
 
-    setIsLoading(true);
+    setIsSaving(true);
 
     try {
-      const balance = parseFloat(formData.balance) || 0;
-      
-      // Create account in Supabase
-      const { data: accountData, error: accountError } = await supabase
+      const initialBalanceNumber = parseFloat(formState.initialBalance || '0') || 0;
+      const creditLimitNumber = parseFloat(formState.creditLimit || '0') || null;
+
+      const finalOrgId =
+        resolvedSelectionId === undefined || resolvedSelectionId === null
+          ? null
+          : resolvedSelectionId === defaultOrganizationId
+          ? null
+          : resolvedSelectionId;
+      const currencyToUse =
+        availableOrganizations.find((org) => org.id === resolvedSelectionId)?.currency ||
+        organizationOptions.find((org) => org.id === resolvedSelectionId)?.currency ||
+        userCurrency ||
+        'USD';
+
+      const accountTypeForDb =
+        formState.type === 'credit'
+          ? 'card'
+          : formState.type === 'wallet'
+          ? 'wallet'
+          : 'bank';
+
+      const payload = {
+        user_id: user.id,
+        name: formState.name.trim(),
+        type: accountTypeForDb,
+        balance: initialBalanceNumber,
+        currency: currencyToUse,
+        include_in_totals: true,
+        is_active: true,
+        description: formState.description?.trim() || null,
+      } as any;
+
+      payload.organization_id = finalOrgId ?? null;
+
+      if (accountTypeForDb === 'card') {
+        payload.credit_limit = creditLimitNumber;
+      }
+
+      const { data: accountRows, error: accountError } = await supabase
         .from('accounts')
-        .insert({
-          user_id: user?.id,
-          name: formData.name.trim(),
-          type: formData.type,
-          balance: balance,
-          description: formData.description.trim(),
-          color: formData.color,
-          icon: formData.icon,
-          include_in_totals: formData.includeInTotals,
-          is_active: true,
-        })
+        .insert(payload)
         .select()
         .single();
 
-      if (accountError) {
-        throw accountError;
+      if (accountError || !accountRows) {
+        console.error('Error creating account row', accountError);
+        throw accountError || new Error('Unable to create account');
       }
 
-      // Create initial balance transaction
-      if (balance > 0) {
-        const { error: transactionError } = await supabase
-          .from('transactions')
-          .insert({
-            account_id: accountData.id,
-            user_id: user?.id,
-            amount: balance,
-            type: 'income',
-            category: 'initial_balance',
-            description: 'Initial Balance',
-            date: new Date().toISOString(),
-          });
-
-        if (transactionError) {
-          console.error('Error creating initial transaction:', transactionError);
-        }
-      }
-
-      // Global refresh to update all data
       await globalRefresh();
 
-      Alert.alert('Success', 'Account created successfully!', [
-        { text: 'OK', onPress: () => {
-          onSuccess?.(); // Call success callback for immediate UI update
-          onClose();
-          setCurrentStep(1);
-          setFormData({
-            name: '',
-            type: 'bank',
-            balance: '',
-            description: '',
-            color: '#3B82F6',
-            icon: 'business',
-            includeInTotals: true,
-          });
-          setErrors({});
-        }}
-      ]);
+      onSuccess?.(accountRows as Account, finalOrgId);
 
-    } catch (error) {
-      console.error('Error creating account:', error);
-      Alert.alert('Error', 'Failed to create account. Please try again.');
+      Alert.alert('Account created', `${formState.name.trim()} added successfully.`);
+      handleClose();
+    } catch (error: any) {
+      console.error('Failed to create account', error);
+      const message =
+        (error && typeof error === 'object' && 'message' in error && error.message) ||
+        'Something went wrong while creating the account.';
+      Alert.alert('Could not create account', String(message));
     } finally {
-      setIsLoading(false);
+      setIsSaving(false);
     }
   };
 
-  const formatCurrency = (value: string) => {
-    const number = parseFloat(value);
-    if (isNaN(number)) return value;
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-    }).format(number);
-  };
+  const activeOrganizationName = useMemo(() => {
+    if (organizationName && !selectedOrganizationId) return organizationName;
+    if (!resolvedSelectionId) return undefined;
+    return availableOrganizations.find((org) => org.id === resolvedSelectionId)?.name ?? organizationName;
+  }, [organizationName, resolvedSelectionId, availableOrganizations]);
 
-  const renderStep1 = () => {
-    console.log('Rendering Step 1');
+  const shouldShowOrganizationBanner =
+    Boolean(activeOrganizationName) &&
+    (!defaultOrganizationId || resolvedSelectionId !== defaultOrganizationId);
+
+  const activeCurrency = useMemo(() => {
+    if (resolvedSelectionId) {
+      const orgMatch =
+        availableOrganizations.find((org) => org.id === resolvedSelectionId) ||
+        organizationOptions.find((org) => org.id === resolvedSelectionId);
+      if (orgMatch?.currency) return orgMatch.currency;
+    }
+    return userCurrency ?? 'USD';
+  }, [availableOrganizations, organizationOptions, resolvedSelectionId, userCurrency]);
+
+  const currencySourceLabel = useMemo(() => {
+    if (!activeCurrency) return '';
+    if (!resolvedSelectionId || resolvedSelectionId === defaultOrganizationId) {
+      return `${activeCurrency} · from your profile settings`;
+    }
+    return `${activeCurrency} · set by selected organization`;
+  }, [activeCurrency, resolvedSelectionId, defaultOrganizationId]);
+
     return (
-      <GlassmorphCard style={styles.stepContainer}>
-        <Text style={styles.stepTitle}>Choose Account Type</Text>
-        <Text style={styles.stepDescription}>Select the type of account you want to create</Text>
-      
-      <View style={styles.typeGrid}>
-        {ACCOUNT_TYPES.map((type) => (
-          <TouchableOpacity
-            key={type.id}
-            style={[
-              styles.typeCard,
-              formData.type === type.id && styles.typeCardSelected
-            ]}
-            onPress={() => setFormData({ ...formData, type: type.id as any, icon: type.icon })}
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet">
+      <SafeAreaView style={styles.safeArea}>
+        <KeyboardAvoidingView
+          style={styles.container}
+          behavior={Platform.select({ ios: 'padding', android: undefined })}
+        >
+          <View style={styles.headerRow}>
+            <TouchableOpacity style={styles.iconButton} onPress={handleClose}>
+              <Ionicons name="close" size={20} color="#0E401C" />
+            </TouchableOpacity>
+            <Text style={styles.headerTitle}>Add New Account</Text>
+            <View style={styles.iconPlaceholder} />
+          </View>
+
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.scrollContent}
           >
-            <View style={[styles.typeIcon, { backgroundColor: type.color }]}>
-              <Ionicons name={type.icon} size={24} color="white" />
+            {shouldShowOrganizationBanner ? (
+              <View style={styles.subHeaderContainer}>
+                <Text style={styles.subHeaderText}>Under {activeOrganizationName}</Text>
             </View>
-            <Text style={styles.typeLabel}>{type.label}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-    </GlassmorphCard>
-    );
-  };
+            ) : null}
 
-  const renderStep2 = () => (
-    <GlassmorphCard style={styles.stepContainer}>
-      <Text style={styles.stepTitle}>Account Details</Text>
-      <Text style={styles.stepDescription}>Enter the basic information for your account</Text>
-      
-      <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>Account Name</Text>
-        <TextInput
-          style={[styles.input, errors.name && styles.inputError]}
-          value={formData.name}
-          onChangeText={(text) => setFormData({ ...formData, name: text })}
-          placeholder="e.g., HDFC Bank, Axis Card, Paytm Wallet"
-          placeholderTextColor="rgba(255,255,255,0.7)"
-        />
-        {errors.name && <Text style={styles.errorText}>{errors.name}</Text>}
-      </View>
-
-      <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>Starting Balance</Text>
-        <TextInput
-          style={[styles.input, errors.balance && styles.inputError]}
-          value={formData.balance}
-          onChangeText={(text) => setFormData({ ...formData, balance: text })}
-          placeholder="0.00"
-          placeholderTextColor="rgba(255,255,255,0.7)"
-          keyboardType="numeric"
-        />
-        {errors.balance && <Text style={styles.errorText}>{errors.balance}</Text>}
-      </View>
-
-      <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>Description (Optional)</Text>
+            <View style={styles.fieldBlock}>
+              <Text style={styles.fieldLabel}>Account Name</Text>
         <TextInput
           style={styles.input}
-          value={formData.description}
-          onChangeText={(text) => setFormData({ ...formData, description: text })}
-          placeholder="Add a description for this account"
-          placeholderTextColor="rgba(255,255,255,0.7)"
-          multiline
-          numberOfLines={2}
+                placeholder="e.g., Main Checking"
+                placeholderTextColor="#9AA88B"
+                value={formState.name}
+                onChangeText={(text) => handleChange('name', text)}
         />
       </View>
-    </GlassmorphCard>
-  );
 
-  const renderStep3 = () => (
-    <GlassmorphCard style={styles.stepContainer}>
-      <Text style={styles.stepTitle}>Visual Identity</Text>
-      <Text style={styles.stepDescription}>Choose a color and icon for your account</Text>
-      
-      <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>Color</Text>
-        <View style={styles.colorGrid}>
-          {ACCOUNT_COLORS.map((color) => (
+            <View style={styles.fieldBlock}>
+              <Text style={styles.fieldLabel}>Account Type</Text>
+              <View style={styles.typeRow}>
+                {ACCOUNT_TYPE_OPTIONS.map((option) => {
+                  const isActive = formState.type === option.value;
+                  return (
             <TouchableOpacity
-              key={color}
-              style={[
-                styles.colorOption,
-                { backgroundColor: color },
-                formData.color === color && styles.colorOptionSelected
-              ]}
-              onPress={() => setFormData({ ...formData, color })}
+                      key={option.value}
+                      style={[styles.typeChip, isActive && styles.typeChipActive]}
+                      onPress={() => handleChange('type', option.value)}
             >
-              {formData.color === color && (
-                <Ionicons name="checkmark" size={16} color="white" />
-              )}
+                      <Ionicons
+                        name={option.icon}
+                        size={16}
+                        color={isActive ? '#FFFFFF' : '#0E401C'}
+                      />
+                      <Text style={[styles.typeChipText, isActive && styles.typeChipTextActive]}>
+                        {option.label}
+                      </Text>
             </TouchableOpacity>
-          ))}
+                  );
+                })}
         </View>
       </View>
 
-      <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>Icon</Text>
-        <View style={styles.iconGrid}>
-          {ACCOUNT_ICONS.map((icon) => (
+            {availableOrganizations.length > 0 && (
+              <View style={styles.fieldBlock}>
+                <Text style={styles.fieldLabel}>Organization</Text>
+                <View style={styles.typeRow}>
+                  {availableOrganizations.map((org) => {
+                    const isActive = resolvedSelectionId === org.id;
+                    return (
             <TouchableOpacity
-              key={icon}
-              style={[
-                styles.iconOption,
-                formData.icon === icon && styles.iconOptionSelected
-              ]}
-              onPress={() => setFormData({ ...formData, icon })}
+                        key={org.id}
+                        style={[styles.typeChip, isActive && styles.typeChipActive]}
+                        onPress={() => {
+                          setSelectedOrganizationId(org.id);
+                        }}
             >
-              <Ionicons 
-                name={icon as any} 
-                size={20} 
-                color={formData.icon === icon ? '#FFFFFF' : '#FFFFFF'} 
+                        <Text style={[styles.typeChipText, isActive && styles.typeChipTextActive]}>
+                          {org.name}
+                        </Text>
+            </TouchableOpacity>
+                    );
+                  })}
+        </View>
+      </View>
+            )}
+
+            <View style={styles.fieldBlock}>
+              <Text style={styles.fieldLabel}>
+                Initial Balance {activeCurrency ? `(${activeCurrency})` : ''}
+          </Text>
+              <TextInput
+                style={styles.input}
+                placeholder="0.00"
+                placeholderTextColor="#9AA88B"
+                keyboardType="decimal-pad"
+                value={formState.initialBalance}
+                onChangeText={(text) => handleChange('initialBalance', text)}
               />
-            </TouchableOpacity>
-          ))}
-        </View>
-      </View>
-    </GlassmorphCard>
-  );
-
-  const renderStep4 = () => (
-    <GlassmorphCard style={styles.stepContainer}>
-      <Text style={styles.stepTitle}>Settings</Text>
-      <Text style={styles.stepDescription}>Configure how this account appears in your dashboard</Text>
-      
-      <View style={styles.settingRow}>
-        <View style={styles.settingInfo}>
-          <Text style={styles.settingTitle}>Include in Net Worth</Text>
-          <Text style={styles.settingDescription}>
-            This account balance will be included in your total net worth calculation
-          </Text>
-        </View>
-        <Switch
-          value={formData.includeInTotals}
-          onValueChange={(value) => setFormData({ ...formData, includeInTotals: value })}
-          trackColor={{ false: 'rgba(255,255,255,0.3)', true: '#FF6B35' }}
-          thumbColor={formData.includeInTotals ? '#FFFFFF' : '#FFFFFF'}
-        />
+              <Text style={styles.helperText}>We’ll use this as the opening balance for the account.</Text>
       </View>
 
-      <GlassmorphCard style={styles.summaryCard}>
-        <Text style={styles.summaryTitle}>Account Summary</Text>
-        <View style={styles.summaryRow}>
-          <Text style={styles.summaryLabel}>Name:</Text>
-          <Text style={styles.summaryValue}>{formData.name || 'Not set'}</Text>
+            {formState.type === 'credit' && (
+              <View style={styles.fieldBlock}>
+                <Text style={styles.fieldLabel}>Credit Limit</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="e.g., 5000"
+                  placeholderTextColor="#9AA88B"
+                  keyboardType="decimal-pad"
+                  value={formState.creditLimit}
+                  onChangeText={(text) => handleChange('creditLimit', text)}
+                />
+                <Text style={styles.helperText}>Keep this limit in sync with your bank so utilization stays accurate.</Text>
         </View>
-        <View style={styles.summaryRow}>
-          <Text style={styles.summaryLabel}>Type:</Text>
-          <Text style={styles.summaryValue}>
-            {ACCOUNT_TYPES.find(t => t.id === formData.type)?.label}
-          </Text>
-        </View>
-        <View style={styles.summaryRow}>
-          <Text style={styles.summaryLabel}>Balance:</Text>
-          <Text style={styles.summaryValue}>
-            {formData.balance ? formatCurrency(formData.balance) : formatCurrencyAmount(0, 'INR')}
-          </Text>
-        </View>
-      </GlassmorphCard>
-    </GlassmorphCard>
-  );
+            )}
 
-  const renderBackground = () => {
-    if (backgroundMode === BACKGROUND_MODES.IOS_GRADIENT) {
-      return (
-        <iOSGradientBackground gradientType="default" animated={true} shimmer={true}>
-          {renderContent()}
-        </iOSGradientBackground>
-      );
-    } else {
-      return (
-        <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
-          {renderContent()}
-        </LinearGradient>
-      );
-    }
-  };
-
-  const renderContent = () => (
-    <SafeAreaView style={styles.safeArea}>
-      {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={onClose} style={styles.closeButton}>
-          <Ionicons name="close" size={24} color="#FFFFFF" />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>Add Account</Text>
-        <View style={styles.placeholder} />
-      </View>
-
-      {/* Progress Indicator */}
-      <GlassmorphCard style={styles.progressContainer}>
-        <View style={styles.progressBar}>
-          <View 
-            style={[
-              styles.progressFill, 
-              { width: `${(currentStep / 4) * 100}%` }
-            ]} 
+            <View style={styles.fieldBlock}>
+              <Text style={styles.fieldLabel}>Description (optional)</Text>
+              <TextInput
+                style={[styles.input, styles.multilineInput]}
+                placeholder="Enter a short note about this account"
+                placeholderTextColor="#9AA88B"
+                value={formState.description}
+                onChangeText={(text) => handleChange('description', text)}
+                multiline
           />
         </View>
-        <Text style={styles.progressText}>Step {currentStep} of 4</Text>
-      </GlassmorphCard>
-
-      {/* Content */}
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        {currentStep === 1 && renderStep1()}
-        {currentStep === 2 && renderStep2()}
-        {currentStep === 3 && renderStep3()}
-        {currentStep === 4 && renderStep4()}
       </ScrollView>
 
-      {/* Footer */}
       <View style={styles.footer}>
-        {currentStep > 1 && (
-          <TouchableOpacity style={styles.backButton} onPress={handleBack}>
-            <Text style={styles.backButtonText}>Back</Text>
-          </TouchableOpacity>
-        )}
-        
         <TouchableOpacity
-          style={[
-            styles.nextButton,
-            currentStep === 4 && styles.createButton,
-            isLoading && styles.disabledButton
-          ]}
-          onPress={() => {
-            console.log('Button pressed, currentStep:', currentStep);
-            if (currentStep === 4) {
-              handleCreateAccount();
-            } else {
-              handleNext();
-            }
-          }}
-          disabled={isLoading}
+              style={[styles.saveButton, (!canSubmit || isSaving) && styles.saveButtonDisabled]}
+              onPress={handleCreateAccount}
+              disabled={!canSubmit || isSaving}
         >
-          <Text style={styles.nextButtonText}>
-            {isLoading ? 'Creating...' : currentStep === 4 ? 'Create Account' : 'Next'}
-          </Text>
+              <Text style={styles.saveButtonText}>{isSaving ? 'Saving…' : 'Save Account'}</Text>
         </TouchableOpacity>
       </View>
+        </KeyboardAvoidingView>
     </SafeAreaView>
-  );
-
-  return (
-    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet">
-      {renderBackground()}
     </Modal>
   );
-}
+};
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
   safeArea: {
     flex: 1,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-  },
-  closeButton: {
-    padding: 8,
-  },
-  headerTitle: {
-    ...theme.typography.h2,
-    color: '#FFFFFF',
-  },
-  placeholder: {
-    width: 40,
-  },
-  progressContainer: {
-    paddingHorizontal: 20,
-    marginBottom: 20,
-  },
-  progressBar: {
-    height: 4,
-    backgroundColor: 'rgba(0,0,0,0.1)',
-    borderRadius: 2,
-    marginBottom: 8,
-  },
-  progressFill: {
-    height: '100%',
-    backgroundColor: '#FF6B35',
-    borderRadius: 2,
-  },
-  progressText: {
-    fontSize: 14,
-    color: 'rgba(0,0,0,0.6)',
-    textAlign: 'center',
-  },
-  content: {
-    flex: 1,
-    paddingHorizontal: 20,
-  },
-  stepContainer: {
-    flex: 1,
-  },
-  stepTitle: {
-    ...theme.typography.h2,
-    color: '#FFFFFF',
-    marginBottom: 8,
-  },
-  stepDescription: {
-    ...theme.typography.glassBody,
-    marginBottom: 24,
-  },
-  typeGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'space-between',
-  },
-  typeCard: {
-    width: '48%',
     backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 16,
-    alignItems: 'center',
-    marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
   },
-  typeCardSelected: {
-    borderWidth: 2,
-    borderColor: '#FF6B35',
+  container: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
   },
-  typeIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 8,
-  },
-  typeLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#000000',
-  },
-  inputGroup: {
-    marginBottom: 20,
-  },
-  inputLabel: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#000000',
-    marginBottom: 6,
-  },
-  input: {
-    backgroundColor: '#99D795',
-    borderWidth: 1.5,
-    borderColor: 'rgba(0,0,0,0.4)',
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    fontSize: 16,
-    color: '#000000',
-    fontFamily: 'System',
-  },
-  inputError: {
-    borderColor: '#EF4444',
-  },
-  errorText: {
-    fontSize: 14,
-    color: '#EF4444',
-    marginTop: 4,
-  },
-  colorGrid: {
+  headerRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 12,
   },
-  colorOption: {
+  iconButton: {
     width: 40,
     height: 40,
-    borderRadius: 20,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#D7DECC',
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: 'transparent',
   },
-  colorOptionSelected: {
-    borderColor: '#000000',
+  iconPlaceholder: {
+    width: 40,
   },
-  iconGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-  },
-  iconOption: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: 'transparent',
-  },
-  iconOptionSelected: {
-    backgroundColor: '#FF6B35',
-    borderColor: '#FF6B35',
-  },
-  settingRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(0,0,0,0.1)',
-  },
-  settingInfo: {
-    flex: 1,
-    marginRight: 16,
-  },
-  settingTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#000000',
-    marginBottom: 4,
-  },
-  settingDescription: {
-    fontSize: 14,
-    color: 'rgba(0,0,0,0.7)',
-    lineHeight: 20,
-  },
-  summaryCard: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 16,
-    padding: 20,
-    marginTop: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  summaryTitle: {
+  headerTitle: {
     fontSize: 18,
-    fontWeight: '600',
-    color: '#000000',
-    marginBottom: 16,
+    fontFamily: 'Archivo Black',
+    color: '#0E401C',
   },
-  summaryRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+  scrollContent: {
+    paddingHorizontal: 20,
+    paddingBottom: 32,
+  },
+  fieldBlock: {
+    marginBottom: 20,
+  },
+  subHeaderContainer: {
+    marginBottom: 12,
+    backgroundColor: '#F7F9F2',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+  },
+  subHeaderText: {
+    fontSize: 13,
+    color: '#4F6F3E',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  fieldLabel: {
+    fontSize: 14,
+    color: '#1F3A24',
+    fontFamily: 'Poppins-SemiBold',
     marginBottom: 8,
   },
-  summaryLabel: {
+  input: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#D7DECC',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
     fontSize: 14,
-    color: 'rgba(0,0,0,0.7)',
+    color: '#1F3A24',
+    fontFamily: 'Poppins-Regular',
   },
-  summaryValue: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#000000',
+  multilineInput: {
+    minHeight: 72,
+    textAlignVertical: 'top',
   },
-  footer: {
+  typeRow: {
     flexDirection: 'row',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    gap: 12,
+    flexWrap: 'wrap',
+    gap: 10,
   },
-  backButton: {
-    flex: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    borderRadius: 16,
-    paddingVertical: 16,
+  typeChip: {
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#D7DECC',
+    backgroundColor: '#FFFFFF',
   },
-  backButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#000000',
+  typeChipActive: {
+    backgroundColor: '#4F6F3E',
+    borderColor: '#4F6F3E',
   },
-  nextButton: {
-    flex: 2,
-    backgroundColor: '#FF6B35',
-    borderRadius: 16,
-    paddingVertical: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
+  typeChipText: {
+    fontSize: 13,
+    color: '#0E401C',
+    fontFamily: 'Poppins-Medium',
   },
-  createButton: {
-    backgroundColor: '#00B37E',
-  },
-  disabledButton: {
-    opacity: 0.6,
-  },
-  nextButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
+  typeChipTextActive: {
     color: '#FFFFFF',
   },
+  helperText: {
+    marginTop: 6,
+    fontSize: 12,
+    color: '#6B7D5D',
+    fontFamily: 'Poppins-Regular',
+  },
+  footer: {
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 24,
+    backgroundColor: '#FFFFFF',
+  },
+  saveButton: {
+    backgroundColor: '#4F6F3E',
+    borderRadius: 16,
+    paddingVertical: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  saveButtonDisabled: {
+    opacity: 0.4,
+  },
+  saveButtonText: {
+    fontSize: 16,
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-SemiBold',
+  },
 });
+
+export default AddAccountModal;

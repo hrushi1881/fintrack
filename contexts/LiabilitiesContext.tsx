@@ -153,6 +153,20 @@ export function LiabilitiesProvider({ children }: { children: React.ReactNode })
         metadata.planned_payback = input.plannedPayback;
       }
 
+      // Determine periodical payment - for loans and EMIs
+      let periodicalPayment: number | null = null;
+      if (input.type === 'loan' || input.type === 'emi') {
+        if (input.type === 'emi' && input.emiAmount) {
+          periodicalPayment = input.emiAmount;
+        } else if (input.type === 'loan') {
+          // Check if monthlyPayment is provided in the input (from modal)
+          periodicalPayment = (input as any).monthlyPayment || null;
+          if (periodicalPayment) {
+            metadata.monthly_payment = periodicalPayment;
+          }
+        }
+      }
+
       // Create liability
       const { data: liability, error: liabilityError } = await supabase
         .from('liabilities')
@@ -165,8 +179,10 @@ export function LiabilitiesProvider({ children }: { children: React.ReactNode })
           original_amount: input.totalAmount || input.remainingAmount,
           disbursed_amount: null, // Will be updated after allocations
           interest_rate_apy: input.interestRate || 0,
+          periodical_payment: periodicalPayment,
           start_date: input.startDate || null,
           targeted_payoff_date: input.endDate || null,
+          next_due_date: input.startDate || null, // Set first payment as next due date
           status: 'active',
           metadata: metadata,
           is_active: true,

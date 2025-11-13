@@ -105,3 +105,17 @@ CREATE POLICY transactions_delete_own ON transactions
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+

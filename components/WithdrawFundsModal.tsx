@@ -1,15 +1,22 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, TextInput, Modal, Alert } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import React, { useState, useEffect, useMemo } from 'react';
+import { StyleSheet, Text, View, TouchableOpacity, TextInput, Modal, Alert, ScrollView, SafeAreaView } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { formatCurrencyAmount } from '@/utils/currency';
 import { Goal, Account } from '@/types';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
+import { useSettings } from '@/contexts/SettingsContext';
+import { getGoalAccounts } from '@/utils/goals';
+import InlineAccountSelector from './InlineAccountSelector';
 
 interface WithdrawFundsModalProps {
   visible: boolean;
   onClose: () => void;
-  onWithdraw: (data: { amount: number; destinationAccountId: string; note?: string }) => void;
+  onWithdraw: (data: { 
+    amount: number; 
+    sourceAccountId: string; // Account where goal fund is located
+    destinationAccountId: string; // Account where money goes
+    note?: string;
+  }) => void;
   goal: Goal;
 }
 
@@ -19,77 +26,188 @@ export default function WithdrawFundsModal({
   onWithdraw,
   goal,
 }: WithdrawFundsModalProps) {
-  const { accounts } = useRealtimeData();
-  const [amount, setAmount] = useState(goal.current_amount.toString());
+  const { accounts, refreshAccounts } = useRealtimeData();
+  const { currency } = useSettings();
+  const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
-  const [withdrawType, setWithdrawType] = useState<'full' | 'partial'>('full');
-  const [selectedAccountId, setSelectedAccountId] = useState<string>('');
-  
-  // Filter out the Goals Savings Account from destination options
-  const destinationAccounts = accounts.filter(account => account.type !== 'goals_savings');
+  const [sourceAccountId, setSourceAccountId] = useState<string | null>(null);
+  const [destinationAccountId, setDestinationAccountId] = useState<string | null>(null);
+  const [goalAccounts, setGoalAccounts] = useState<Array<{ account: Account; balance: number }>>([]);
+  const [loadingAccounts, setLoadingAccounts] = useState(false);
+  const [isAmountFocused, setIsAmountFocused] = useState(false);
 
   const formatCurrency = (amount: number) => {
     return formatCurrencyAmount(amount, goal.currency);
   };
 
+  // Refresh accounts when modal opens
+  useEffect(() => {
+    if (visible) {
+      console.log('🔄 Withdraw modal opened, refreshing accounts...');
+      refreshAccounts();
+      console.log('✅ Withdraw modal - current accounts:', accounts.length);
+    }
+  }, [visible, refreshAccounts, accounts.length]);
+
+  // Fetch goal accounts when modal opens
+  useEffect(() => {
+    if (visible && goal) {
+      fetchGoalAccounts();
+      // Reset form when modal opens
+      setAmount('');
+      setNote('');
+      setSourceAccountId(null);
+      setDestinationAccountId(null);
+    }
+  }, [visible, goal]);
+
+  const fetchGoalAccounts = async () => {
+    if (!goal) return;
+    
+    try {
+      setLoadingAccounts(true);
+      const accounts = await getGoalAccounts(goal.id);
+      setGoalAccounts(accounts);
+      
+      // Auto-select first account if only one account holds funds
+      if (accounts.length === 1) {
+        setSourceAccountId(accounts[0].account.id);
+      }
+    } catch (error) {
+      console.error('Error fetching goal accounts', error);
+      Alert.alert('Error', 'Failed to load goal accounts');
+    } finally {
+      setLoadingAccounts(false);
+    }
+  };
+
+  // Filter destination accounts (exclude liability and Goals Savings accounts)
+  // Goals Savings account is only for displaying aggregate statistics
+  // STRICT: Only show accounts that match the goal currency (required for backend validation)
+  const destinationAccounts = useMemo(() => {
+    if (!accounts || accounts.length === 0) {
+      console.log('⚠️ Withdraw modal: No accounts available for destination');
+      return [];
+    }
+    if (!goal || !goal.currency) {
+      console.log('⚠️ Withdraw modal: Goal currency not set');
+      return [];
+    }
+    
+    // Filter accounts: exclude liability and goals_savings, must be active, must match goal currency
+    const filtered = accounts.filter(
+      (account) => 
+        account.type !== 'liability' && 
+        account.type !== 'goals_savings' &&
+        (account.is_active === true || account.is_active === undefined || account.is_active === null) &&
+        account.currency === goal.currency // STRICT: Must match goal currency
+    );
+    
+    console.log('✅ Withdraw modal destinationAccounts:', filtered.length, 'from', accounts.length, 'total (goal currency:', goal.currency, ')');
+    if (filtered.length === 0) {
+      console.warn('⚠️ No accounts found matching goal currency:', goal.currency);
+    }
+    return filtered;
+  }, [accounts, goal]);
+
+  // Get selected accounts
+  const sourceAccount = goalAccounts.find((ga) => ga.account.id === sourceAccountId)?.account;
+  const destinationAccount = destinationAccounts.find((acc) => acc.id === destinationAccountId);
+  
+  // Get available balance for selected source account
+  const availableBalance = sourceAccountId 
+    ? goalAccounts.find((ga) => ga.account.id === sourceAccountId)?.balance || 0
+    : 0;
+
+  // Auto-select first destination account when source account is selected and destination is empty
+  useEffect(() => {
+    if (visible && sourceAccountId && destinationAccounts.length > 0 && !destinationAccountId) {
+      // Exclude source account from destination options
+      const availableDestinations = destinationAccounts.filter((acc) => acc.id !== sourceAccountId);
+      if (availableDestinations.length > 0) {
+        // Prefer savings accounts for destination, otherwise first account
+        const savingsAccount = availableDestinations.find((acc) => acc.type === 'bank' || acc.type === 'wallet');
+        const selectedId = savingsAccount?.id || availableDestinations[0].id;
+        setDestinationAccountId(selectedId);
+        console.log('✅ Auto-selected destination account:', savingsAccount?.name || availableDestinations[0].name);
+      }
+    }
+  }, [visible, sourceAccountId, destinationAccounts, destinationAccountId]);
+
   const handleWithdraw = () => {
     const withdrawAmount = parseFloat(amount);
     
-    if (withdrawAmount <= 0) {
-      Alert.alert('Error', 'Withdrawal amount must be greater than 0');
+    if (!amount || withdrawAmount <= 0) {
+      Alert.alert('Error', 'Please enter a valid withdrawal amount');
       return;
     }
     
-    if (withdrawAmount > goal.current_amount) {
-      Alert.alert('Error', 'Cannot withdraw more than available balance');
+    if (withdrawAmount > availableBalance) {
+      Alert.alert('Error', `Cannot withdraw more than ${formatCurrency(availableBalance)} available in this account`);
       return;
     }
 
-    if (!selectedAccountId) {
+    if (!sourceAccountId) {
+      Alert.alert('Error', 'Please select the account where the goal funds are located');
+      return;
+    }
+
+    if (!destinationAccountId) {
       Alert.alert('Error', 'Please select a destination account');
+      return;
+    }
+
+    if (sourceAccountId === destinationAccountId) {
+      Alert.alert('Error', 'Source and destination accounts must be different');
       return;
     }
 
     onWithdraw({ 
       amount: withdrawAmount, 
-      destinationAccountId: selectedAccountId,
+      sourceAccountId,
+      destinationAccountId,
       note: note.trim() || undefined 
     });
-    onClose();
   };
 
   const handleFullWithdraw = () => {
-    setAmount(goal.current_amount.toString());
-    setWithdrawType('full');
+    if (availableBalance > 0) {
+      setAmount(availableBalance.toString());
+    }
   };
 
-  const handlePartialWithdraw = () => {
-    setWithdrawType('partial');
+  const handleClose = () => {
+    setAmount('');
+    setNote('');
+    setSourceAccountId(null);
+    setDestinationAccountId(null);
+    setIsAmountFocused(false);
+    onClose();
   };
-
-  const remainingAmount = goal.current_amount - parseFloat(amount || '0');
 
   return (
     <Modal
       visible={visible}
       transparent={true}
       animationType="slide"
-      onRequestClose={onClose}
+      onRequestClose={handleClose}
     >
-      <View style={styles.overlay}>
-        <View style={styles.modalContainer}>
-          <LinearGradient
-            colors={['#000000', '#1F2937']}
-            style={styles.modalContent}
-          >
-            {/* Header */}
-            <View style={styles.header}>
-              <Text style={styles.title}>Withdraw Funds</Text>
-              <TouchableOpacity style={styles.closeButton} onPress={onClose}>
-                <Ionicons name="close" size={24} color="white" />
-              </TouchableOpacity>
-            </View>
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.container}>
+          {/* Header */}
+          <View style={styles.header}>
+            <TouchableOpacity style={styles.closeButton} onPress={handleClose}>
+              <Ionicons name="close" size={24} color="#1F3A24" />
+            </TouchableOpacity>
+            <Text style={styles.title}>Withdraw from Goal</Text>
+            <View style={styles.placeholder} />
+          </View>
 
+          <ScrollView 
+            style={styles.scrollView}
+            contentContainerStyle={styles.scrollContent}
+            showsVerticalScrollIndicator={false}
+          >
             {/* Goal Info */}
             <View style={styles.goalInfo}>
               <View style={[styles.goalIcon, { backgroundColor: goal.color }]}>
@@ -98,222 +216,156 @@ export default function WithdrawFundsModal({
               <View style={styles.goalDetails}>
                 <Text style={styles.goalTitle}>{goal.title}</Text>
                 <Text style={styles.goalBalance}>
-                  Available: {formatCurrency(goal.current_amount)}
+                  Total: {formatCurrency(goal.current_amount)}
                 </Text>
               </View>
             </View>
 
-            {/* Withdrawal Type */}
-            <View style={styles.withdrawalTypeContainer}>
-              <Text style={styles.sectionTitle}>Withdrawal Type</Text>
-              
-              <TouchableOpacity
-                style={[
-                  styles.typeButton,
-                  withdrawType === 'full' && styles.activeTypeButton
-                ]}
-                onPress={handleFullWithdraw}
-              >
-                <View style={styles.typeIcon}>
-                  <Ionicons name="cash" size={20} color={withdrawType === 'full' ? '#10B981' : '#6B7280'} />
-                </View>
-                <View style={styles.typeContent}>
-                  <Text style={[
-                    styles.typeTitle,
-                    withdrawType === 'full' && styles.activeTypeTitle
-                  ]}>
-                    Full Withdrawal
-                  </Text>
-                  <Text style={styles.typeDescription}>
-                    Withdraw all {formatCurrency(goal.current_amount)}
-                  </Text>
-                </View>
-                {withdrawType === 'full' && (
-                  <Ionicons name="checkmark-circle" size={20} color="#10B981" />
-                )}
-              </TouchableOpacity>
+            {/* Source Account Selection (Goal Fund) */}
+            <InlineAccountSelector
+              accounts={goalAccounts.map((ga) => ga.account)}
+              selectedAccountId={sourceAccountId}
+              onSelect={(account) => {
+                setSourceAccountId(account.id);
+              }}
+              label="From Account (Goal Fund)"
+              showBalance={true}
+            />
+            {sourceAccountId && availableBalance > 0 && (
+              <View style={styles.balanceInfo}>
+                <Text style={styles.balanceLabel}>Available in this account:</Text>
+                <Text style={styles.balanceAmount}>{formatCurrency(availableBalance)}</Text>
+              </View>
+            )}
 
-              <TouchableOpacity
-                style={[
-                  styles.typeButton,
-                  withdrawType === 'partial' && styles.activeTypeButton
-                ]}
-                onPress={handlePartialWithdraw}
-              >
-                <View style={styles.typeIcon}>
-                  <Ionicons name="calculator" size={20} color={withdrawType === 'partial' ? '#10B981' : '#6B7280'} />
-                </View>
-                <View style={styles.typeContent}>
-                  <Text style={[
-                    styles.typeTitle,
-                    withdrawType === 'partial' && styles.activeTypeTitle
-                  ]}>
-                    Partial Withdrawal
-                  </Text>
-                  <Text style={styles.typeDescription}>
-                    Withdraw a specific amount
-                  </Text>
-                </View>
-                {withdrawType === 'partial' && (
-                  <Ionicons name="checkmark-circle" size={20} color="#10B981" />
-                )}
-              </TouchableOpacity>
-            </View>
+            {/* Destination Account Selection (Personal Funds) */}
+            <InlineAccountSelector
+              accounts={destinationAccounts}
+              selectedAccountId={destinationAccountId}
+              onSelect={(account) => setDestinationAccountId(account.id)}
+              label="To Account"
+              excludeAccountIds={sourceAccountId ? [sourceAccountId] : []}
+              showBalance={true}
+            />
+            {destinationAccountId && (
+              <View style={styles.infoBanner}>
+                <Ionicons name="wallet-outline" size={16} color="#4F6F3E" />
+                <Text style={styles.infoText}>
+                  Money will be added to Personal Funds in this account
+                </Text>
+              </View>
+            )}
 
             {/* Amount Input */}
-            <View style={styles.inputContainer}>
-              <Text style={styles.inputLabel}>Withdrawal Amount</Text>
-              <TextInput
-                style={styles.amountInput}
-                value={amount}
-                onChangeText={setAmount}
-                placeholder="Enter amount"
-                placeholderTextColor="#6B7280"
-                keyboardType="numeric"
-                editable={withdrawType === 'partial'}
-              />
-              {withdrawType === 'partial' && amount && (
-                <Text style={styles.remainingText}>
-                  Remaining: {formatCurrency(remainingAmount)}
-                </Text>
+            <View style={styles.amountSection}>
+              <Text style={styles.amountLabel}>Amount</Text>
+              <View style={styles.amountContainer}>
+                <Text style={styles.currencySymbol}>$</Text>
+                <TextInput
+                  style={[styles.amountInput, !amount && styles.amountInputPlaceholder]}
+                  value={amount}
+                  onChangeText={setAmount}
+                  placeholder="0.00"
+                  placeholderTextColor="#9CA3AF"
+                  keyboardType="decimal-pad"
+                  autoFocus={!amount}
+                  onFocus={() => setIsAmountFocused(true)}
+                  onBlur={() => setIsAmountFocused(false)}
+                />
+              </View>
+              {availableBalance > 0 && (
+                <TouchableOpacity
+                  style={styles.fullWithdrawButton}
+                  onPress={handleFullWithdraw}
+                >
+                  <Text style={styles.fullWithdrawText}>Withdraw All ({formatCurrency(availableBalance)})</Text>
+                </TouchableOpacity>
               )}
             </View>
 
-            {/* Destination Account Selection */}
-            <View style={styles.inputContainer}>
-              <Text style={styles.inputLabel}>Destination Account</Text>
-              <View style={styles.accountList}>
-                {destinationAccounts.map((account) => (
-                  <TouchableOpacity
-                    key={account.id}
-                    style={[
-                      styles.accountItem,
-                      selectedAccountId === account.id && styles.selectedAccountItem
-                    ]}
-                    onPress={() => setSelectedAccountId(account.id)}
-                  >
-                    <View style={[styles.accountIcon, { backgroundColor: account.color }]}>
-                      <Ionicons name={account.icon as any} size={20} color="white" />
-                    </View>
-                    <View style={styles.accountInfo}>
-                      <Text style={styles.accountName}>{account.name}</Text>
-                      <Text style={styles.accountBalance}>
-                        {formatCurrencyAmount(account.balance, account.currency)}
-                      </Text>
-                    </View>
-                    {selectedAccountId === account.id && (
-                      <Ionicons name="checkmark-circle" size={20} color="#10B981" />
-                    )}
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
-
             {/* Note Input */}
-            <View style={styles.inputContainer}>
-              <Text style={styles.inputLabel}>Note (Optional)</Text>
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Note (Optional)</Text>
               <TextInput
                 style={styles.noteInput}
                 value={note}
                 onChangeText={setNote}
-                placeholder="e.g., Bought the laptop"
-                placeholderTextColor="#6B7280"
+                placeholder="Add a note..."
+                placeholderTextColor="#9CA3AF"
                 multiline
                 numberOfLines={3}
               />
             </View>
 
-            {/* Preview */}
-            {amount && (
-              <View style={styles.previewContainer}>
-                <Text style={styles.previewTitle}>Withdrawal Preview</Text>
-                <View style={styles.previewRow}>
-                  <Text style={styles.previewLabel}>Amount:</Text>
-                  <Text style={styles.previewValue}>{formatCurrency(parseFloat(amount) || 0)}</Text>
-                </View>
-                <View style={styles.previewRow}>
-                  <Text style={styles.previewLabel}>Remaining:</Text>
-                  <Text style={styles.previewValue}>{formatCurrency(remainingAmount)}</Text>
-                </View>
-                {note && (
-                  <View style={styles.previewRow}>
-                    <Text style={styles.previewLabel}>Note:</Text>
-                    <Text style={styles.previewValue}>{note}</Text>
-                  </View>
-                )}
-              </View>
-            )}
+            {/* Submit Button */}
+            <TouchableOpacity
+              style={[
+                styles.submitButton,
+                (!amount || parseFloat(amount) <= 0 || !sourceAccountId || !destinationAccountId) && styles.submitButtonDisabled
+              ]}
+              onPress={handleWithdraw}
+              disabled={!amount || parseFloat(amount) <= 0 || !sourceAccountId || !destinationAccountId}
+            >
+              <Text style={styles.submitButtonText}>Withdraw Funds</Text>
+            </TouchableOpacity>
+          </ScrollView>
 
-            {/* Action Buttons */}
-            <View style={styles.buttonContainer}>
-              <TouchableOpacity
-                style={styles.cancelButton}
-                onPress={onClose}
-              >
-                <Text style={styles.cancelButtonText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.withdrawButton,
-                  (!amount || parseFloat(amount) <= 0) && styles.disabledButton
-                ]}
-                onPress={handleWithdraw}
-                disabled={!amount || parseFloat(amount) <= 0}
-              >
-                <Ionicons name="cash" size={20} color="white" />
-                <Text style={styles.withdrawButtonText}>Withdraw</Text>
-              </TouchableOpacity>
-            </View>
-          </LinearGradient>
         </View>
-      </View>
+      </SafeAreaView>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  overlay: {
+  safeArea: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
+    backgroundColor: '#FFFFFF',
   },
-  modalContainer: {
-    width: '100%',
-    maxWidth: 400,
-    borderRadius: 24,
-    overflow: 'hidden',
-  },
-  modalContent: {
-    padding: 24,
+  container: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 24,
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: 'white',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5ECD6',
   },
   closeButton: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  title: {
+    fontSize: 20,
+    fontFamily: 'Archivo Black',
+    color: '#1F3A24',
+    letterSpacing: 0.5,
+  },
+  placeholder: {
+    width: 40,
+  },
+  scrollView: {
+    flex: 1,
+  },
+  scrollContent: {
+    padding: 20,
+    gap: 24,
   },
   goalInfo: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 24,
+    backgroundColor: '#F7F9F2',
+    borderRadius: 16,
     padding: 16,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    gap: 12,
   },
   goalIcon: {
     width: 48,
@@ -321,197 +373,152 @@ const styles = StyleSheet.create({
     borderRadius: 24,
     justifyContent: 'center',
     alignItems: 'center',
-    marginRight: 16,
   },
   goalDetails: {
     flex: 1,
   },
   goalTitle: {
     fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
     marginBottom: 4,
   },
   goalBalance: {
     fontSize: 14,
-    color: '#10B981',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#4F6F3E',
   },
-  withdrawalTypeContainer: {
+  section: {
+    gap: 12,
     marginBottom: 24,
+  },
+  amountSection: {
+    marginBottom: 24,
+    alignItems: 'center',
+    width: '100%',
   },
   sectionTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginBottom: 12,
-  },
-  typeButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 16,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: 'transparent',
-  },
-  activeTypeButton: {
-    borderColor: '#10B981',
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-  },
-  typeIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  typeContent: {
-    flex: 1,
-  },
-  typeTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginBottom: 2,
-  },
-  activeTypeTitle: {
-    color: '#10B981',
-  },
-  typeDescription: {
     fontSize: 14,
-    color: '#9CA3AF',
-  },
-  inputContainer: {
-    marginBottom: 20,
-  },
-  inputLabel: {
-    fontSize: 14,
-    color: '#9CA3AF',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
     marginBottom: 8,
   },
-  amountInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    fontSize: 16,
-    color: 'white',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
-  },
-  remainingText: {
-    fontSize: 12,
-    color: '#10B981',
-    marginTop: 4,
-  },
-  noteInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    fontSize: 16,
-    color: 'white',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
-    textAlignVertical: 'top',
-  },
-  previewContainer: {
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 24,
-  },
-  previewTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#10B981',
+  amountLabel: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#9CA3AF',
     marginBottom: 12,
+    textAlign: 'center',
+    letterSpacing: 0.3,
   },
-  previewRow: {
+  balanceInfo: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 4,
-  },
-  previewLabel: {
-    fontSize: 14,
-    color: '#9CA3AF',
-  },
-  previewValue: {
-    fontSize: 14,
-    color: 'white',
-    fontWeight: '500',
-  },
-  buttonContainer: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  cancelButton: {
-    flex: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    alignItems: 'center',
-  },
-  cancelButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-  },
-  withdrawButton: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#10B981',
-    borderRadius: 12,
-    padding: 16,
-  },
-  disabledButton: {
-    backgroundColor: '#6B7280',
-  },
-  withdrawButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginLeft: 8,
-  },
-  accountList: {
-    gap: 8,
-  },
-  accountItem: {
-    flexDirection: 'row',
     alignItems: 'center',
     padding: 12,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    backgroundColor: '#F7F9F2',
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: 'transparent',
+    borderColor: '#E5ECD6',
+    marginBottom: 16,
   },
-  selectedAccountItem: {
-    borderColor: '#10B981',
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-  },
-  accountIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  accountInfo: {
-    flex: 1,
-  },
-  accountName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginBottom: 2,
-  },
-  accountBalance: {
+  balanceLabel: {
     fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
+  },
+  balanceAmount: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#4F6F3E',
+  },
+  amountContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    paddingHorizontal: 24,
+    paddingVertical: 24,
+    minHeight: 100,
+    width: '100%',
+  },
+  currencySymbol: {
+    fontSize: 32,
+    fontFamily: 'Poppins-Regular',
+    color: '#9CA3AF',
+    marginRight: 8,
+  },
+  amountInput: {
+    flex: 1,
+    fontSize: 40,
+    fontFamily: 'Poppins-Bold',
+    color: '#1F2937',
+    textAlign: 'center',
+    paddingVertical: 0,
+    minWidth: 120,
+  },
+  amountInputPlaceholder: {
     color: '#9CA3AF',
   },
+  fullWithdrawButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    alignSelf: 'flex-start',
+    backgroundColor: '#E5ECD6',
+    borderRadius: 8,
+  },
+  fullWithdrawText: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#4F6F3E',
+  },
+  noteInput: {
+    backgroundColor: '#F7F9F2',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    padding: 16,
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
+    minHeight: 80,
+    textAlignVertical: 'top',
+  },
+  submitButton: {
+    backgroundColor: '#4F6F3E',
+    borderRadius: 16,
+    paddingVertical: 16,
+    alignItems: 'center',
+    marginTop: 8,
+    marginBottom: 32,
+  },
+  submitButtonDisabled: {
+    backgroundColor: '#D7DECC',
+  },
+  submitButtonText: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#FFFFFF',
+  },
+  infoBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#F7F9F2',
+    borderRadius: 12,
+    padding: 12,
+    marginTop: -8,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+  },
+  infoText: {
+    flex: 1,
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
+  },
 });
-
