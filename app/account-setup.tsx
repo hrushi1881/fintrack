@@ -1,14 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, TextInput, SafeAreaView, StatusBar, ScrollView, Alert } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
+import { useSettings } from '@/contexts/SettingsContext';
 import { supabase } from '@/lib/supabase';
 
 interface AccountData {
   name: string;
-  type: 'checking' | 'savings' | 'credit_card' | 'investment' | 'cash' | 'loan';
+  type: 'bank' | 'card' | 'wallet';
   balance: string;
   currency: string;
   color: string;
@@ -17,52 +17,70 @@ interface AccountData {
 
 export default function AccountSetupScreen() {
   const { user } = useAuth();
+  const { currency: userCurrency } = useSettings();
   const [currentStep, setCurrentStep] = useState(0);
   const [accounts, setAccounts] = useState<AccountData[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [checkingExisting, setCheckingExisting] = useState(true);
+
+  // Check if user already has accounts (setup already completed)
+  useEffect(() => {
+    const checkExistingAccounts = async () => {
+      if (!user) {
+        router.replace('/auth/signin');
+        return;
+      }
+
+      try {
+        const { data: existingAccounts, error } = await supabase
+          .from('accounts')
+          .select('id')
+          .eq('user_id', user.id)
+          .limit(1);
+
+        if (error) {
+          console.error('Error checking existing accounts:', error);
+          setCheckingExisting(false);
+          return;
+        }
+
+        if (existingAccounts && existingAccounts.length > 0) {
+          // User already has accounts, redirect to main app
+          router.replace('/(tabs)');
+        } else {
+          // No accounts, show setup screen
+          setCheckingExisting(false);
+        }
+      } catch (error) {
+        console.error('Error during account check:', error);
+        setCheckingExisting(false);
+      }
+    };
+
+    checkExistingAccounts();
+  }, [user]);
 
   const accountTypes = [
     {
-      id: 'checking',
-      name: 'Checking Account',
-      icon: 'card',
+      id: 'bank',
+      name: 'Bank Account',
+      icon: 'card-outline',
       color: '#3B82F6',
-      description: 'Daily spending account',
+      description: 'Checking or savings account',
     },
     {
-      id: 'savings',
-      name: 'Savings Account',
+      id: 'card',
+      name: 'Credit Card',
+      icon: 'card',
+      color: '#EF4444',
+      description: 'Credit card account',
+    },
+    {
+      id: 'wallet',
+      name: 'Wallet',
       icon: 'wallet',
       color: '#10B981',
-      description: 'Money you want to save',
-    },
-    {
-      id: 'credit_card',
-      name: 'Credit Card',
-      icon: 'card-outline',
-      color: '#EF4444',
-      description: 'Credit card balance',
-    },
-    {
-      id: 'investment',
-      name: 'Investment Account',
-      icon: 'trending-up',
-      color: '#8B5CF6',
-      description: 'Stocks, bonds, mutual funds',
-    },
-    {
-      id: 'cash',
-      name: 'Cash',
-      icon: 'cash',
-      color: '#F59E0B',
-      description: 'Physical cash on hand',
-    },
-    {
-      id: 'loan',
-      name: 'Loan',
-      icon: 'document-text',
-      color: '#6B7280',
-      description: 'Personal loan, mortgage, etc.',
+      description: 'Cash or digital wallet',
     },
   ];
 
@@ -70,6 +88,7 @@ export default function AccountSetupScreen() {
     { code: 'USD', name: 'US Dollar', symbol: '$' },
     { code: 'EUR', name: 'Euro', symbol: '€' },
     { code: 'GBP', name: 'British Pound', symbol: '£' },
+    { code: 'INR', name: 'Indian Rupee', symbol: '₹' },
     { code: 'CAD', name: 'Canadian Dollar', symbol: 'C$' },
     { code: 'AUD', name: 'Australian Dollar', symbol: 'A$' },
   ];
@@ -102,11 +121,11 @@ export default function AccountSetupScreen() {
 
   const [newAccount, setNewAccount] = useState<AccountData>({
     name: '',
-    type: 'checking',
+    type: 'bank',
     balance: '',
-    currency: 'USD',
+    currency: userCurrency || 'USD',
     color: '#3B82F6',
-    icon: 'card',
+    icon: 'card-outline',
   });
 
   const handleAddAccount = () => {
@@ -118,11 +137,11 @@ export default function AccountSetupScreen() {
     setAccounts([...accounts, { ...newAccount }]);
     setNewAccount({
       name: '',
-      type: 'checking',
+      type: 'bank',
       balance: '',
-      currency: 'USD',
+      currency: userCurrency || 'USD',
       color: '#3B82F6',
-      icon: 'card',
+      icon: 'card-outline',
     });
   };
 
@@ -153,20 +172,52 @@ export default function AccountSetupScreen() {
     setIsLoading(true);
 
     try {
-      // Save accounts to database
-      const accountPromises = accounts.map(account => 
-        supabase.from('accounts').insert({
-          user_id: user?.id,
-          name: account.name,
-          type: account.type,
-          balance: parseFloat(account.balance),
-          currency: account.currency,
-          color: account.color,
-          icon: account.icon,
-        })
-      );
+      // Create accounts and add initial balances to personal funds
+      for (const account of accounts) {
+        const balanceAmount = parseFloat(account.balance || '0') || 0;
+        
+        // Create account (trigger will create personal fund automatically)
+        const { data: newAccount, error: accountError } = await supabase
+          .from('accounts')
+          .insert({
+            user_id: user?.id,
+            name: account.name,
+            type: account.type,
+            balance: 0, // Start with 0, we'll add to personal fund
+            currency: account.currency,
+            color: account.color,
+            icon: account.icon,
+            is_active: true,
+            include_in_totals: true,
+          })
+          .select()
+          .single();
 
-      await Promise.all(accountPromises);
+        if (accountError || !newAccount) {
+          throw accountError || new Error('Failed to create account');
+        }
+
+        // If there's an initial balance, add it to personal fund using receive_to_account_bucket
+        if (balanceAmount > 0) {
+          const { error: receiveError } = await supabase.rpc('receive_to_account_bucket', {
+            p_user_id: user?.id,
+            p_account_id: newAccount.id,
+            p_bucket_type: 'personal',
+            p_bucket_id: null,
+            p_amount: balanceAmount,
+            p_category: 'Initial Balance',
+            p_description: `Initial balance for ${account.name}`,
+            p_date: new Date().toISOString().split('T')[0],
+            p_notes: 'Account setup initial balance',
+            p_currency: account.currency,
+          });
+
+          if (receiveError) {
+            console.error('Error adding initial balance:', receiveError);
+            // Continue even if balance addition fails - account is created
+          }
+        }
+      }
 
       Alert.alert(
         'Setup Complete!',
@@ -178,8 +229,9 @@ export default function AccountSetupScreen() {
           },
         ]
       );
-    } catch (error) {
-      Alert.alert('Error', 'Failed to save accounts. Please try again.');
+    } catch (error: any) {
+      console.error('Error creating accounts:', error);
+      Alert.alert('Error', error?.message || 'Failed to save accounts. Please try again.');
     } finally {
       setIsLoading(false);
     }
@@ -212,7 +264,7 @@ export default function AccountSetupScreen() {
                   <Ionicons 
                     name={type.icon as any} 
                     size={24} 
-                    color={newAccount.type === type.id ? 'white' : type.color} 
+                    color={newAccount.type === type.id ? '#FFFFFF' : type.color} 
                   />
                   <Text style={[
                     styles.accountTypeName,
@@ -232,20 +284,20 @@ export default function AccountSetupScreen() {
 
             <View style={styles.inputContainer}>
               <Text style={styles.inputLabel}>Account Name</Text>
-              <TextInput
-                style={styles.textInput}
-                placeholder="e.g., Chase Checking, Emergency Fund"
-                placeholderTextColor="#9CA3AF"
-                value={newAccount.name}
-                onChangeText={(value) => setNewAccount(prev => ({ ...prev, name: value }))}
-              />
+                <TextInput
+                  style={styles.textInput}
+                  placeholder="e.g., Chase Checking, Emergency Fund"
+                  placeholderTextColor="#999999"
+                  value={newAccount.name}
+                  onChangeText={(value) => setNewAccount(prev => ({ ...prev, name: value }))}
+                />
             </View>
 
             <TouchableOpacity 
               style={styles.addButton}
               onPress={handleAddAccount}
             >
-              <Ionicons name="add" size={20} color="white" />
+              <Ionicons name="add" size={20} color="#FFFFFF" />
               <Text style={styles.addButtonText}>Add Account</Text>
             </TouchableOpacity>
           </View>
@@ -262,7 +314,7 @@ export default function AccountSetupScreen() {
               <View key={index} style={styles.accountCard}>
                 <View style={styles.accountHeader}>
                   <View style={[styles.accountIcon, { backgroundColor: account.color }]}>
-                    <Ionicons name={account.icon as any} size={20} color="white" />
+                    <Ionicons name={account.icon as any} size={20} color="#FFFFFF" />
                   </View>
                   <View style={styles.accountInfo}>
                     <Text style={styles.accountName}>{account.name}</Text>
@@ -285,7 +337,7 @@ export default function AccountSetupScreen() {
                     <TextInput
                       style={styles.balanceInputField}
                       placeholder="0.00"
-                      placeholderTextColor="#9CA3AF"
+                      placeholderTextColor="#999999"
                       value={account.balance}
                       onChangeText={(value) => {
                         const updatedAccounts = [...accounts];
@@ -301,7 +353,7 @@ export default function AccountSetupScreen() {
 
             {accounts.length === 0 && (
               <View style={styles.emptyState}>
-                <Ionicons name="wallet-outline" size={48} color="#9CA3AF" />
+                <Ionicons name="wallet-outline" size={48} color="#666666" />
                 <Text style={styles.emptyStateText}>No accounts added yet</Text>
                 <Text style={styles.emptyStateSubtext}>Go back to add your first account</Text>
               </View>
@@ -320,7 +372,7 @@ export default function AccountSetupScreen() {
               <View key={index} style={styles.reviewCard}>
                 <View style={styles.reviewHeader}>
                   <View style={[styles.reviewIcon, { backgroundColor: account.color }]}>
-                    <Ionicons name={account.icon as any} size={20} color="white" />
+                    <Ionicons name={account.icon as any} size={20} color="#FFFFFF" />
                   </View>
                   <View style={styles.reviewInfo}>
                     <Text style={styles.reviewName}>{account.name}</Text>
@@ -347,12 +399,24 @@ export default function AccountSetupScreen() {
     }
   };
 
+  // Show loading while checking for existing accounts
+  if (checkingExisting) {
+    return (
+      <View style={styles.container}>
+        <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
+        <SafeAreaView style={styles.safeArea}>
+          <View style={styles.loadingContainer}>
+            <Ionicons name="wallet" size={60} color="#000000" />
+            <Text style={styles.loadingText}>Loading...</Text>
+          </View>
+        </SafeAreaView>
+      </View>
+    );
+  }
+
   return (
-    <LinearGradient
-      colors={['#99D795', '#99D795', '#99D795']}
-      style={styles.container}
-    >
-      <StatusBar barStyle="light-content" backgroundColor="#99D795" />
+    <View style={styles.container}>
+      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
       <SafeAreaView style={styles.safeArea}>
         <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
           {/* Header */}
@@ -396,7 +460,7 @@ export default function AccountSetupScreen() {
               onPress={handleBack}
               disabled={currentStep === 0}
             >
-              <Ionicons name="arrow-back" size={20} color="white" />
+              <Ionicons name="arrow-back" size={20} color="#000000" />
               <Text style={styles.navButtonText}>Back</Text>
             </TouchableOpacity>
 
@@ -408,18 +472,19 @@ export default function AccountSetupScreen() {
               <Text style={styles.navButtonText}>
                 {isLoading ? 'Saving...' : currentStep === steps.length - 1 ? 'Complete' : 'Next'}
               </Text>
-              <Ionicons name="arrow-forward" size={20} color="white" />
+              <Ionicons name="arrow-forward" size={20} color="#000000" />
             </TouchableOpacity>
           </View>
         </ScrollView>
       </SafeAreaView>
-    </LinearGradient>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   safeArea: {
     flex: 1,
@@ -438,7 +503,7 @@ const styles = StyleSheet.create({
   progressBar: {
     width: '100%',
     height: 4,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    backgroundColor: 'rgba(0, 0, 0, 0.1)',
     borderRadius: 2,
     marginBottom: 12,
   },
@@ -449,7 +514,8 @@ const styles = StyleSheet.create({
   },
   progressText: {
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.8)',
+    color: '#000000',
+    fontFamily: 'Instrument Serif',
   },
   content: {
     flex: 1,
@@ -466,29 +532,33 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 24,
+    backgroundColor: 'rgba(16, 185, 129, 0.1)',
   },
   stepTitle: {
     fontSize: 28,
     fontWeight: 'bold',
-    color: 'white',
+    color: '#000000',
     marginBottom: 8,
     textAlign: 'center',
+    fontFamily: 'Helvetica Neue',
   },
   stepSubtitle: {
     fontSize: 16,
-    color: 'rgba(255, 255, 255, 0.8)',
+    color: '#666666',
     textAlign: 'center',
     lineHeight: 22,
+    fontFamily: 'Poppins',
   },
   stepContent: {
     marginBottom: 40,
   },
   stepDescription: {
     fontSize: 16,
-    color: 'rgba(255, 255, 255, 0.9)',
+    color: '#000000',
     marginBottom: 24,
     textAlign: 'center',
     lineHeight: 22,
+    fontFamily: 'Instrument Serif',
   },
   accountTypesGrid: {
     flexDirection: 'row',
@@ -498,36 +568,44 @@ const styles = StyleSheet.create({
   },
   accountTypeCard: {
     width: '48%',
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.7)',
+    borderRadius: 16,
     padding: 16,
     marginBottom: 12,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 3,
   },
   accountTypeCardSelected: {
     backgroundColor: 'rgba(16, 185, 129, 0.1)',
     borderColor: '#10B981',
+    borderWidth: 2,
   },
   accountTypeName: {
     fontSize: 14,
     fontWeight: '600',
-    color: 'rgba(255, 255, 255, 0.8)',
+    color: '#000000',
     marginTop: 8,
     textAlign: 'center',
+    fontFamily: 'Poppins',
   },
   accountTypeNameSelected: {
-    color: 'white',
+    color: '#10B981',
   },
   accountTypeDescription: {
     fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.6)',
+    color: '#666666',
     marginTop: 4,
     textAlign: 'center',
+    fontFamily: 'Instrument Serif',
   },
   accountTypeDescriptionSelected: {
-    color: 'rgba(255, 255, 255, 0.8)',
+    color: '#10B981',
   },
   inputContainer: {
     marginBottom: 20,
@@ -535,18 +613,25 @@ const styles = StyleSheet.create({
   inputLabel: {
     fontSize: 16,
     fontWeight: '600',
-    color: 'white',
+    color: '#000000',
     marginBottom: 8,
+    fontFamily: 'Poppins',
   },
   textInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: 'rgba(255, 255, 255, 0.7)',
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 16,
     fontSize: 16,
-    color: 'white',
+    color: '#000000',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    fontFamily: 'Instrument Serif',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
   },
   addButton: {
     flexDirection: 'row',
@@ -556,20 +641,31 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingVertical: 16,
     marginBottom: 20,
+    shadowColor: '#10B981',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
   },
   addButtonText: {
     fontSize: 16,
     fontWeight: 'bold',
-    color: 'white',
+    color: '#FFFFFF',
     marginLeft: 8,
+    fontFamily: 'Poppins',
   },
   accountCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.7)',
+    borderRadius: 16,
     padding: 16,
     marginBottom: 16,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 3,
   },
   accountHeader: {
     flexDirection: 'row',
@@ -590,12 +686,14 @@ const styles = StyleSheet.create({
   accountName: {
     fontSize: 16,
     fontWeight: '600',
-    color: 'white',
+    color: '#000000',
     marginBottom: 2,
+    fontFamily: 'Poppins',
   },
   accountType: {
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
+    color: '#666666',
+    fontFamily: 'Instrument Serif',
   },
   removeButton: {
     padding: 8,
@@ -605,26 +703,31 @@ const styles = StyleSheet.create({
   },
   balanceLabel: {
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.8)',
+    color: '#000000',
     marginBottom: 8,
+    fontFamily: 'Poppins',
   },
   balanceInputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: 'rgba(255, 255, 255, 0.7)',
     borderRadius: 8,
     paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
   },
   currencySymbol: {
     fontSize: 16,
-    color: 'white',
+    color: '#000000',
     marginRight: 8,
+    fontFamily: 'Instrument Serif',
   },
   balanceInputField: {
     flex: 1,
     fontSize: 16,
-    color: 'white',
+    color: '#000000',
     paddingVertical: 12,
+    fontFamily: 'Instrument Serif',
   },
   emptyState: {
     alignItems: 'center',
@@ -633,21 +736,28 @@ const styles = StyleSheet.create({
   emptyStateText: {
     fontSize: 18,
     fontWeight: '600',
-    color: 'rgba(255, 255, 255, 0.8)',
+    color: '#000000',
     marginTop: 16,
     marginBottom: 8,
+    fontFamily: 'Poppins',
   },
   emptyStateSubtext: {
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.6)',
+    color: '#666666',
+    fontFamily: 'Instrument Serif',
   },
   reviewCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.7)',
+    borderRadius: 16,
     padding: 16,
     marginBottom: 12,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 3,
   },
   reviewHeader: {
     flexDirection: 'row',
@@ -667,36 +777,46 @@ const styles = StyleSheet.create({
   reviewName: {
     fontSize: 16,
     fontWeight: '600',
-    color: 'white',
+    color: '#000000',
     marginBottom: 2,
+    fontFamily: 'Poppins',
   },
   reviewType: {
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
+    color: '#666666',
+    fontFamily: 'Instrument Serif',
   },
   reviewBalance: {
     fontSize: 18,
     fontWeight: 'bold',
     color: '#10B981',
+    fontFamily: 'Helvetica Neue',
   },
   summaryCard: {
     backgroundColor: 'rgba(16, 185, 129, 0.1)',
-    borderRadius: 12,
+    borderRadius: 16,
     padding: 20,
     alignItems: 'center',
     borderWidth: 1,
     borderColor: 'rgba(16, 185, 129, 0.2)',
     marginTop: 20,
+    shadowColor: '#10B981',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 3,
   },
   summaryTitle: {
     fontSize: 16,
-    color: 'rgba(255, 255, 255, 0.8)',
+    color: '#000000',
     marginBottom: 8,
+    fontFamily: 'Poppins',
   },
   summaryAmount: {
     fontSize: 32,
     fontWeight: 'bold',
     color: '#10B981',
+    fontFamily: 'Helvetica Neue',
   },
   navigation: {
     flexDirection: 'row',
@@ -706,12 +826,17 @@ const styles = StyleSheet.create({
   navButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: 'rgba(255, 255, 255, 0.7)',
     borderRadius: 12,
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
   },
   navButtonDisabled: {
     opacity: 0.5,
@@ -719,7 +844,20 @@ const styles = StyleSheet.create({
   navButtonText: {
     fontSize: 16,
     fontWeight: '600',
-    color: 'white',
+    color: '#000000',
     marginHorizontal: 8,
+    fontFamily: 'Poppins',
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    fontSize: 18,
+    color: '#000000',
+    marginTop: 20,
+    fontWeight: '600',
+    fontFamily: 'Poppins',
   },
 });

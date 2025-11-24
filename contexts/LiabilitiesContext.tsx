@@ -466,61 +466,59 @@ export function LiabilitiesProvider({ children }: { children: React.ReactNode })
 
       if (!liability) throw new Error('Liability not found');
 
-      // Create allocation records and update account balances
+      // Allocate funds using RPC function (handles account_funds + account balance atomically)
+      // Use receive_to_account_bucket to properly handle fund allocation
       for (const allocation of allocations) {
         if (allocation.amount <= 0) continue;
 
-        // Create or update account_liability_portions
-        const { data: existing } = await supabase
-          .from('account_liability_portions')
-          .select('id, amount')
-          .eq('account_id', allocation.accountId)
-          .eq('liability_id', liabilityId)
-          .single();
-
-        if (existing) {
-          // Update existing
-          await supabase
-            .from('account_liability_portions')
-            .update({
-              amount: parseFloat(existing.amount || '0') + allocation.amount,
-              notes: allocation.description || null,
-            })
-            .eq('id', existing.id);
-        } else {
-          // Create new
-          await supabase
-            .from('account_liability_portions')
-            .insert({
-              account_id: allocation.accountId,
-              liability_id: liabilityId,
-              liability_account_id: null,
-              amount: allocation.amount,
-              notes: allocation.description || null,
-            });
-        }
-
-        // Update account balance (increase total)
+        // Get account currency
         const { data: account } = await supabase
           .from('accounts')
-          .select('balance')
+          .select('currency')
           .eq('id', allocation.accountId)
+          .eq('user_id', user.id)
           .single();
 
-        if (account) {
-          const newBalance = parseFloat(account.balance || '0') + allocation.amount;
-          await supabase
-            .from('accounts')
-            .update({ balance: newBalance })
-            .eq('id', allocation.accountId);
+        if (!account) {
+          console.error(`Account ${allocation.accountId} not found`);
+          continue;
+        }
+
+        // Use RPC to allocate funds (creates account_funds entry and updates account balance)
+        const { error: allocateError } = await supabase.rpc('receive_to_account_bucket', {
+          p_user_id: user.id,
+          p_account_id: allocation.accountId,
+          p_bucket_type: 'borrowed',
+          p_bucket_id: liabilityId,
+          p_amount: allocation.amount,
+          p_category: 'Loan Received',
+          p_description: allocation.description || `Funds allocated from ${liability.title || 'liability'}`,
+          p_date: new Date().toISOString().split('T')[0],
+          p_currency: account.currency || 'INR',
+        });
+
+        if (allocateError) {
+          console.error(`Error allocating funds to account ${allocation.accountId}:`, allocateError);
+          // Continue with other allocations even if one fails
         }
       }
 
-      // Update liability disbursed_amount
-      const totalDisbursed = allocations.reduce((sum, a) => sum + a.amount, 0);
+      // Update liability disbursed_amount from actual funds (sum from account_funds - single source of truth)
+      // Recalculate after all allocations to ensure accuracy
+      const { data: funds } = await supabase
+        .from('account_funds')
+        .select('balance')
+        .eq('type', 'borrowed')
+        .eq('reference_id', liabilityId);
+
+      const totalDisbursed = (funds || []).reduce((sum, f) => sum + parseFloat(f.balance?.toString() || '0'), 0);
+      
       await supabase
         .from('liabilities')
-        .update({ disbursed_amount: totalDisbursed })
+        .update({ 
+          disbursed_amount: totalDisbursed,
+          updated_at: new Date().toISOString()
+        })
         .eq('id', liabilityId);
     },
     async recordInitialPayments(liabilityId: string, payments: InitialPayment[]) {
@@ -645,42 +643,59 @@ export function LiabilitiesProvider({ children }: { children: React.ReactNode })
       
       if (accError || !account) return null;
       
-      // Get liability portions for this account
-      const { data: portions, error: portionsError } = await supabase
-        .from('account_liability_portions')
+      // Get liability funds for this account (from account_funds - single source of truth)
+      const { data: liabilityFunds, error: liabilityFundsError } = await supabase
+        .from('account_funds')
         .select(`
-          liability_id,
-          amount,
-          liability:liabilities!account_liability_portions_liability_id_fkey(title)
+          reference_id,
+          balance
         `)
-        .eq('account_id', accountId);
+        .eq('account_id', accountId)
+        .eq('type', 'borrowed');
       
-      if (portionsError) {
-        console.error('Error fetching liability portions:', portionsError);
+      if (liabilityFundsError) {
+        console.error('Error fetching liability funds:', liabilityFundsError);
       }
       
-      // Get goal portions for this account
-      const { data: goalPortions, error: goalPortionsError } = await supabase
-        .from('account_goal_portions')
-        .select(`
-          goal_id,
-          amount
-        `)
-        .eq('account_id', accountId);
-      
-      if (goalPortionsError) {
-        console.error('Error fetching goal portions:', goalPortionsError);
+      // Fetch liability titles separately if needed
+      const liabilityIds = liabilityFunds?.map(f => f.reference_id).filter(Boolean) || [];
+      let liabilityTitles: Record<string, string> = {};
+      if (liabilityIds.length > 0) {
+        const { data: liabilities } = await supabase
+          .from('liabilities')
+          .select('id, title')
+          .in('id', liabilityIds);
+        if (liabilities) {
+          liabilityTitles = liabilities.reduce((acc, l) => {
+            acc[l.id] = l.title;
+            return acc;
+          }, {} as Record<string, string>);
+        }
       }
       
-      const liabilityPortions = (portions || []).map((p: any) => ({
-        liabilityId: p.liability_id,
-        liabilityName: p.liability?.title || 'Unknown',
-        amount: parseFloat(p.amount || '0'),
+      // Get goal funds for this account (from account_funds - single source of truth)
+      const { data: goalFunds, error: goalFundsError } = await supabase
+        .from('account_funds')
+        .select(`
+          reference_id,
+          balance
+        `)
+        .eq('account_id', accountId)
+        .eq('type', 'goal');
+      
+      if (goalFundsError) {
+        console.error('Error fetching goal funds:', goalFundsError);
+      }
+      
+      const liabilityPortions = (liabilityFunds || []).map((f: any) => ({
+        liabilityId: f.reference_id,
+        liabilityName: liabilityTitles[f.reference_id] || 'Unknown',
+        amount: parseFloat(f.balance || '0'),
       }));
       
-      const goalPortionItems = (goalPortions || []).map((gp: any) => ({
-        goalId: gp.goal_id,
-        amount: parseFloat(gp.amount || '0'),
+      const goalPortionItems = (goalFunds || []).map((gf: any) => ({
+        goalId: gf.reference_id,
+        amount: parseFloat(gf.balance || '0'),
       }));
       
       const totalLiability = liabilityPortions.reduce((sum, p) => sum + p.amount, 0);
@@ -700,62 +715,84 @@ export function LiabilitiesProvider({ children }: { children: React.ReactNode })
     async fetchLiabilityAllocations(liabilityId: string) {
       if (!user) return [];
       
+      // Query from account_funds (single source of truth)
       const { data, error } = await supabase
-        .from('account_liability_portions')
+        .from('account_funds')
         .select(`
           account_id,
-          amount,
-          liability:liabilities!account_liability_portions_liability_id_fkey(title)
+          balance,
+          reference_id
         `)
-        .eq('liability_id', liabilityId);
+        .eq('type', 'borrowed')
+        .eq('reference_id', liabilityId);
       
       if (error) {
         console.error('Error fetching liability allocations:', error);
         return [];
       }
       
-      return (data || []).map((p: any) => ({
-        accountId: p.account_id,
-        amount: parseFloat(p.amount || '0'),
-        liabilityName: p.liability?.title,
+      // Fetch liability title separately if needed
+      let liabilityTitle: string | undefined;
+      if (liabilityId) {
+        const { data: liabilityData } = await supabase
+          .from('liabilities')
+          .select('title')
+          .eq('id', liabilityId)
+          .maybeSingle();
+        liabilityTitle = liabilityData?.title;
+      }
+      
+      return (data || []).map((f: any) => ({
+        accountId: f.account_id,
+        amount: parseFloat(f.balance || '0'),
+        liabilityName: liabilityTitle,
       }));
     },
     async convertLiabilityToPersonal(accountId: string, liabilityId: string, amount: number, notes?: string) {
       if (!user) throw new Error('User not authenticated');
       
-      // Get current portion
-      const { data: portion } = await supabase
-        .from('account_liability_portions')
-        .select('amount')
+      // Get current fund (from account_funds - single source of truth)
+      const { data: fund } = await supabase
+        .from('account_funds')
+        .select('balance')
         .eq('account_id', accountId)
-        .eq('liability_id', liabilityId)
+        .eq('type', 'borrowed')
+        .eq('reference_id', liabilityId)
         .single();
       
-      if (!portion || parseFloat(portion.amount || '0') < amount) {
+      if (!fund || parseFloat(fund.balance?.toString() || '0') < amount) {
         throw new Error('Insufficient liability funds to convert');
       }
       
-      // Reduce liability portion (conversion reduces the allocation, but debt stays same)
-      const newAmount = parseFloat(portion.amount || '0') - amount;
+      // Reduce borrowed fund balance (personal fund increases automatically)
+      // Personal fund = account.balance - sum(borrowed) - sum(goal)
+      const currentAmount = parseFloat(fund.balance?.toString() || '0');
+      const newAmount = currentAmount - amount;
       
       if (newAmount <= 0) {
-        // Delete portion if fully converted
+        // Delete fund if fully converted
         await supabase
-          .from('account_liability_portions')
+          .from('account_funds')
           .delete()
           .eq('account_id', accountId)
-          .eq('liability_id', liabilityId);
+          .eq('type', 'borrowed')
+          .eq('reference_id', liabilityId);
       } else {
-        // Update portion
+        // Update fund balance
         await supabase
-          .from('account_liability_portions')
-          .update({ amount: newAmount })
+          .from('account_funds')
+          .update({ 
+            balance: newAmount,
+            updated_at: new Date().toISOString()
+          })
           .eq('account_id', accountId)
-          .eq('liability_id', liabilityId);
+          .eq('type', 'borrowed')
+          .eq('reference_id', liabilityId);
       }
       
-      // Note: Account balance unchanged, debt unchanged - only portion tracking changes
-      // This is a psychological/tracking operation only
+      // Note: Account balance unchanged, debt unchanged - only fund tracking changes
+      // This is a reclassification operation (borrowed → personal)
+      // Personal fund calculation automatically increases when borrowed fund decreases
     },
     async fetchLiability(id: string): Promise<Liability | null> {
       if (!user) return null;
@@ -784,21 +821,47 @@ export function LiabilitiesProvider({ children }: { children: React.ReactNode })
 
       const accountIds = userAccounts.map(a => a.id);
 
-      // Get all account_liability_portions for this user's accounts
-      const { data: portions } = await supabase
-        .from('account_liability_portions')
+      // Get all liability funds for this user's accounts (from account_funds - single source of truth)
+      const { data: liabilityFunds } = await supabase
+        .from('account_funds')
         .select(`
           account_id,
-          liability_id,
-          amount,
-          liability:liabilities!account_liability_portions_liability_id_fkey(title),
-          account:accounts!account_liability_portions_account_id_fkey(id, name, balance)
+          reference_id,
+          balance
         `)
-        .in('account_id', accountIds);
+        .in('account_id', accountIds)
+        .eq('type', 'borrowed');
+      
+      // Fetch liability titles separately if needed
+      const liabilityIds = [...new Set(liabilityFunds?.map(f => f.reference_id).filter(Boolean) || [])];
+      let liabilityTitles: Record<string, string> = {};
+      if (liabilityIds.length > 0) {
+        const { data: liabilities } = await supabase
+          .from('liabilities')
+          .select('id, title')
+          .in('id', liabilityIds);
+        if (liabilities) {
+          liabilityTitles = liabilities.reduce((acc, l) => {
+            acc[l.id] = l.title;
+            return acc;
+          }, {} as Record<string, string>);
+        }
+      }
 
-      if (!portions) return [];
+      // Get goal funds for personal calculation
+      const { data: goalFunds } = await supabase
+        .from('account_funds')
+        .select('account_id, balance')
+        .in('account_id', accountIds)
+        .eq('type', 'goal');
 
-      // Group by account
+      // Get account details
+      const { data: accounts } = await supabase
+        .from('accounts')
+        .select('id, name, balance')
+        .in('id', accountIds);
+
+      // Group liability funds by account
       const accountsMap = new Map<string, {
         accountId: string;
         accountName: string;
@@ -811,32 +874,38 @@ export function LiabilitiesProvider({ children }: { children: React.ReactNode })
         }>;
       }>();
 
-      for (const portion of portions) {
-        const accountId = portion.account_id;
-        const account = portion.account as any;
-
-        if (!accountsMap.has(accountId)) {
-          accountsMap.set(accountId, {
-            accountId,
-            accountName: account?.name || 'Unknown',
-            total: parseFloat(account?.balance || '0'),
-            personal: 0,
-            liabilityPortions: [],
-          });
-        }
-
-        const accountData = accountsMap.get(accountId)!;
-        accountData.liabilityPortions.push({
-          liabilityId: portion.liability_id,
-          liabilityName: portion.liability?.title || 'Unknown',
-          amount: parseFloat(portion.amount || '0'),
+      // Initialize accounts in map
+      for (const account of accounts || []) {
+        accountsMap.set(account.id, {
+          accountId: account.id,
+          accountName: account.name || 'Unknown',
+          total: parseFloat(account.balance || '0'),
+          personal: 0,
+          liabilityPortions: [],
         });
       }
 
-      // Calculate personal funds
+      // Add liability funds to accounts
+      for (const fund of liabilityFunds || []) {
+        const accountId = fund.account_id;
+        const accountData = accountsMap.get(accountId);
+        
+        if (accountData) {
+          accountData.liabilityPortions.push({
+            liabilityId: fund.reference_id,
+            liabilityName: liabilityTitles[fund.reference_id] || 'Unknown',
+            amount: parseFloat(fund.balance || '0'),
+          });
+        }
+      }
+
+      // Calculate personal funds (account balance - sum(liability) - sum(goal))
       for (const accountData of accountsMap.values()) {
         const totalLiability = accountData.liabilityPortions.reduce((sum, p) => sum + p.amount, 0);
-        accountData.personal = Math.max(0, accountData.total - totalLiability);
+        const totalGoal = (goalFunds || [])
+          .filter(gf => gf.account_id === accountData.accountId)
+          .reduce((sum, gf) => sum + parseFloat(gf.balance || '0'), 0);
+        accountData.personal = Math.max(0, accountData.total - totalLiability - totalGoal);
       }
 
       return Array.from(accountsMap.values());

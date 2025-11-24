@@ -1,396 +1,614 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, FlatList, Alert } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  StyleSheet,
+  Text,
+  View,
+  TouchableOpacity,
+  ScrollView,
+  SafeAreaView,
+  ActivityIndicator,
+  RefreshControl,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Calendar } from 'react-native-calendars';
 import { router } from 'expo-router';
-import { useRealtimeData } from '../../hooks/useRealtimeData';
-import { useSettings } from '../../contexts/SettingsContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { Bill } from '../../types';
-import { calculateBillStatistics, calculateBillStatus, fetchBills } from '../../utils/bills';
-import { formatCurrencyAmount } from '../../utils/currency';
-import { supabase } from '@/lib/supabase';
+import { useSettings } from '@/contexts/SettingsContext';
+import { formatCurrencyAmount } from '@/utils/currency';
+import { UpcomingPayment, BillsViewOptions, BillsViewFilters, PaymentSourceType } from '@/types/bills';
+import { fetchAllUpcomingPayments, getUpcomingPaymentsSummary } from '@/utils/billsAggregator';
 import GlassCard from '@/components/GlassCard';
-import PayBillModal from '@/app/modals/pay-bill';
+import ActionSheet, { ActionSheetItem } from '@/components/ActionSheet';
+
+type ViewType = 'day' | 'week' | 'month' | 'year';
+type FilterStatus = 'all' | 'upcoming' | 'due_today' | 'overdue';
 
 export default function BillsScreen() {
   const { user } = useAuth();
-  const { bills, categories, globalRefresh } = useRealtimeData();
   const { currency } = useSettings();
-  const [selectedFilter, setSelectedFilter] = useState('all');
+  
+  // View state
+  const [viewType, setViewType] = useState<ViewType>('month');
   const [viewMode, setViewMode] = useState<'list' | 'calendar'>('list');
   const [selectedDate, setSelectedDate] = useState('');
-  const [billStats, setBillStats] = useState<any>(null);
+  const [currentDate, setCurrentDate] = useState(new Date());
+  
+  // Filter state
+  const [selectedFilter, setSelectedFilter] = useState<FilterStatus>('all');
+  const [selectedSourceTypes, setSelectedSourceTypes] = useState<PaymentSourceType[]>([]);
+  
+  // Data state
+  const [payments, setPayments] = useState<UpcomingPayment[]>([]);
+  const [summary, setSummary] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [selectedBill, setSelectedBill] = useState<Bill | null>(null);
-  const [showPayBillModal, setShowPayBillModal] = useState(false);
-  const [allBills, setAllBills] = useState<Bill[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
+  const [selectedPayment, setSelectedPayment] = useState<UpcomingPayment | null>(null);
+  const [showActionSheet, setShowActionSheet] = useState(false);
 
-  const filters = [
-    { key: 'all', label: 'All', count: bills ? bills.length : 0 },
-    { key: 'upcoming', label: 'Upcoming', count: bills ? bills.filter(b => b.status === 'upcoming').length : 0 },
-    { key: 'due_today', label: 'Due Today', count: bills ? bills.filter(b => b.status === 'due_today').length : 0 },
-    { key: 'overdue', label: 'Overdue', count: bills ? bills.filter(b => b.status === 'overdue').length : 0 },
-    { key: 'paid', label: 'Paid', count: bills ? bills.filter(b => b.status === 'paid').length : 0 },
-  ];
-
-  // Load all bills with calculated status for calendar
+  // Load payments when view changes
   useEffect(() => {
-    if (user && viewMode === 'calendar') {
-      const loadBills = async () => {
-        try {
-          const billsData = await fetchBills(user.id);
-          // Calculate status for each bill
-          const billsWithStatus = billsData.map(bill => ({
-            ...bill,
-            status: calculateBillStatus(bill),
-          }));
-          setAllBills(billsWithStatus);
-        } catch (error) {
-          console.error('Error loading bills:', error);
-          setAllBills([]);
-        }
-      };
-      loadBills();
-    } else {
-      setAllBills(bills || []);
+    if (user) {
+      loadPayments();
     }
-  }, [user, viewMode, bills]);
+  }, [user, viewType, currentDate, selectedFilter, selectedSourceTypes]);
 
-  useEffect(() => {
-    if (bills !== null) {
-      if (bills.length > 0) {
-        loadBillStats();
-      } else {
-        setLoading(false);
-      }
-    }
-  }, [bills]);
-
-  const loadBillStats = async () => {
+  const loadPayments = async () => {
+    if (!user) return;
+    
     try {
       setLoading(true);
-      if (bills && bills.length > 0) {
-        const stats = await calculateBillStatistics(bills[0].user_id, '1 month');
-        setBillStats(stats);
-      } else {
-        setBillStats(null);
-      }
+      
+      const options: BillsViewOptions = {
+        view_type: viewType,
+        current_date: currentDate.toISOString().split('T')[0],
+        include_paid: selectedFilter === 'all',
+        include_cancelled: false,
+      };
+
+      const filters: BillsViewFilters = {
+        source_type: selectedSourceTypes.length > 0 ? selectedSourceTypes : undefined,
+        status: selectedFilter === 'all' ? undefined : [selectedFilter],
+      };
+
+      const [paymentsData, summaryData] = await Promise.all([
+        fetchAllUpcomingPayments(user.id, options, filters),
+        getUpcomingPaymentsSummary(user.id, options),
+      ]);
+
+      setPayments(paymentsData);
+      setSummary(summaryData);
     } catch (error) {
-      console.error('Error loading bill stats:', error);
-      setBillStats(null);
+      console.error('Error loading payments:', error);
+      setPayments([]);
+      setSummary(null);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
-  const filteredBills = (allBills.length > 0 ? allBills : bills) ? (allBills.length > 0 ? allBills : bills).filter((bill: Bill) => {
-    if (selectedFilter === 'all') return true;
-    const billStatus = calculateBillStatus(bill);
-    return billStatus === selectedFilter;
-  }) : [];
-
-  const onDayPress = (day: any) => {
-    setSelectedDate(day.dateString);
+  const handleRefresh = () => {
+    setRefreshing(true);
+    loadPayments();
   };
 
-  const handleBillPress = (bill: Bill) => {
-    if (bill.liability_id) {
-      router.push(`/liability/${bill.liability_id}`);
-    } else {
-      setSelectedBill(bill);
-      setShowPayBillModal(true);
+  const handlePaymentPress = (payment: UpcomingPayment) => {
+    // Navigate to appropriate detail screen based on source_type
+    switch (payment.source_type) {
+      case 'recurring_transaction':
+        router.push(`/recurring-transaction/${payment.source_id}` as any);
+        break;
+      case 'liability':
+        router.push(`/liability/${payment.source_id}` as any);
+        break;
+      case 'scheduled_payment':
+        router.push(`/scheduled-payment/${payment.source_id}` as any);
+        break;
+      case 'goal_contribution':
+        router.push(`/goal/${payment.source_id}` as any);
+        break;
+      case 'budget':
+        router.push(`/budget/${payment.source_id}` as any);
+        break;
     }
   };
 
-  const getCategoryName = (categoryId?: string) => {
-    if (!categoryId) return 'Uncategorized';
-    const category = categories.find(c => c.id === categoryId);
-    return category?.name || 'Uncategorized';
+  const handlePayPayment = (payment: UpcomingPayment) => {
+    // Open appropriate pay modal based on source_type
+    switch (payment.source_type) {
+      case 'recurring_transaction':
+        router.push(`/modals/pay-recurring-transaction?id=${payment.source_id}&occurrence_date=${payment.due_date}` as any);
+        break;
+      case 'liability':
+        router.push(`/modals/pay-liability?liability_id=${payment.source_id}` as any);
+        break;
+      case 'scheduled_payment':
+        router.push(`/modals/pay-scheduled-payment?id=${payment.source_id}` as any);
+        break;
+      case 'goal_contribution':
+        router.push(`/modals/goal-contribution?goal_id=${payment.source_id}&amount=${payment.amount}` as any);
+        break;
+    }
   };
 
-  const getCategoryColor = (categoryId?: string) => {
-    if (!categoryId) return '#6B7280';
-    const category = categories.find(c => c.id === categoryId);
-    return category?.color || '#6B7280';
+  const handleMoreOptions = (payment: UpcomingPayment, event: any) => {
+    event?.stopPropagation?.();
+    setSelectedPayment(payment);
+    setShowActionSheet(true);
+  };
+
+  const handleEdit = () => {
+    if (!selectedPayment) return;
+    handlePaymentPress(selectedPayment);
+    setShowActionSheet(false);
+  };
+
+  const handleDelete = () => {
+    if (!selectedPayment) return;
+    // Delete based on source_type
+    // Implementation will depend on each source type
+    setShowActionSheet(false);
+  };
+
+  const formatDate = (dateString: string) => {
+    const date = new Date(dateString);
+    return date.toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
   };
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'paid': return '#10B981';
-      case 'overdue': return '#EF4444';
-      case 'due_today': return '#F59E0B';
-      case 'upcoming': return '#3B82F6';
-      case 'skipped': return '#6B7280';
-      case 'cancelled': return '#6B7280';
-      case 'postponed': return '#8B5CF6';
-      default: return '#6B7280';
+      case 'overdue':
+        return '#EF4444';
+      case 'due_today':
+        return '#F59E0B';
+      case 'upcoming':
+        return '#3B82F6';
+      case 'paid':
+        return '#10B981';
+      default:
+        return '#6B7280';
     }
   };
 
   const getStatusText = (status: string) => {
-    switch (status) {
-      case 'paid': return 'Paid';
-      case 'overdue': return 'Overdue';
-      case 'due_today': return 'Due Today';
-      case 'upcoming': return 'Upcoming';
-      case 'skipped': return 'Skipped';
-      case 'cancelled': return 'Cancelled';
-      case 'postponed': return 'Postponed';
-      default: return 'Unknown';
+    return status.replace('_', ' ').replace(/\b\w/g, (l) => l.toUpperCase());
+  };
+
+  const getSourceTypeLabel = (sourceType: PaymentSourceType) => {
+    switch (sourceType) {
+      case 'recurring_transaction':
+        return 'Recurring';
+      case 'liability':
+        return 'Liability';
+      case 'scheduled_payment':
+        return 'Scheduled';
+      case 'goal_contribution':
+        return 'Goal';
+      case 'budget':
+        return 'Budget';
+      default:
+        return sourceType;
     }
   };
 
-  const formatCurrency = (amount: number) => {
-    return formatCurrencyAmount(amount, currency);
+  const getSourceTypeIcon = (sourceType: PaymentSourceType) => {
+    switch (sourceType) {
+      case 'recurring_transaction':
+        return 'repeat';
+      case 'liability':
+        return 'card';
+      case 'scheduled_payment':
+        return 'calendar';
+      case 'goal_contribution':
+        return 'target';
+      case 'budget':
+        return 'pie-chart';
+      default:
+        return 'receipt';
+    }
   };
 
-  const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
+  // Group payments by date
+  const paymentsByDate = useMemo(() => {
+    const grouped: { [key: string]: UpcomingPayment[] } = {};
+    
+    payments.forEach(payment => {
+      const date = payment.due_date;
+      if (!grouped[date]) {
+        grouped[date] = [];
+      }
+      grouped[date].push(payment);
     });
+
+    // Sort dates
+    const sortedDates = Object.keys(grouped).sort((a, b) => 
+      new Date(a).getTime() - new Date(b).getTime()
+    );
+
+    return { grouped, sortedDates };
+  }, [payments]);
+
+  // Group payments by source type
+  const paymentsBySource = useMemo(() => {
+    const grouped: { [key: string]: UpcomingPayment[] } = {};
+    
+    payments.forEach(payment => {
+      if (!grouped[payment.source_type]) {
+        grouped[payment.source_type] = [];
+      }
+      grouped[payment.source_type].push(payment);
+    });
+
+    return grouped;
+  }, [payments]);
+
+  // Filter payments for calendar view
+  const filteredPayments = useMemo(() => {
+    return payments.filter(payment => {
+      if (selectedFilter !== 'all' && payment.status !== selectedFilter) {
+        return false;
+      }
+      if (selectedSourceTypes.length > 0 && !selectedSourceTypes.includes(payment.source_type)) {
+        return false;
+      }
+      return true;
+    });
+  }, [payments, selectedFilter, selectedSourceTypes]);
+
+  const getActionSheetItems = (payment: UpcomingPayment): ActionSheetItem[] => {
+    const items: ActionSheetItem[] = [
+      {
+        id: 'pay',
+        label: 'Pay Now',
+        icon: 'cash-outline',
+        onPress: () => {
+          handlePayPayment(payment);
+          setShowActionSheet(false);
+        },
+      },
+      {
+        id: 'view',
+        label: 'View Details',
+        icon: 'eye-outline',
+        onPress: () => {
+          handlePaymentPress(payment);
+          setShowActionSheet(false);
+        },
+      },
+    ];
+
+    // Add source-type-specific actions
+    if (payment.source_type === 'recurring_transaction') {
+      items.push({
+        id: 'edit',
+        label: 'Edit Recurring Transaction',
+        icon: 'create-outline',
+        onPress: handleEdit,
+      });
+    }
+
+    items.push({
+      id: 'separator',
+      label: '',
+      icon: 'ellipsis-horizontal',
+      onPress: () => {},
+      separator: true,
+      disabled: true,
+    });
+
+    items.push({
+      id: 'skip',
+      label: 'Skip',
+      icon: 'skip-forward-outline',
+      onPress: () => {
+        // Skip payment logic
+        setShowActionSheet(false);
+      },
+    });
+
+    return items;
   };
 
-  const renderBillCard = ({ item }: { item: Bill }) => (
-    <TouchableOpacity 
-      style={styles.billItem}
-      onPress={() => router.push(`/bill/${item.id}` as any)}
-    >
-      <View style={styles.billHeader}>
-        <View style={[styles.billIcon, { backgroundColor: item.color + '20' }]}>
-          <Ionicons name={item.icon as any} size={24} color={item.color} />
+  const formatCurrency = (value: number) => formatCurrencyAmount(value, currency);
+
+  // Change view date (prev/next day/week/month/year)
+  const changeViewDate = (direction: 'prev' | 'next') => {
+    const newDate = new Date(currentDate);
+    
+    switch (viewType) {
+      case 'day':
+        newDate.setDate(newDate.getDate() + (direction === 'next' ? 1 : -1));
+        break;
+      case 'week':
+        newDate.setDate(newDate.getDate() + (direction === 'next' ? 7 : -7));
+        break;
+      case 'month':
+        newDate.setMonth(newDate.getMonth() + (direction === 'next' ? 1 : -1));
+        break;
+      case 'year':
+        newDate.setFullYear(newDate.getFullYear() + (direction === 'next' ? 1 : -1));
+        break;
+    }
+    
+    setCurrentDate(newDate);
+  };
+
+  if (loading && payments.length === 0) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#000000" />
+          <Text style={styles.loadingText}>Loading upcoming payments...</Text>
         </View>
-        <View style={styles.billInfo}>
-          <Text style={styles.billTitle}>{item.title}</Text>
-          <Text style={styles.billCategory}>{getCategoryName(item.category_id)}</Text>
-          <Text style={styles.billDueDate}>Due: {formatDate(item.due_date)}</Text>
-        </View>
-        <View style={styles.billAmount}>
-          <Text style={styles.amountText}>
-            {item.amount ? formatCurrency(item.amount) : 'Variable'}
-          </Text>
-          <View style={[styles.statusBadge, { backgroundColor: getStatusColor(item.status) + '20' }]}>
-            <Text style={[styles.statusText, { color: getStatusColor(item.status) }]}>
-              {getStatusText(item.status)}
-            </Text>
-          </View>
-        </View>
-      </View>
-      
-      {item.status !== 'paid' && item.status !== 'cancelled' && (
-        <View style={styles.billActions}>
-          <TouchableOpacity 
-            style={[styles.actionButton, { backgroundColor: '#10B981' }]}
-            onPress={() => router.push(`/modals/mark-bill-paid?id=${item.id}` as any)}
-          >
-            <Ionicons name="checkmark" size={16} color="white" />
-            <Text style={styles.actionText}>Pay Bill</Text>
-          </TouchableOpacity>
-          <TouchableOpacity 
-            style={[styles.actionButton, { backgroundColor: '#3B82F6' }]}
-            onPress={() => router.push(`/modals/postpone-bill?id=${item.id}` as any)}
-          >
-            <Ionicons name="calendar" size={16} color="white" />
-            <Text style={styles.actionText}>Postpone</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-    </TouchableOpacity>
-  );
+      </SafeAreaView>
+    );
+  }
 
   return (
-    <LinearGradient
-      colors={['#99D795', '#99D795', '#99D795']}
-      style={styles.container}
-    >
-      <SafeAreaView style={styles.safeArea}>
-        <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
+    <SafeAreaView style={styles.safeArea}>
+      <View style={styles.container}>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scrollContent}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
+          }
+        >
           {/* Header */}
-          <View style={styles.header}>
-            <Text style={styles.headerTitle}>Bills & Liabilities</Text>
+          <View style={styles.headerRow}>
+            <Text style={styles.pageTitle}>Bills</Text>
             <View style={styles.headerActions}>
-              <TouchableOpacity 
-                style={styles.viewToggle}
-                onPress={() => setViewMode(viewMode === 'list' ? 'calendar' : 'list')}
-              >
-                <Ionicons 
-                  name={viewMode === 'list' ? 'calendar-outline' : 'list-outline'} 
-                  size={24} 
-                  color="white" 
-                />
-              </TouchableOpacity>
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={styles.addButton}
                 onPress={() => router.push('/modals/add-bill' as any)}
+                activeOpacity={0.8}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
-                <Ionicons name="add" size={24} color="white" />
+                <Ionicons
+                  name="add"
+                  size={24}
+                  color="#FFFFFF"
+                />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.viewToggleButton}
+                onPress={() => setViewMode(viewMode === 'list' ? 'calendar' : 'list')}
+                activeOpacity={0.7}
+              >
+                <Ionicons
+                  name={viewMode === 'list' ? 'calendar-outline' : 'list-outline'}
+                  size={22}
+                  color="#000000"
+                />
               </TouchableOpacity>
             </View>
           </View>
 
-          {/* View Mode Toggle */}
-          <View style={styles.viewModeContainer}>
+          {/* View Type Selector */}
+          <View style={styles.viewTypeContainer}>
             <TouchableOpacity
-              style={[styles.viewModeButton, viewMode === 'list' && styles.viewModeButtonActive]}
-              onPress={() => setViewMode('list')}
+              style={[styles.viewTypeButton, viewType === 'day' && styles.viewTypeButtonActive]}
+              onPress={() => setViewType('day')}
             >
-              <Ionicons name="list" size={20} color={viewMode === 'list' ? '#FFFFFF' : 'rgba(255,255,255,0.7)'} />
-              <Text style={[styles.viewModeText, viewMode === 'list' && styles.viewModeTextActive]}>List</Text>
+              <Text style={[styles.viewTypeText, viewType === 'day' && styles.viewTypeTextActive]}>
+                Day
+              </Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.viewModeButton, viewMode === 'calendar' && styles.viewModeButtonActive]}
-              onPress={() => setViewMode('calendar')}
+              style={[styles.viewTypeButton, viewType === 'week' && styles.viewTypeButtonActive]}
+              onPress={() => setViewType('week')}
             >
-              <Ionicons name="calendar" size={20} color={viewMode === 'calendar' ? '#FFFFFF' : 'rgba(255,255,255,0.7)'} />
-              <Text style={[styles.viewModeText, viewMode === 'calendar' && styles.viewModeTextActive]}>Calendar</Text>
+              <Text style={[styles.viewTypeText, viewType === 'week' && styles.viewTypeTextActive]}>
+                Week
+              </Text>
             </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.viewTypeButton, viewType === 'month' && styles.viewTypeButtonActive]}
+              onPress={() => setViewType('month')}
+            >
+              <Text style={[styles.viewTypeText, viewType === 'month' && styles.viewTypeTextActive]}>
+                Month
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.viewTypeButton, viewType === 'year' && styles.viewTypeButtonActive]}
+              onPress={() => setViewType('year')}
+            >
+              <Text style={[styles.viewTypeText, viewType === 'year' && styles.viewTypeTextActive]}>
+                Year
+              </Text>
+            </TouchableOpacity>
+            
+            {/* Date Navigation */}
+            <View style={styles.dateNavigation}>
+              <TouchableOpacity onPress={() => changeViewDate('prev')}>
+                <Ionicons name="chevron-back" size={20} color="#000000" />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => setCurrentDate(new Date())}>
+                <Text style={styles.todayButton}>Today</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => changeViewDate('next')}>
+                <Ionicons name="chevron-forward" size={20} color="#000000" />
+              </TouchableOpacity>
+            </View>
           </View>
 
-          {/* Filter Tabs */}
-          {viewMode === 'list' && (
-            <ScrollView 
-              horizontal 
-              showsHorizontalScrollIndicator={false}
-              style={styles.filterContainer}
-              contentContainerStyle={styles.filterContent}
-            >
-              {filters.map((filter) => (
-                <TouchableOpacity
-                  key={filter.key}
-                  style={[
-                    styles.filterButton,
-                    selectedFilter === filter.key && styles.activeFilterButton,
-                  ]}
-                  onPress={() => setSelectedFilter(filter.key)}
-                >
-                  <Text style={[
-                    styles.filterText,
-                    selectedFilter === filter.key && styles.activeFilterText,
-                  ]}>
-                    {filter.label}
+          {/* Summary Cards */}
+          {summary && (
+            <GlassCard padding={20} marginVertical={12}>
+              <View style={styles.summaryGrid}>
+                <View style={styles.summaryItem}>
+                  <Text style={styles.summaryLabel}>Total</Text>
+                  <Text style={styles.summaryValue}>{formatCurrency(summary.totalAmount)}</Text>
+                  <Text style={styles.summaryCount}>{summary.total} payments</Text>
+                </View>
+                <View style={styles.summaryItem}>
+                  <Text style={styles.summaryLabel}>Due Today</Text>
+                  <Text style={[styles.summaryValue, { color: '#F59E0B' }]}>
+                    {summary.dueTodayCount}
                   </Text>
-                  <View style={[
-                    styles.filterCount,
-                    selectedFilter === filter.key && styles.activeFilterCount,
-                  ]}>
-                    <Text style={[
-                      styles.filterCountText,
-                      selectedFilter === filter.key && styles.activeFilterCountText,
-                    ]}>
-                      {filter.count}
-                    </Text>
-                  </View>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
+                  <Text style={styles.summaryCount}>payments</Text>
+                </View>
+                <View style={styles.summaryItem}>
+                  <Text style={styles.summaryLabel}>Overdue</Text>
+                  <Text style={[styles.summaryValue, { color: '#EF4444' }]}>
+                    {summary.overdueCount}
+                  </Text>
+                  <Text style={styles.summaryCount}>payments</Text>
+                </View>
+              </View>
+            </GlassCard>
           )}
 
-          {/* Summary Cards */}
-          {viewMode === 'list' && (
-            <View style={styles.summaryCards}>
-              <View style={styles.summaryCard}>
-                <Text style={styles.summaryLabel}>Upcoming</Text>
-                <Text style={styles.summaryAmount}>
-                  {billStats ? formatCurrency(billStats.upcoming_amount) : formatCurrency(0)}
-                </Text>
-              </View>
-              <View style={styles.summaryCard}>
-                <Text style={styles.summaryLabel}>Overdue</Text>
-                <Text style={[styles.summaryAmount, { color: '#EF4444' }]}>
-                  {billStats ? formatCurrency(billStats.overdue_amount) : formatCurrency(0)}
-                </Text>
-              </View>
-              <View style={styles.summaryCard}>
-                <Text style={styles.summaryLabel}>Due Today</Text>
-                <Text style={[styles.summaryAmount, { color: '#F59E0B' }]}>
-                  {allBills.length > 0 ? allBills.filter(b => calculateBillStatus(b) === 'due_today').length : (bills ? bills.filter(b => b.status === 'due_today').length : 0)}
-                </Text>
-              </View>
-            </View>
-          )}
+          {/* Filter Tabs */}
+          <View style={styles.filterContainer}>
+            {(['all', 'upcoming', 'due_today', 'overdue'] as const).map((filterKey) => {
+              const count = payments.filter(p => {
+                if (filterKey === 'all') return true;
+                return p.status === filterKey;
+              }).length;
+
+              return (
+                <TouchableOpacity
+                  key={filterKey}
+                  style={[
+                    styles.filterButton,
+                    selectedFilter === filterKey && styles.filterButtonActive,
+                  ]}
+                  onPress={() => setSelectedFilter(filterKey)}
+                >
+                  <Text
+                    style={[
+                      styles.filterText,
+                      selectedFilter === filterKey && styles.filterTextActive,
+                    ]}
+                  >
+                    {filterKey.replace('_', ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
+                  </Text>
+                  {count > 0 && (
+                    <View style={[
+                      styles.filterBadge,
+                      selectedFilter === filterKey && styles.filterBadgeActive,
+                    ]}>
+                      <Text style={[
+                        styles.filterBadgeText,
+                        selectedFilter === filterKey && styles.filterBadgeTextActive,
+                      ]}>
+                        {count}
+                      </Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {/* Source Type Filter */}
+          <View style={styles.sourceTypeFilter}>
+            <Text style={styles.sourceTypeLabel}>Source:</Text>
+            {(['recurring_transaction', 'liability', 'scheduled_payment', 'goal_contribution'] as PaymentSourceType[]).map((sourceType) => {
+              const isSelected = selectedSourceTypes.length === 0 || selectedSourceTypes.includes(sourceType);
+              const count = payments.filter(p => p.source_type === sourceType).length;
+
+              return (
+                <TouchableOpacity
+                  key={sourceType}
+                  style={[
+                    styles.sourceTypeButton,
+                    selectedSourceTypes.includes(sourceType) && styles.sourceTypeButtonActive,
+                    selectedSourceTypes.length === 0 && styles.sourceTypeButtonActive, // All selected by default
+                  ]}
+                  onPress={() => {
+                    if (selectedSourceTypes.includes(sourceType)) {
+                      setSelectedSourceTypes(selectedSourceTypes.filter(t => t !== sourceType));
+                    } else {
+                      setSelectedSourceTypes([...selectedSourceTypes, sourceType]);
+                    }
+                  }}
+                >
+                  <Ionicons 
+                    name={getSourceTypeIcon(sourceType) as any} 
+                    size={14} 
+                    color={isSelected ? '#FFFFFF' : '#000000'} 
+                  />
+                  <Text style={[
+                    styles.sourceTypeText,
+                    isSelected && styles.sourceTypeTextActive,
+                  ]}>
+                    {getSourceTypeLabel(sourceType)} {count > 0 && `(${count})`}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
 
           {/* Calendar View */}
           {viewMode === 'calendar' && (
             <View style={styles.calendarSection}>
               <GlassCard padding={20} marginVertical={12}>
                 <Calendar
-                  onDayPress={onDayPress}
+                  current={currentDate.toISOString().split('T')[0]}
+                  onDayPress={(day) => setSelectedDate(day.dateString)}
                   markedDates={(() => {
                     const markedDates: any = {};
-                    const dateBills: { [key: string]: Bill[] } = {};
-                    
-                    // Group bills by due date
-                    (allBills.length > 0 ? allBills : bills || []).forEach(bill => {
-                      const billStatus = calculateBillStatus(bill);
-                      if (billStatus !== 'paid' && billStatus !== 'cancelled') {
-                        const date = bill.due_date;
-                        if (!dateBills[date]) {
-                          dateBills[date] = [];
+                    const datePayments: { [key: string]: UpcomingPayment[] } = {};
+
+                    filteredPayments.forEach((payment) => {
+                      if (payment.status !== 'paid' && payment.status !== 'cancelled') {
+                        const date = payment.due_date;
+                        if (!datePayments[date]) {
+                          datePayments[date] = [];
                         }
-                        dateBills[date].push(bill);
+                        datePayments[date].push(payment);
                       }
                     });
-                    
-                    // Mark dates with bills
-                    Object.keys(dateBills).forEach(date => {
-                      const billsForDate = dateBills[date];
-                      const overdueCount = billsForDate.filter(b => calculateBillStatus(b) === 'overdue').length;
-                      const dueTodayCount = billsForDate.filter(b => calculateBillStatus(b) === 'due_today').length;
-                      const totalAmount = billsForDate.reduce((sum, b) => sum + (b.amount || 0), 0);
-                      
-                      let color = '#3B82F6'; // Blue for upcoming
-                      if (overdueCount > 0) {
-                        color = '#EF4444'; // Red for overdue
-                      } else if (dueTodayCount > 0) {
-                        color = '#F59E0B'; // Orange for due today
-                      }
-                      
+
+                    Object.keys(datePayments).forEach((date) => {
+                      const paymentsForDate = datePayments[date];
+                      const overdueCount = paymentsForDate.filter(p => p.status === 'overdue').length;
+                      const dueTodayCount = paymentsForDate.filter(p => p.status === 'due_today').length;
+
+                      let color = '#3B82F6';
+                      if (overdueCount > 0) color = '#EF4444';
+                      else if (dueTodayCount > 0) color = '#F59E0B';
+
                       markedDates[date] = {
                         marked: true,
                         dotColor: color,
                         selected: selectedDate === date,
-                        selectedColor: selectedDate === date ? '#10B981' : undefined,
+                        selectedColor: selectedDate === date ? '#000000' : undefined,
                         selectedTextColor: selectedDate === date ? '#FFFFFF' : undefined,
-                        customStyles: {
-                          container: {
-                            backgroundColor: selectedDate === date ? '#10B981' : 'transparent',
-                            borderRadius: 16,
-                          },
-                          text: {
-                            color: selectedDate === date ? '#FFFFFF' : '#000000',
-                            fontWeight: overdueCount > 0 || dueTodayCount > 0 ? 'bold' : 'normal',
-                          },
-                        },
                       };
                     });
-                    
-                    // Mark selected date
+
                     if (selectedDate && !markedDates[selectedDate]) {
                       markedDates[selectedDate] = {
                         selected: true,
-                        selectedColor: '#10B981',
+                        selectedColor: '#000000',
                         selectedTextColor: '#FFFFFF',
                       };
                     }
-                    
+
                     return markedDates;
                   })()}
                   theme={{
                     backgroundColor: '#FFFFFF',
                     calendarBackground: '#FFFFFF',
                     textSectionTitleColor: '#000000',
-                    selectedDayBackgroundColor: '#10B981',
+                    selectedDayBackgroundColor: '#000000',
                     selectedDayTextColor: '#FFFFFF',
-                    todayTextColor: '#10B981',
+                    todayTextColor: '#000000',
                     dayTextColor: '#000000',
                     textDisabledColor: '#9CA3AF',
-                    dotColor: '#10B981',
+                    dotColor: '#000000',
                     selectedDotColor: '#FFFFFF',
                     arrowColor: '#000000',
                     monthTextColor: '#000000',
-                    indicatorColor: '#10B981',
+                    indicatorColor: '#000000',
                     textDayFontFamily: 'Poppins-SemiBold',
                     textMonthFontFamily: 'HelveticaNeue-Bold',
                     textDayHeaderFontFamily: 'Poppins-SemiBold',
@@ -402,7 +620,6 @@ export default function BillsScreen() {
                 />
               </GlassCard>
 
-              {/* Selected Date Info */}
               {selectedDate && (
                 <View style={styles.selectedDateSection}>
                   <Text style={styles.selectedDateTitle}>
@@ -414,87 +631,55 @@ export default function BillsScreen() {
                     })}
                   </Text>
                   {(() => {
-                    const billsForDate = (allBills.length > 0 ? allBills : bills || []).filter(b => {
-                      const billStatus = calculateBillStatus(b);
-                      return b.due_date === selectedDate && billStatus !== 'paid' && billStatus !== 'cancelled';
-                    });
-                    
-                    if (billsForDate.length === 0) {
+                    const paymentsForDate = filteredPayments.filter(p => p.due_date === selectedDate);
+
+                    if (paymentsForDate.length === 0) {
                       return (
-                        <View style={styles.emptyDateBills}>
-                          <Ionicons name="checkmark-circle-outline" size={48} color="rgba(0, 0, 0, 0.3)" />
-                          <Text style={styles.emptyDateBillsText}>No bills due on this date</Text>
-                        </View>
+                        <GlassCard padding={32} marginVertical={12}>
+                          <View style={styles.emptyDatePayments}>
+                            <Ionicons name="checkmark-circle-outline" size={48} color="rgba(0, 0, 0, 0.3)" />
+                            <Text style={styles.emptyDatePaymentsText}>No payments due on this date</Text>
+                          </View>
+                        </GlassCard>
                       );
                     }
-                    
-                    const totalAmount = billsForDate.reduce((sum, b) => sum + (b.amount || 0), 0);
-                    
+
                     return (
                       <View>
-                        <View style={styles.dateSummary}>
-                          <Text style={styles.dateSummaryText}>
-                            {billsForDate.length} bill{billsForDate.length !== 1 ? 's' : ''} due
-                          </Text>
-                          <Text style={styles.dateSummaryAmount}>
-                            Total: {formatCurrency(totalAmount)}
-                          </Text>
-                        </View>
-                        {billsForDate.map((bill) => {
-                          const billStatus = calculateBillStatus(bill);
-                          const isOverdue = billStatus === 'overdue';
-                          const isDueToday = billStatus === 'due_today';
-                          
-                          return (
+                        {paymentsForDate.map((payment) => (
+                          <GlassCard key={payment.id} padding={16} marginVertical={8}>
                             <TouchableOpacity
-                              key={bill.id}
-                              style={[
-                                styles.calendarBillCard,
-                                isOverdue && styles.calendarBillCardOverdue,
-                                isDueToday && styles.calendarBillCardDueToday,
-                              ]}
-                              onPress={() => handleBillPress(bill)}
+                              onPress={() => handlePaymentPress(payment)}
+                              activeOpacity={0.7}
                             >
-                              <View style={styles.calendarBillLeft}>
-                                <View style={[styles.calendarBillIcon, { backgroundColor: bill.color + '20' }]}>
-                                  <Ionicons name={bill.icon as any || 'receipt-outline'} size={20} color={bill.color} />
+                              <View style={styles.calendarPaymentCard}>
+                                <View style={styles.calendarPaymentLeft}>
+                                  <View style={[styles.calendarPaymentIcon, { backgroundColor: (payment.color || '#F59E0B') + '15' }]}>
+                                    <Ionicons name={(payment.icon as any) || 'receipt-outline'} size={20} color={payment.color || '#F59E0B'} />
+                                  </View>
+                                  <View style={styles.calendarPaymentInfo}>
+                                    <Text style={styles.calendarPaymentTitle}>{payment.title}</Text>
+                                    <View style={styles.calendarPaymentMeta}>
+                                      <View style={[styles.sourceBadge, { backgroundColor: getStatusColor(payment.status) + '15' }]}>
+                                        <Text style={[styles.sourceBadgeText, { color: getStatusColor(payment.status) }]}>
+                                          {getSourceTypeLabel(payment.source_type)}
+                                        </Text>
+                                      </View>
+                                      <Text style={styles.calendarPaymentStatus}>
+                                        {getStatusText(payment.status)}
+                                      </Text>
+                                    </View>
+                                  </View>
                                 </View>
-                                <View style={styles.calendarBillInfo}>
-                                  <Text style={styles.calendarBillTitle}>{bill.title}</Text>
-                                  {bill.payment_number && (
-                                    <Text style={styles.calendarBillNumber}>Payment #{bill.payment_number}</Text>
-                                  )}
-                                  {bill.principal_amount && bill.interest_amount && bill.interest_amount > 0 && (
-                                    <Text style={styles.calendarBillBreakdown}>
-                                      {formatCurrency(bill.principal_amount)} principal + {formatCurrency(bill.interest_amount)} interest
-                                    </Text>
-                                  )}
-                                  <Text style={[
-                                    styles.calendarBillStatus,
-                                    isOverdue && styles.calendarBillStatusOverdue,
-                                    isDueToday && styles.calendarBillStatusDueToday,
-                                  ]}>
-                                    {isOverdue ? '⚠️ Overdue' : isDueToday ? 'Due Today' : 'Upcoming'}
+                                <View style={styles.calendarPaymentRight}>
+                                  <Text style={styles.calendarPaymentAmount}>
+                                    {payment.amount ? formatCurrency(payment.amount) : 'Variable'}
                                   </Text>
                                 </View>
-                              </View>
-                              <View style={styles.calendarBillRight}>
-                                <Text style={styles.calendarBillAmount}>{formatCurrency(bill.amount || 0)}</Text>
-                                <TouchableOpacity
-                                  style={[styles.calendarPayButton, isOverdue && styles.calendarPayButtonOverdue]}
-                                  onPress={(e) => {
-                                    e.stopPropagation();
-                                    handleBillPress(bill);
-                                  }}
-                                >
-                                  <Text style={[styles.calendarPayButtonText, isOverdue && styles.calendarPayButtonTextOverdue]}>
-                                    Pay
-                                  </Text>
-                                </TouchableOpacity>
                               </View>
                             </TouchableOpacity>
-                          );
-                        })}
+                          </GlassCard>
+                        ))}
                       </View>
                     );
                   })()}
@@ -503,542 +688,664 @@ export default function BillsScreen() {
             </View>
           )}
 
-          {/* Bills List */}
+          {/* List View */}
           {viewMode === 'list' && (
-            <View style={styles.billsList}>
-              {loading ? (
-                <View style={styles.loadingContainer}>
-                  <Text style={styles.loadingText}>Loading bills...</Text>
-                </View>
-              ) : (
-                <FlatList
-                  data={filteredBills}
-                  keyExtractor={(item) => item.id}
-                  renderItem={({ item }) => (
-                    <TouchableOpacity 
-                      style={styles.billItem}
-                      onPress={() => handleBillPress(item)}
+            <View style={styles.paymentsList}>
+              {filteredPayments.length === 0 ? (
+                <GlassCard padding={48} marginVertical={24}>
+                  <View style={styles.emptyStateContent}>
+                    <Ionicons name="receipt-outline" size={48} color="rgba(0, 0, 0, 0.4)" />
+                    <Text style={styles.emptyText}>No upcoming payments</Text>
+                    <Text style={styles.emptySubtext}>
+                      Your upcoming payments will appear here
+                    </Text>
+                    <TouchableOpacity
+                      style={styles.emptyActionButton}
+                      onPress={() => router.push('/modals/add-scheduled-payment' as any)}
                     >
-                      <View style={styles.billHeader}>
-                        <View style={[styles.billIcon, { backgroundColor: item.color + '20' }]}>
-                          <Ionicons name={item.icon as any} size={24} color={item.color} />
-                        </View>
-                        <View style={styles.billInfo}>
-                          <Text style={styles.billTitle}>{item.title}</Text>
-                          <Text style={styles.billCategory}>{getCategoryName(item.category_id)}</Text>
-                          <Text style={styles.billDueDate}>Due: {formatDate(item.due_date)}</Text>
-                        </View>
-                        <View style={styles.billAmount}>
-                          <Text style={styles.amountText}>
-                            {item.amount ? formatCurrency(item.amount) : 'Variable'}
-                          </Text>
-                          <View style={[styles.statusBadge, { backgroundColor: getStatusColor(calculateBillStatus(item)) + '20' }]}>
-                            <Text style={[styles.statusText, { color: getStatusColor(calculateBillStatus(item)) }]}>
-                              {getStatusText(calculateBillStatus(item))}
-                            </Text>
-                          </View>
-                        </View>
-                      </View>
-                      
-                      {calculateBillStatus(item) !== 'paid' && calculateBillStatus(item) !== 'cancelled' && (
-                        <View style={styles.billActions}>
-                          <TouchableOpacity 
-                            style={[styles.actionButton, { backgroundColor: '#10B981' }]}
-                            onPress={(e) => {
-                              e.stopPropagation();
-                              handleBillPress(item);
-                            }}
-                          >
-                            <Ionicons name="checkmark" size={16} color="white" />
-                            <Text style={styles.actionText}>Pay Bill</Text>
-                          </TouchableOpacity>
-                        </View>
-                      )}
+                      <Ionicons name="add" size={20} color="#000000" />
+                      <Text style={styles.emptyActionText}>Schedule Payment</Text>
                     </TouchableOpacity>
-                  )}
-                  scrollEnabled={false}
-                  showsVerticalScrollIndicator={false}
-                  ListEmptyComponent={
-                    <View style={styles.emptyContainer}>
-                      <Ionicons name="receipt-outline" size={48} color="#9CA3AF" />
-                      <Text style={styles.emptyText}>
-                        {selectedFilter === 'all' ? 'No bills found' : `No ${selectedFilter} bills`}
-                      </Text>
-                      <Text style={styles.emptySubtext}>
-                        {selectedFilter === 'all' ? 'Add your first bill to get started' : 'Try a different filter'}
-                      </Text>
-                      {selectedFilter === 'all' && (
-                        <TouchableOpacity
-                          style={styles.createFirstButton}
-                          onPress={() => router.push('/modals/add-bill' as any)}
-                        >
-                          <Text style={styles.createFirstButtonText}>Add Bill</Text>
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                  }
-                />
+                  </View>
+                </GlassCard>
+              ) : (
+                <>
+                  {/* Grouped by Date */}
+                  {paymentsByDate.sortedDates.map((date) => {
+                    const datePayments = paymentsByDate.grouped[date];
+                    if (datePayments.length === 0) return null;
+
+                    return (
+                      <View key={date} style={styles.dateGroup}>
+                        <View style={styles.dateGroupHeader}>
+                          <Text style={styles.dateGroupTitle}>{formatDate(date)}</Text>
+                          <Text style={styles.dateGroupTotal}>
+                            {formatCurrency(datePayments.reduce((sum, p) => sum + (p.amount || 0), 0))}
+                          </Text>
+                        </View>
+                        
+                        {datePayments
+                          .filter(p => {
+                            if (selectedFilter !== 'all' && p.status !== selectedFilter) return false;
+                            if (selectedSourceTypes.length > 0 && !selectedSourceTypes.includes(p.source_type)) return false;
+                            return true;
+                          })
+                          .map((payment) => {
+                            const isOverdue = payment.status === 'overdue';
+                            const isDueToday = payment.status === 'due_today';
+                            const isPaid = payment.status === 'paid';
+
+                            return (
+                              <TouchableOpacity
+                                key={payment.id}
+                                onPress={() => handlePaymentPress(payment)}
+                                activeOpacity={0.7}
+                              >
+                                <GlassCard padding={20} marginVertical={8}>
+                                  <View style={styles.paymentCardContent}>
+                                    {/* Header */}
+                                    <View style={styles.paymentHeader}>
+                                      <View style={styles.paymentIconContainer}>
+                                        <Ionicons 
+                                          name={(payment.icon || 'receipt-outline') as any} 
+                                          size={24} 
+                                          color={payment.color || '#F59E0B'} 
+                                        />
+                                      </View>
+                                      <View style={styles.paymentInfo}>
+                                        <Text style={styles.paymentTitle}>{payment.title}</Text>
+                                        <View style={styles.paymentMeta}>
+                                          <View style={[styles.sourceBadge, { backgroundColor: getStatusColor(payment.status) + '15' }]}>
+                                            <Text style={[styles.sourceBadgeText, { color: getStatusColor(payment.status) }]}>
+                                              {getSourceTypeLabel(payment.source_type)}
+                                            </Text>
+                                          </View>
+                                          {payment.category_name && (
+                                            <Text style={styles.paymentCategory}>{payment.category_name}</Text>
+                                          )}
+                                        </View>
+                                      </View>
+                                      <View style={styles.paymentHeaderRight}>
+                                        <View style={[styles.statusBadge, { backgroundColor: getStatusColor(payment.status) + '15' }]}>
+                                          <Text style={[styles.statusText, { color: getStatusColor(payment.status) }]}>
+                                            {getStatusText(payment.status)}
+                                          </Text>
+                                        </View>
+                                        <TouchableOpacity
+                                          style={styles.moreButton}
+                                          onPress={(e) => handleMoreOptions(payment, e)}
+                                          activeOpacity={0.7}
+                                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                                        >
+                                          <Ionicons name="ellipsis-horizontal" size={20} color="rgba(0, 0, 0, 0.6)" />
+                                        </TouchableOpacity>
+                                      </View>
+                                    </View>
+
+                                    {/* Amount and Account */}
+                                    <View style={styles.paymentAmounts}>
+                                      <View style={styles.amountSection}>
+                                        <Text style={styles.amountLabel}>Amount</Text>
+                                        <Text style={styles.amountValue}>
+                                          {payment.amount ? formatCurrency(payment.amount) : 'Variable'}
+                                        </Text>
+                                      </View>
+                                      {payment.account_name && (
+                                        <View style={styles.amountSection}>
+                                          <Text style={styles.amountLabel}>Account</Text>
+                                          <Text style={styles.amountValue}>{payment.account_name}</Text>
+                                        </View>
+                                      )}
+                                    </View>
+
+                                    {/* Footer */}
+                                    <View style={styles.paymentFooter}>
+                                      <View style={styles.footerItem}>
+                                        <Ionicons name="calendar-outline" size={16} color="rgba(0, 0, 0, 0.5)" />
+                                        <Text style={styles.footerText}>
+                                          Due {formatDate(payment.due_date)}
+                                        </Text>
+                                      </View>
+                                      {!isPaid && payment.days_until !== undefined && (
+                                        <View style={[
+                                          styles.dueBadge,
+                                          (payment.days_until <= 7 || isOverdue) && styles.dueBadgeUrgent
+                                        ]}>
+                                          <Text style={[
+                                            styles.dueBadgeText,
+                                            (payment.days_until <= 7 || isOverdue) && styles.dueBadgeTextUrgent
+                                          ]}>
+                                            {isOverdue ? `Overdue ${Math.abs(payment.days_until)}d` : 
+                                             payment.days_until === 0 ? 'Due today' : 
+                                             `${payment.days_until} days`}
+                                          </Text>
+                                        </View>
+                                      )}
+                                    </View>
+
+                                    {/* Quick Pay Button */}
+                                    {!isPaid && (
+                                      <TouchableOpacity
+                                        style={styles.quickPayButton}
+                                        onPress={() => handlePayPayment(payment)}
+                                        activeOpacity={0.7}
+                                      >
+                                        <Ionicons name="cash-outline" size={18} color="#FFFFFF" />
+                                        <Text style={styles.quickPayButtonText}>Pay Now</Text>
+                                      </TouchableOpacity>
+                                    )}
+                                  </View>
+                                </GlassCard>
+                              </TouchableOpacity>
+                            );
+                          })}
+                      </View>
+                    );
+                  })}
+                </>
               )}
             </View>
           )}
-
-          {/* Quick Actions */}
-          {viewMode === 'list' && (
-            <View style={styles.quickActions}>
-              <TouchableOpacity 
-                style={styles.actionButton}
-                onPress={() => router.push('/modals/add-bill' as any)}
-              >
-                <Ionicons name="add-circle" size={24} color="#10B981" />
-                <Text style={styles.actionText}>Add Bill</Text>
-              </TouchableOpacity>
-              <TouchableOpacity 
-                style={styles.actionButton}
-                onPress={() => router.push('/categories' as any)}
-              >
-                <Ionicons name="folder" size={24} color="#3B82F6" />
-                <Text style={styles.actionText}>Categories</Text>
-              </TouchableOpacity>
-            </View>
-          )}
         </ScrollView>
-      </SafeAreaView>
+      </View>
 
-      {/* Pay Bill Modal */}
-      <PayBillModal
-        visible={showPayBillModal}
-        bill={selectedBill}
+      {/* Action Sheet */}
+      <ActionSheet
+        visible={showActionSheet}
         onClose={() => {
-          setShowPayBillModal(false);
-          setSelectedBill(null);
+          setShowActionSheet(false);
+          setSelectedPayment(null);
         }}
-        onSuccess={() => {
-          setShowPayBillModal(false);
-          setSelectedBill(null);
-          globalRefresh();
-          // Reload bills for calendar
-          if (viewMode === 'calendar' && user) {
-            fetchBills(user.id).then(billsData => {
-              const billsWithStatus = billsData.map(bill => ({
-                ...bill,
-                status: calculateBillStatus(bill),
-              }));
-              setAllBills(billsWithStatus);
-            });
-          }
-        }}
+        items={selectedPayment ? getActionSheetItems(selectedPayment) : []}
+        title={selectedPayment?.title}
       />
-    </LinearGradient>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
-  scrollView: {
+  container: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
+  scrollContent: {
     paddingHorizontal: 20,
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingTop: 20,
-    paddingBottom: 30,
-  },
-  headerTitle: {
-    fontSize: 24,
-    color: 'white',
-    fontWeight: 'bold',
-  },
-  addButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 12,
-  },
-  filterContainer: {
-    marginBottom: 20,
-  },
-  filterContent: {
-    paddingRight: 20,
-  },
-  filterButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    marginRight: 12,
-  },
-  activeFilterButton: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-  },
-  filterText: {
-    color: 'rgba(255, 255, 255, 0.7)',
-    fontSize: 14,
-    fontWeight: '500',
-    marginRight: 8,
-  },
-  activeFilterText: {
-    color: '#10B981',
-  },
-  filterCount: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 10,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-  },
-  activeFilterCount: {
-    backgroundColor: '#10B981',
-  },
-  filterCountText: {
-    color: 'rgba(255, 255, 255, 0.7)',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  activeFilterCountText: {
-    color: 'white',
-  },
-  summaryCards: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 30,
-  },
-  summaryCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    flex: 1,
-    marginHorizontal: 8,
-    alignItems: 'center',
-  },
-  summaryLabel: {
-    fontSize: 14,
-    color: '#9CA3AF',
-    marginBottom: 8,
-  },
-  summaryAmount: {
-    fontSize: 20,
-    color: 'white',
-    fontWeight: 'bold',
-  },
-  billsList: {
-    marginBottom: 30,
-  },
-  billItem: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 16,
-  },
-  billHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  billIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  billInfo: {
-    flex: 1,
-  },
-  billTitle: {
-    fontSize: 16,
-    color: 'white',
-    fontWeight: 'bold',
-    marginBottom: 4,
-  },
-  billCategory: {
-    fontSize: 12,
-    color: '#9CA3AF',
-    marginBottom: 2,
-  },
-  billDueDate: {
-    fontSize: 12,
-    color: '#6B7280',
-  },
-  billAmount: {
-    alignItems: 'flex-end',
-  },
-  amountText: {
-    fontSize: 18,
-    color: 'white',
-    fontWeight: 'bold',
-    marginBottom: 8,
-  },
-  statusBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  statusText: {
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  billActions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  actionButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 8,
-    flex: 1,
-    marginHorizontal: 4,
-    justifyContent: 'center',
-  },
-  actionText: {
-    color: 'white',
-    marginLeft: 4,
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
-  quickActions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 20,
-  },
-  emptyContainer: {
-    alignItems: 'center',
-    paddingVertical: 48,
-  },
-  emptyText: {
-    fontSize: 16,
-    color: '#9CA3AF',
-    fontWeight: '500',
-    marginTop: 16,
-  },
-  emptySubtext: {
-    fontSize: 14,
-    color: '#6B7280',
-    marginTop: 4,
+    paddingBottom: 32,
   },
   loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
-    paddingVertical: 48,
+    gap: 16,
   },
   loadingText: {
     fontSize: 16,
-    color: '#9CA3AF',
-    fontWeight: '500',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
   },
-  createFirstButton: {
-    backgroundColor: '#10B981',
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 12,
-    marginTop: 16,
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 16,
+    paddingBottom: 8,
   },
-  createFirstButtonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
+  pageTitle: {
+    fontSize: 32,
+    fontFamily: 'HelveticaNeue-Bold',
+    fontWeight: '700',
+    color: '#000000',
+    letterSpacing: -0.5,
   },
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
-  },
-  viewToggle: {
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    borderRadius: 12,
-    padding: 8,
-  },
-  viewModeContainer: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 4,
-    marginHorizontal: 20,
-    marginBottom: 20,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
-  },
-  viewModeButton: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 8,
     gap: 8,
   },
-  viewModeButtonActive: {
+  viewToggleButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#000000',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  viewTypeContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 12,
+  },
+  viewTypeButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  viewTypeButtonActive: {
+    backgroundColor: '#000000',
+  },
+  viewTypeText: {
+    fontSize: 14,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  viewTypeTextActive: {
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+  },
+  dateNavigation: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginLeft: 'auto',
+  },
+  todayButton: {
+    fontSize: 13,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: '#000000',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  summaryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 16,
+  },
+  summaryItem: {
+    flex: 1,
+    minWidth: '30%',
+  },
+  summaryLabel: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    marginBottom: 8,
+  },
+  summaryValue: {
+    fontSize: 20,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  summaryCount: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginTop: 4,
+  },
+  filterContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 8,
+    marginBottom: 12,
+  },
+  filterButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    gap: 6,
+  },
+  filterButtonActive: {
+    backgroundColor: '#000000',
+  },
+  filterText: {
+    fontSize: 13,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  filterTextActive: {
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+  },
+  filterBadge: {
+    backgroundColor: 'rgba(0, 0, 0, 0.1)',
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    minWidth: 20,
+    alignItems: 'center',
+  },
+  filterBadgeActive: {
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
   },
-  viewModeText: {
-    fontSize: 14,
+  filterBadgeText: {
+    fontSize: 11,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
-    color: 'rgba(255, 255, 255, 0.7)',
+    color: 'rgba(0, 0, 0, 0.6)',
   },
-  viewModeTextActive: {
+  filterBadgeTextActive: {
+    color: '#FFFFFF',
+  },
+  sourceTypeFilter: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 16,
+  },
+  sourceTypeLabel: {
+    fontSize: 13,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  sourceTypeButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  sourceTypeButtonActive: {
+    backgroundColor: '#000000',
+  },
+  sourceTypeText: {
+    fontSize: 12,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  sourceTypeTextActive: {
     color: '#FFFFFF',
   },
   calendarSection: {
-    paddingHorizontal: 20,
-    marginBottom: 20,
+    marginTop: 8,
   },
   calendar: {
     borderRadius: 16,
   },
   selectedDateSection: {
-    marginTop: 20,
-    marginBottom: 20,
-    paddingHorizontal: 20,
+    marginTop: 16,
   },
   selectedDateTitle: {
     fontSize: 20,
     fontFamily: 'HelveticaNeue-Bold',
-    fontWeight: 'bold',
-    color: '#FFFFFF',
+    fontWeight: '700',
+    color: '#000000',
     marginBottom: 16,
   },
-  dateSummary: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-  },
-  dateSummaryText: {
-    fontSize: 16,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#FFFFFF',
-  },
-  dateSummaryAmount: {
-    fontSize: 18,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#10B981',
-  },
-  emptyDateBills: {
+  emptyDatePayments: {
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 40,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderRadius: 12,
-  },
-  emptyDateBillsText: {
-    fontSize: 16,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(255, 255, 255, 0.7)',
-    marginTop: 12,
-  },
-  calendarBillCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(0, 0, 0, 0.1)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  calendarBillCardOverdue: {
-    borderColor: '#EF4444',
-    borderWidth: 2,
-    backgroundColor: 'rgba(239, 68, 68, 0.05)',
-  },
-  calendarBillCardDueToday: {
-    borderColor: '#F59E0B',
-    borderWidth: 2,
-    backgroundColor: 'rgba(245, 158, 11, 0.05)',
-  },
-  calendarBillLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
     gap: 12,
   },
-  calendarBillIcon: {
+  emptyDatePaymentsText: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+  },
+  calendarPaymentCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  calendarPaymentLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+  },
+  calendarPaymentIcon: {
     width: 40,
     height: 40,
-    borderRadius: 20,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  calendarBillInfo: {
+  calendarPaymentInfo: {
     flex: 1,
     gap: 4,
   },
-  calendarBillTitle: {
+  calendarPaymentTitle: {
     fontSize: 16,
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
     color: '#000000',
   },
-  calendarBillNumber: {
-    fontSize: 12,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
+  calendarPaymentMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
-  calendarBillBreakdown: {
+  calendarPaymentStatus: {
     fontSize: 12,
     fontFamily: 'InstrumentSerif-Regular',
     color: 'rgba(0, 0, 0, 0.5)',
-    marginTop: 2,
   },
-  calendarBillStatus: {
-    fontSize: 12,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#3B82F6',
-    marginTop: 4,
-  },
-  calendarBillStatusOverdue: {
-    color: '#EF4444',
-  },
-  calendarBillStatusDueToday: {
-    color: '#F59E0B',
-  },
-  calendarBillRight: {
+  calendarPaymentRight: {
     alignItems: 'flex-end',
-    gap: 8,
   },
-  calendarBillAmount: {
+  calendarPaymentAmount: {
     fontSize: 18,
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
     color: '#000000',
   },
-  calendarPayButton: {
-    backgroundColor: '#10B981',
+  paymentsList: {
+    marginTop: 8,
+  },
+  dateGroup: {
+    marginBottom: 24,
+  },
+  dateGroupHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+    paddingHorizontal: 4,
+  },
+  dateGroupTitle: {
+    fontSize: 18,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  dateGroupTotal: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  paymentCardContent: {
+    gap: 16,
+  },
+  paymentHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  paymentIconContainer: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  paymentInfo: {
+    flex: 1,
+  },
+  paymentTitle: {
+    fontSize: 18,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 4,
+  },
+  paymentMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  sourceBadge: {
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  sourceBadgeText: {
+    fontSize: 10,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+  },
+  paymentCategory: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+  },
+  paymentHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  statusBadge: {
     borderRadius: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
   },
-  calendarPayButtonOverdue: {
-    backgroundColor: '#EF4444',
+  statusText: {
+    fontSize: 11,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
   },
-  calendarPayButtonText: {
-    fontSize: 14,
+  moreButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  paymentAmounts: {
+    flexDirection: 'row',
+    gap: 16,
+  },
+  amountSection: {
+    flex: 1,
+  },
+  amountLabel: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginBottom: 4,
+  },
+  amountValue: {
+    fontSize: 18,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  paymentFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  footerItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  footerText: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  dueBadge: {
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  dueBadgeUrgent: {
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+  },
+  dueBadgeText: {
+    fontSize: 11,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  dueBadgeTextUrgent: {
+    color: '#EF4444',
+  },
+  quickPayButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#000000',
+    borderRadius: 12,
+    paddingVertical: 12,
+    marginTop: 8,
+  },
+  quickPayButtonText: {
+    fontSize: 15,
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
     color: '#FFFFFF',
   },
-  calendarPayButtonTextOverdue: {
+  emptyStateContent: {
+    alignItems: 'center',
+    gap: 16,
+  },
+  emptyText: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    textAlign: 'center',
+  },
+  emptySubtext: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  emptyActionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#000000',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 12,
+    marginTop: 8,
+  },
+  emptyActionText: {
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
     color: '#FFFFFF',
   },
 });

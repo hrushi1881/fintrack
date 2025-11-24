@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
@@ -24,12 +25,15 @@ import LiabilitySettlementModal from '@/app/modals/liability-settlement';
 import EditLiabilityScheduleModal from '@/app/modals/edit-liability-schedule';
 import EditLiabilityModal from '@/app/modals/edit-liability';
 import PayBillModal from '@/app/modals/pay-bill';
-import AddLiabilityBillModal from '@/app/modals/add-liability-bill';
+// AddLiabilityBillModal replaced with UnifiedPaymentModal
 import { checkLiabilitySettlementStatus } from '@/utils/liabilities';
 import GlassCard from '@/components/GlassCard';
 import { fetchLiabilitySchedules, LiabilitySchedule } from '@/utils/liabilitySchedules';
 import { fetchBills, calculateBillStatus } from '@/utils/bills';
 import { Bill } from '@/types';
+import LiabilityCycles from '@/components/cycles/LiabilityCycles';
+import UnifiedPaymentModal from '@/app/modals/unified-payment-modal';
+import { regenerateBillsFromCycles } from '@/utils/cycleBillGeneration';
 
 interface LiabilityPayment {
   id: string;
@@ -80,6 +84,7 @@ const LiabilityDetailScreen: React.FC = () => {
   const [activityLog, setActivityLog] = useState<LiabilityActivity[]>([]);
   const [schedules, setSchedules] = useState<LiabilitySchedule[]>([]);
   const [bills, setBills] = useState<Bill[]>([]);
+  const [billsRefreshKey, setBillsRefreshKey] = useState(0); // Force refresh trigger
   const [loading, setLoading] = useState(true);
   const [showDrawFunds, setShowDrawFunds] = useState(false);
   const [showPayModal, setShowPayModal] = useState(false);
@@ -90,13 +95,25 @@ const LiabilityDetailScreen: React.FC = () => {
   const [editingSchedule, setEditingSchedule] = useState<LiabilitySchedule | null>(null);
   const [selectedBill, setSelectedBill] = useState<Bill | null>(null);
   const [showPayBillModal, setShowPayBillModal] = useState(false);
-  const [showAddBillModal, setShowAddBillModal] = useState(false);
+  // showAddBillModal removed - using unified payment modal instead
+  const [showUnifiedPayModal, setShowUnifiedPayModal] = useState(false);
+  const [viewMode, setViewMode] = useState<'bills' | 'cycles'>('bills');
+  const [cyclesRefreshKey, setCyclesRefreshKey] = useState(0); // Force cycles refresh
 
   useEffect(() => {
     if (id && user) {
       loadLiability();
     }
   }, [id, user]);
+
+  // Refresh when screen comes into focus (e.g., after returning from payment modal)
+  useFocusEffect(
+    React.useCallback(() => {
+      if (id && user) {
+        loadLiability();
+      }
+    }, [id, user])
+  );
 
   const loadLiability = async () => {
     if (!id || !user) return;
@@ -152,12 +169,20 @@ const LiabilityDetailScreen: React.FC = () => {
         });
         // Filter bills for this liability
         const liabilityBills = billsData.filter(b => b.liability_id === id);
-        // Calculate status for each bill
-        const billsWithStatus = liabilityBills.map(bill => ({
-          ...bill,
-          status: calculateBillStatus(bill),
-        }));
+        // Calculate status for each bill (recalculate to ensure status is up-to-date)
+        const billsWithStatus = liabilityBills.map(bill => {
+          // Recalculate status to ensure it's current
+          const currentStatus = calculateBillStatus(bill);
+          return {
+            ...bill,
+            status: currentStatus,
+          };
+        });
+        // Sort by due date to ensure proper ordering for next payment calculation
+        billsWithStatus.sort((a, b) => new Date(a.due_date).getTime() - new Date(b.due_date).getTime());
         setBills(billsWithStatus);
+        // Trigger refresh key update to force useMemo recalculation
+        setBillsRefreshKey(prev => prev + 1);
       } catch (error) {
         console.error('Error fetching bills:', error);
         setBills([]);
@@ -204,9 +229,49 @@ const LiabilityDetailScreen: React.FC = () => {
     return paymentHistory.reduce((sum, payment) => sum + Number(payment.principal_component ?? 0), 0);
   }, [paymentHistory]);
 
+  // Calculate next payment due from bills (most accurate and updates dynamically)
+  const nextPaymentDue = useMemo(() => {
+    if (!bills || bills.length === 0) {
+      return liability?.next_due_date;
+    }
+
+    // Filter out paid, cancelled, and skipped bills
+    const upcomingBills = bills.filter(b => {
+      const status = b.status?.toLowerCase();
+      const isUpcoming = status !== 'paid' && status !== 'cancelled' && status !== 'skipped';
+      return isUpcoming;
+    });
+
+    if (upcomingBills.length === 0) {
+      return liability?.next_due_date;
+    }
+
+    // Sort by due date (earliest first)
+    const sortedBills = [...upcomingBills].sort((a, b) => {
+      const dateA = new Date(a.due_date).getTime();
+      const dateB = new Date(b.due_date).getTime();
+      return dateA - dateB;
+    });
+    
+    const nextDue = sortedBills[0]?.due_date || liability?.next_due_date;
+    
+    // Debug logging (remove in production if needed)
+    if (__DEV__) {
+      console.log('Next Payment Due Calculation:', {
+        totalBills: bills.length,
+        upcomingBills: upcomingBills.length,
+        nextDue,
+        billsStatuses: bills.map(b => ({ id: b.id, status: b.status, due_date: b.due_date })),
+      });
+    }
+    
+    return nextDue;
+  }, [bills, liability, billsRefreshKey]);
+
   const handlePayBill = (bill: Bill) => {
     setSelectedBill(bill);
-    setShowPayBillModal(true);
+    // Use unified payment modal instead
+    setShowUnifiedPayModal(true);
   };
 
   // No separate edit function - clicking bill opens pay modal which allows editing
@@ -333,6 +398,52 @@ const LiabilityDetailScreen: React.FC = () => {
     router.back();
   };
 
+  const handleGenerateBills = async () => {
+    if (!liability || !user) return;
+
+    // Check if liability has required fields for bill generation
+    if (!liability.periodical_payment || !liability.periodical_frequency || !liability.start_date) {
+      Alert.alert(
+        'Cannot Generate Bills',
+        'This liability is missing required payment information. Please edit the liability to add:\n\n• Payment amount\n• Payment frequency\n• Start date',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    try {
+      setLoading(true);
+      
+      const result = await regenerateBillsFromCycles(liability.id, user.id, {
+        deleteExisting: false, // Don't delete existing bills
+        maxCycles: 12, // Generate first 12 cycles
+      });
+
+      Alert.alert(
+        'Bills Generated',
+        `Successfully generated ${result.billsCreated} bills for this liability.`,
+        [
+          {
+            text: 'OK',
+            onPress: () => {
+              // Reload bills
+              loadLiability();
+            },
+          },
+        ]
+      );
+    } catch (error: any) {
+      console.error('Error generating bills:', error);
+      Alert.alert(
+        'Error',
+        error.message || 'Failed to generate bills. Please try again.',
+        [{ text: 'OK' }]
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
   if (loading) {
     return (
       <SafeAreaView style={styles.safeArea}>
@@ -420,7 +531,7 @@ const LiabilityDetailScreen: React.FC = () => {
             <GlassCard padding={20}>
               <Text style={styles.metricLabel}>Next Payment Due</Text>
               <Text style={styles.metricValue}>
-                {formatDate(liability.next_due_date)}
+                {formatDate(nextPaymentDue)}
               </Text>
             </GlassCard>
             <GlassCard padding={20}>
@@ -449,19 +560,17 @@ const LiabilityDetailScreen: React.FC = () => {
             </GlassCard>
           )}
 
-          {/* Payment History */}
-          <GlassCard padding={24} marginVertical={12}>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Payment History</Text>
-              {paymentHistory.length > 5 && (
-              <TouchableOpacity>
-                  <Text style={styles.sectionAction}>View All</Text>
-              </TouchableOpacity>
-              )}
-            </View>
-            {paymentHistory.length === 0 ? (
-              <Text style={styles.emptyText}>No payments recorded yet.</Text>
-            ) : (
+          {/* Payment History - Only show if there are payments */}
+          {paymentHistory.length > 0 && (
+            <GlassCard padding={24} marginVertical={12}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>Payment History</Text>
+                {paymentHistory.length > 5 && (
+                <TouchableOpacity>
+                    <Text style={styles.sectionAction}>View All</Text>
+                </TouchableOpacity>
+                )}
+              </View>
               <View style={styles.paymentList}>
                 {paymentHistory.slice(0, 5).map((payment) => (
                   <View key={payment.id} style={styles.paymentItem}>
@@ -483,8 +592,8 @@ const LiabilityDetailScreen: React.FC = () => {
           </View>
                 ))}
               </View>
-            )}
-          </GlassCard>
+            </GlassCard>
+          )}
 
           {/* Linked Accounts */}
           {allocations.length > 0 && (
@@ -516,27 +625,65 @@ const LiabilityDetailScreen: React.FC = () => {
             </GlassCard>
           )}
 
-          {/* Bills Section (New Payment System) */}
+          {/* Bills & Cycles Section */}
           <GlassCard padding={24} marginVertical={12}>
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>Payment Schedule</Text>
-              <TouchableOpacity 
-                style={styles.createBillButton}
-                onPress={() => setShowAddBillModal(true)}
-              >
-                <Ionicons name="add-circle-outline" size={20} color="#10B981" />
-                <Text style={styles.createBillButtonText}>Create Bill</Text>
-              </TouchableOpacity>
+              <View style={styles.headerActions}>
+                {/* View Mode Toggle */}
+                <View style={styles.viewModeToggle}>
+                  <TouchableOpacity
+                    style={[styles.viewModeButton, viewMode === 'bills' && styles.viewModeButtonActive]}
+                    onPress={() => setViewMode('bills')}
+                  >
+                    <Ionicons 
+                      name="receipt-outline" 
+                      size={18} 
+                      color={viewMode === 'bills' ? '#000000' : 'rgba(0, 0, 0, 0.5)'} 
+                    />
+                    <Text style={[styles.viewModeText, viewMode === 'bills' && styles.viewModeTextActive]}>
+                      Bills
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.viewModeButton, viewMode === 'cycles' && styles.viewModeButtonActive]}
+                    onPress={() => setViewMode('cycles')}
+                  >
+                    <Ionicons 
+                      name="calendar-outline" 
+                      size={18} 
+                      color={viewMode === 'cycles' ? '#000000' : 'rgba(0, 0, 0, 0.5)'} 
+                    />
+                    <Text style={[styles.viewModeText, viewMode === 'cycles' && styles.viewModeTextActive]}>
+                      Cycles
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
             </View>
-            <Text style={styles.sectionSubtitle}>
-              {bills.length > 0 
-                ? `${bills.filter(b => b.status !== 'paid' && b.status !== 'cancelled').length} upcoming bills`
-                : 'No bills yet. Create your first bill to start tracking payments.'
-              }
-            </Text>
-              
-              {/* Interest Summary */}
-              {bills.some(b => b.interest_amount && b.interest_amount > 0) && (
+            {viewMode === 'bills' ? (
+              <>
+                <View style={styles.billsHeaderRow}>
+                  <Text style={styles.sectionSubtitle}>
+                    {bills.length > 0 
+                      ? `${bills.filter(b => b.status !== 'paid' && b.status !== 'cancelled').length} upcoming bills`
+                      : '0 upcoming bills'
+                    }
+                  </Text>
+                  {bills.length === 0 && liability && liability.periodical_payment && liability.periodical_frequency && (
+                    <TouchableOpacity
+                      style={styles.generateBillsButton}
+                      onPress={handleGenerateBills}
+                      activeOpacity={0.7}
+                    >
+                      <Ionicons name="refresh-outline" size={18} color="#000000" />
+                      <Text style={styles.generateBillsButtonText}>Generate Bills</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+                  
+                {/* Interest Summary */}
+                {bills.some(b => b.interest_amount && b.interest_amount > 0) && (
                 <View style={styles.interestSummary}>
                   <View style={styles.interestItem}>
                     <Text style={styles.interestLabel}>Total Interest</Text>
@@ -571,7 +718,10 @@ const LiabilityDetailScreen: React.FC = () => {
                     <Text style={styles.emptyBillsSubtext}>Create your first bill to start tracking payments</Text>
                     <TouchableOpacity 
                       style={styles.createFirstBillButton}
-                      onPress={() => setShowAddBillModal(true)}
+                      onPress={() => {
+                        // Open unified payment modal for creating a bill
+                        setShowUnifiedPayModal(true);
+                      }}
                     >
                       <Ionicons name="add-circle" size={20} color="#FFFFFF" />
                       <Text style={styles.createFirstBillButtonText}>Create First Bill</Text>
@@ -698,7 +848,20 @@ const LiabilityDetailScreen: React.FC = () => {
                   <Ionicons name="chevron-forward" size={20} color="#000000" />
                 </TouchableOpacity>
               )}
-            </GlassCard>
+              </>
+            ) : (
+              /* Cycles View */
+              <View style={styles.cyclesContainer}>
+                {liability && (
+                  <LiabilityCycles 
+                    key={cyclesRefreshKey}
+                    liabilityId={liability.id}
+                    maxCycles={12}
+                  />
+                )}
+              </View>
+            )}
+          </GlassCard>
 
           {/* Recent Activity */}
           {activityLog.length > 0 && (
@@ -730,6 +893,17 @@ const LiabilityDetailScreen: React.FC = () => {
           <View style={{ height: 100 }} />
         </ScrollView>
 
+        {/* Floating Action Button for Create Bill */}
+        {viewMode === 'bills' && (
+          <TouchableOpacity
+            style={styles.fab}
+            onPress={() => setShowUnifiedPayModal(true)}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="add" size={24} color="#FFFFFF" />
+          </TouchableOpacity>
+        )}
+
         {/* Bottom Action Bar */}
         <View style={styles.bottomBar}>
           <TouchableOpacity
@@ -741,7 +915,10 @@ const LiabilityDetailScreen: React.FC = () => {
           </TouchableOpacity>
           <TouchableOpacity
             style={styles.primaryButton}
-            onPress={() => setShowPayModal(true)}
+            onPress={() => {
+              // Use unified payment modal
+              setShowUnifiedPayModal(true);
+            }}
           >
             <Text style={styles.primaryButtonText}>Make Payment</Text>
           </TouchableOpacity>
@@ -787,7 +964,27 @@ const LiabilityDetailScreen: React.FC = () => {
           }}
         />
 
-        {/* Pay/Edit Bill Modal (One modal for both) */}
+        {/* Unified Payment Modal */}
+        <UnifiedPaymentModal
+          visible={showUnifiedPayModal}
+          onClose={() => {
+            setShowUnifiedPayModal(false);
+            setSelectedBill(null);
+          }}
+          billId={selectedBill?.id}
+          liabilityId={liability?.id}
+          onSuccess={async () => {
+            setShowUnifiedPayModal(false);
+            setSelectedBill(null);
+            // Small delay to ensure database updates are committed
+            await new Promise(resolve => setTimeout(resolve, 300));
+            await loadLiability();
+            // Refresh cycles to update payment status
+            setCyclesRefreshKey(prev => prev + 1);
+          }}
+        />
+
+        {/* Legacy Pay Bill Modal (for backward compatibility) */}
         <PayBillModal
           visible={showPayBillModal}
           bill={selectedBill}
@@ -799,24 +996,12 @@ const LiabilityDetailScreen: React.FC = () => {
             setShowPayBillModal(false);
             setSelectedBill(null);
             loadLiability();
+            // Refresh cycles to update payment status
+            setCyclesRefreshKey(prev => prev + 1);
           }}
         />
 
-        {/* Add Liability Bill Modal */}
-        {liability && (
-          <AddLiabilityBillModal
-            visible={showAddBillModal}
-            liabilityId={liability.id}
-            liabilityName={liability.title}
-            liabilityStartDate={liability.start_date || ''}
-            liabilityEndDate={liability.targeted_payoff_date || undefined}
-            onClose={() => setShowAddBillModal(false)}
-            onSuccess={() => {
-              setShowAddBillModal(false);
-              loadLiability();
-            }}
-          />
-        )}
+        {/* Add Bill uses UnifiedPaymentModal - bills are created from cycles */}
       </View>
     </SafeAreaView>
   );
@@ -972,6 +1157,33 @@ const styles = StyleSheet.create({
     fontFamily: 'Poppins-Medium',
     fontWeight: '500',
     color: 'rgba(0, 0, 0, 0.6)',
+  },
+  sectionSubtitle: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    marginBottom: 16,
+  },
+  billsHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  generateBillsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  generateBillsButtonText: {
+    fontSize: 13,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
   },
   breakdownRow: {
     flexDirection: 'row',
@@ -1437,6 +1649,42 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#FFFFFF',
   },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  viewModeToggle: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 8,
+    padding: 2,
+  },
+  viewModeButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  viewModeButtonActive: {
+    backgroundColor: '#FFFFFF',
+  },
+  viewModeText: {
+    fontSize: 13,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.5)',
+  },
+  viewModeTextActive: {
+    color: '#000000',
+    fontWeight: '600',
+  },
+  cyclesContainer: {
+    marginTop: 12,
+    minHeight: 400,
+  },
   paidBillsSummary: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1452,6 +1700,23 @@ const styles = StyleSheet.create({
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
     color: '#10B981',
+  },
+  fab: {
+    position: 'absolute',
+    right: 20,
+    bottom: 100,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#10B981',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    zIndex: 1000,
   },
 });
 

@@ -9,10 +9,11 @@ import { useRealtimeData } from '@/hooks/useRealtimeData';
 interface BudgetCardProps {
   budget: Budget;
   onPress: () => void;
+  onMoreOptions?: (budget: Budget, event: any) => void;
   compact?: boolean;
 }
 
-export const BudgetCard: React.FC<BudgetCardProps> = ({ budget, onPress, compact = false }) => {
+export const BudgetCard: React.FC<BudgetCardProps> = ({ budget, onPress, onMoreOptions, compact = false }) => {
   const { currency } = useSettings();
   const { goals } = useRealtimeData();
   
@@ -107,8 +108,23 @@ export const BudgetCard: React.FC<BudgetCardProps> = ({ budget, onPress, compact
           <Ionicons name={typeInfo.icon as any} size={20} color={typeInfo.color} />
           <Text style={styles.title} numberOfLines={1}>{budget.name}</Text>
         </View>
+        <View style={styles.headerRight}>
         <View style={[styles.statusBadge, { backgroundColor: statusInfo.color }]}>
           <Text style={styles.statusText}>{statusInfo.status}</Text>
+          </View>
+          {onMoreOptions && (
+            <TouchableOpacity
+              style={styles.moreButton}
+              onPress={(e) => {
+                e?.stopPropagation?.();
+                onMoreOptions(budget, e);
+              }}
+              activeOpacity={0.7}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <Ionicons name="ellipsis-horizontal" size={18} color="rgba(0, 0, 0, 0.6)" />
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
@@ -199,6 +215,19 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 12,
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  moreButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
   },
   compactHeader: {
     flexDirection: 'row',

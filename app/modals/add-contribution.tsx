@@ -1,16 +1,23 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, TextInput, Modal, Alert } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, TextInput, Modal, Alert, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useNotification } from '@/contexts/NotificationContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import InlineAccountSelector from '@/components/InlineAccountSelector';
-import { checkMilestoneAchievements, checkGoalCompletion } from '@/utils/goals';
-import { createCategory } from '@/utils/categories';
+import FundPicker, { FundBucket } from '@/components/FundPicker';
+import { 
+  addContributionToGoal,
+  checkMilestoneAchievements, 
+  checkGoalCompletion,
+  validateContributionData,
+  getGoalAccounts,
+  getLinkedAccountsForGoal,
+} from '@/utils/goals';
 import { formatCurrencyAmount } from '@/utils/currency';
 import { Goal, Account } from '@/types';
-import { supabase } from '@/lib/supabase';
 
 interface AddContributionModalProps {
   visible: boolean;
@@ -28,81 +35,257 @@ export default function AddContributionModal({
   const { user } = useAuth();
   const { currency } = useSettings();
   const { showNotification } = useNotification();
-  const { accounts, refreshGoals, refreshAccounts, refreshTransactions, globalRefresh } = useRealtimeData();
+  const { accounts, globalRefresh, refreshAccounts } = useRealtimeData();
   
   const [amount, setAmount] = useState('');
   const [sourceAccountId, setSourceAccountId] = useState('');
   const [destinationAccountId, setDestinationAccountId] = useState('');
   const [description, setDescription] = useState('');
+  const [date, setDate] = useState(new Date());
+  const [showDatePicker, setShowDatePicker] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [showFundPicker, setShowFundPicker] = useState(false);
+  const [selectedFundBucket, setSelectedFundBucket] = useState<FundBucket | null>(null);
+  const [goalAccounts, setGoalAccounts] = useState<Array<{ account: Account; balance: number }>>([]);
+  const [loadingGoalAccounts, setLoadingGoalAccounts] = useState(false);
+  const [linkedAccounts, setLinkedAccounts] = useState<Account[]>([]);
+  const [loadingLinkedAccounts, setLoadingLinkedAccounts] = useState(false);
 
-  // Filter accounts - exclude liability and Goals Savings accounts from transactions
-  // Goals Savings account is only for displaying aggregate statistics
-  // For currency matching: prefer matching currency, but show all if none match
+  // Source accounts: ALL accounts (except inactive ones) - user can contribute from any account
+  // Prioritize accounts that have goal funds for this goal or are linked
+  // Then include all other accounts
   const sourceAccounts = useMemo(() => {
     if (!accounts || accounts.length === 0) {
       console.log('⚠️ add-contribution: No accounts available');
       return [];
     }
-    if (!goal) {
-      console.log('⚠️ add-contribution: No goal provided');
-      return [];
-    }
     
-    const filtered = accounts.filter(
-      (account) => 
-        account.type !== 'liability' && 
-        account.type !== 'goals_savings' &&
-        (account.is_active === true || account.is_active === undefined || account.is_active === null)
-    );
+    const accountMap = new Map<string, Account & { hasGoalFunds?: boolean; isLinked?: boolean }>();
     
-    // Filter by currency if goal has currency, otherwise show all
-    const currencyMatched = goal.currency 
-      ? filtered.filter((acc) => acc.currency === goal.currency)
-      : filtered;
-
-    // If no currency matches, show all filtered accounts (user can still select)
-    const result = currencyMatched.length > 0 ? currencyMatched : filtered;
+    // First priority: Accounts that have goal funds for this goal (these are the accounts shown in Goal Funds Breakdown)
+    goalAccounts.forEach(({ account }) => {
+      // Include ALL active accounts (no type restrictions) - user can contribute from any account
+      if (
+        (account.is_active === true || account.is_active === undefined || account.is_active === null) &&
+        account.currency // Ensure currency exists
+      ) {
+        accountMap.set(account.id, { 
+          ...account as Account,
+          hasGoalFunds: true,
+          isLinked: false
+        });
+      }
+    });
     
-    console.log('✅ add-contribution sourceAccounts:', result.length, 'from', accounts.length, 'total (goal currency:', goal.currency, ')');
-    return result;
-  }, [accounts, goal]);
+    // Second priority: Linked accounts (accounts linked to the goal via goal_accounts)
+    linkedAccounts.forEach((account) => {
+      // Include ALL active accounts (no type restrictions) - user can contribute from any account
+      if (
+        (account.is_active === true || account.is_active === undefined || account.is_active === null) &&
+        account.currency // Ensure currency exists
+      ) {
+        // Don't override if account already in map (from goalAccounts)
+        if (!accountMap.has(account.id)) {
+          accountMap.set(account.id, { 
+            ...account as Account,
+            hasGoalFunds: false,
+            isLinked: true
+          });
+        } else {
+          // Mark as linked if it's already in map from goalAccounts
+          const existing = accountMap.get(account.id)!;
+          accountMap.set(account.id, { ...existing, isLinked: true });
+        }
+      }
+    });
+    
+    // Third priority: ALL other accounts (no type restrictions) - user can contribute from any account
+    accounts.forEach((account) => {
+      const acc = account as Account;
+      // Include ALL active accounts with currency - user can contribute from any account type
+      // (liability accounts, goals_savings accounts, etc. are all allowed)
+      // The only restriction is fund type: goal funds cannot be used for contributions (enforced by FundPicker)
+      if (
+        (acc.is_active === true || acc.is_active === undefined || acc.is_active === null) &&
+        acc.currency // Ensure currency exists
+      ) {
+        // Only add if not already in map (prioritized accounts already added)
+        if (!accountMap.has(acc.id)) {
+          accountMap.set(acc.id, { 
+            ...acc,
+            hasGoalFunds: false,
+            isLinked: false
+          });
+        }
+      }
+    });
+    
+    // Convert to array and sort: accounts with goal funds first, then linked accounts, then others
+    const result = Array.from(accountMap.values());
+    result.sort((a, b) => {
+      // Accounts with goal funds come first
+      if (a.hasGoalFunds && !b.hasGoalFunds) return -1;
+      if (!a.hasGoalFunds && b.hasGoalFunds) return 1;
+      // Linked accounts come second
+      if (a.isLinked && !b.isLinked) return -1;
+      if (!a.isLinked && b.isLinked) return 1;
+      // Otherwise alphabetical
+      return a.name.localeCompare(b.name);
+    });
+    
+    console.log('✅ add-contribution sourceAccounts:', result.length, 'total (prioritized: goal funds:', goalAccounts.length, 'linked:', linkedAccounts.length, ')');
+    return result as Account[];
+  }, [accounts, goalAccounts, linkedAccounts]);
   
+  // Destination accounts: ONLY show accounts that are linked to the goal OR have goal funds for this goal
+  // These are the accounts selected by users while creating the goal + accounts that have funds in them
+  // Do NOT show all accounts - only show relevant accounts for this specific goal
   const destinationAccounts = useMemo(() => {
-    if (!accounts || accounts.length === 0) {
-      console.log('⚠️ add-contribution: No accounts available for destination');
-      return [];
-    }
     if (!goal) {
       console.log('⚠️ add-contribution: No goal provided for destination');
       return [];
     }
     
-    const filtered = accounts.filter(
-      (account) => 
-        account.type !== 'liability' && 
-        account.type !== 'goals_savings' &&
-        (account.is_active === true || account.is_active === undefined || account.is_active === null)
-    );
+    // Use goal's currency - accounts with goal funds MUST match goal currency
+    // Linked accounts should also match goal currency (they were selected for this goal)
+    const targetCurrency = goal.currency || currency || 'INR';
     
-    // Filter by currency if goal has currency, otherwise show all
-    const currencyMatched = goal.currency 
-      ? filtered.filter((acc) => acc.currency === goal.currency)
-      : filtered;
+    const accountMap = new Map<string, Account & { goalFundBalance?: number; isLinked?: boolean }>();
     
-    // If no currency matches, show all filtered accounts (user can still select)
-    const result = currencyMatched.length > 0 ? currencyMatched : filtered;
+    // First priority: Add accounts that have goal funds for this goal (accounts shown in "Goal Funds Breakdown")
+    // These accounts MUST appear in "Account to Stay In" because they already hold funds for this goal
+    // DO NOT filter by currency here - if account has goal funds, it's valid for this goal
+    goalAccounts.forEach(({ account, balance }) => {
+      const acc = account as Account;
+      // Only exclude liability/goals_savings and inactive accounts
+      // Currency check not needed - if it has goal funds, it's valid
+      if (
+        acc.type !== 'liability' &&
+        acc.type !== 'goals_savings' &&
+        (acc.is_active === true || acc.is_active === undefined || acc.is_active === null)
+      ) {
+        accountMap.set(acc.id, {
+          ...acc,
+          goalFundBalance: balance,
+          isLinked: false, // Will be updated below if also linked
+        } as Account & { goalFundBalance?: number; isLinked?: boolean });
+      }
+    });
     
-    console.log('✅ add-contribution destinationAccounts:', result.length, 'from', accounts.length, 'total (goal currency:', goal.currency, ')');
-    return result;
-  }, [accounts, goal]);
-
-  // Refresh accounts when modal opens
-  useEffect(() => {
-    if (visible) {
-      refreshAccounts();
+    // Second priority: Add linked accounts (accounts selected by user when creating the goal)
+    // These accounts were explicitly chosen to store goal funds
+    // Filter by goal currency to ensure compatibility
+    if (linkedAccounts && linkedAccounts.length > 0) {
+      linkedAccounts.forEach((acc) => {
+        // Filter by goal currency - linked accounts should match goal currency
+        if (
+          acc.type !== 'liability' &&
+          acc.type !== 'goals_savings' &&
+          (acc.is_active === true || acc.is_active === undefined || acc.is_active === null) &&
+          acc.currency === targetCurrency
+        ) {
+          if (accountMap.has(acc.id)) {
+            // Account already in map from goalAccounts - mark as linked
+            const existing = accountMap.get(acc.id)!;
+            accountMap.set(acc.id, { ...existing, isLinked: true });
+          } else {
+            // Account not in map - add it as linked account
+            // Get goal fund balance if it exists for this account
+            const goalAccount = goalAccounts.find(ga => ga.account.id === acc.id);
+            accountMap.set(acc.id, {
+              ...acc,
+              goalFundBalance: goalAccount?.balance ?? 0,
+              isLinked: true,
+            } as Account & { goalFundBalance?: number; isLinked?: boolean });
+          }
+        }
+      });
     }
-  }, [visible, refreshAccounts]);
+    
+    const result = Array.from(accountMap.values());
+    
+    // Sort: linked accounts with funds first, then linked accounts without funds, then accounts with funds (not linked), then others
+    result.sort((a, b) => {
+      const aHasFunds = (a.goalFundBalance ?? 0) > 0;
+      const bHasFunds = (b.goalFundBalance ?? 0) > 0;
+      const aIsLinked = a.isLinked ?? false;
+      const bIsLinked = b.isLinked ?? false;
+      
+      // Linked with funds > Linked without funds > Non-linked with funds > Non-linked without funds
+      if (aIsLinked && aHasFunds && !(bIsLinked && bHasFunds)) return -1;
+      if (bIsLinked && bHasFunds && !(aIsLinked && aHasFunds)) return 1;
+      if (aIsLinked && !bIsLinked) return -1;
+      if (bIsLinked && !aIsLinked) return 1;
+      if (aHasFunds && !bHasFunds) return -1;
+      if (bHasFunds && !aHasFunds) return 1;
+      return a.name.localeCompare(b.name);
+    });
+    
+    console.log('✅ add-contribution destinationAccounts:', result.length, '(ONLY linked accounts + accounts with goal funds. Linked:', linkedAccounts?.length || 0, 'with funds:', goalAccounts.length, ')');
+    console.log('   - Accounts with funds:', goalAccounts.map(ga => `${ga.account.name} (${ga.account.currency})`).join(', '));
+    console.log('   - Linked accounts:', linkedAccounts.map(la => `${la.name} (${la.currency})`).join(', '));
+    console.log('   - Goal currency:', targetCurrency);
+    return result;
+  }, [linkedAccounts, goal, goalAccounts, currency]);
+
+  // Fetch accounts with existing goal funds for this goal
+  const fetchGoalAccounts = async () => {
+    if (!goal) return;
+    
+    try {
+      setLoadingGoalAccounts(true);
+      const accountsWithFunds = await getGoalAccounts(goal.id, true);
+      setGoalAccounts(accountsWithFunds);
+      console.log(`📊 Add Contribution: Fetched ${accountsWithFunds.length} account(s) with existing goal funds for "${goal.title}"`);
+      accountsWithFunds.forEach(ga => {
+        console.log(`   - ${ga.account.name}: ${ga.balance} ${ga.account.currency}`);
+      });
+    } catch (error) {
+      console.error('Error fetching goal accounts:', error);
+      // Don't show alert - just log error, modal can still work without this info
+    } finally {
+      setLoadingGoalAccounts(false);
+    }
+  };
+
+  // Fetch linked accounts for the goal
+  const fetchLinkedAccounts = async () => {
+    if (!goal) return;
+    
+    try {
+      setLoadingLinkedAccounts(true);
+      const accounts = await getLinkedAccountsForGoal(goal.id);
+      setLinkedAccounts(accounts);
+      console.log(`📊 Add Contribution: Fetched ${accounts.length} linked account(s) for "${goal.title}"`);
+      accounts.forEach(acc => {
+        console.log(`   - ${acc.name} (${acc.currency})`);
+      });
+    } catch (error) {
+      console.error('Error fetching linked accounts:', error);
+      // Don't show alert - just log error, modal can still work without this info
+    } finally {
+      setLoadingLinkedAccounts(false);
+    }
+  };
+
+  // Refresh accounts and fetch goal accounts when modal opens
+  useEffect(() => {
+    if (visible && goal) {
+      refreshAccounts();
+      // Fetch goal-specific accounts (accounts with funds + linked accounts)
+      // These are critical for destination accounts
+      fetchGoalAccounts();
+      fetchLinkedAccounts();
+    } else if (!visible) {
+      // Reset state when modal closes
+      setGoalAccounts([]);
+      setLinkedAccounts([]);
+      setSourceAccountId('');
+      setDestinationAccountId('');
+      setSelectedFundBucket(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, goal?.id]); // Only re-run when modal visibility or goal ID changes
 
   // Initialize accounts when modal opens
   useEffect(() => {
@@ -148,121 +331,43 @@ export default function AddContributionModal({
       return;
     }
 
-    // Allow same account - user can save goal funds in the same account they're paying from
+    if (!selectedFundBucket) {
+      Alert.alert('Select Fund Source', 'Please select which fund to deduct from by tapping on the account card.');
+      return;
+    }
 
-    // Contribution always uses personal fund from source account
-    // No fund selection needed - always defaults to personal fund
+    // Validate fund has sufficient balance
+    if (selectedFundBucket.amount < amountValue) {
+      Alert.alert('Insufficient Funds', `Selected fund (${selectedFundBucket.name}) has only ${formatCurrency(selectedFundBucket.amount)}. You need ${formatCurrency(amountValue)}.`);
+      return;
+    }
+
+    // Validate contribution data
+    // Use currency from settings (not goal currency) for goals
+    const contributionData = {
+      goal_id: goal.id,
+      amount: amountValue,
+      source_account_id: sourceAccountId,
+      destination_account_id: destinationAccountId,
+      description: description.trim(),
+      date: date.toISOString().split('T')[0],
+      currency: currency, // Pass currency from settings instead of goal currency
+      fund_bucket: selectedFundBucket ? {
+        type: selectedFundBucket.type,
+        id: selectedFundBucket.id === 'personal' ? null : selectedFundBucket.id,
+      } : undefined, // Pass selected fund bucket (map FundBucket to AddContributionData format)
+    };
+
+    const validation = validateContributionData(contributionData);
+    if (!validation.valid) {
+      Alert.alert('Validation Error', validation.errors.join('\n'));
+      return;
+    }
 
     setLoading(true);
     try {
-      // Use the updated addContributionToGoal function
-      // Note: The function handles spending from source account and receiving into destination
-      // But we need to handle the fund bucket selection ourselves since the function uses personal bucket
-      // For now, we'll use the utility function which handles the RPC calls
-
-      // Get Goal Savings category; create if missing
-      const { data: goalCategory, error: categoryError } = await supabase
-        .from('categories')
-        .select('id, name')
-        .eq('user_id', user.id)
-        .eq('name', 'Goal Savings')
-        .contains('activity_types', ['goal'])
-        .eq('is_deleted', false)
-        .single();
-
-      let goalCategoryId: string | null = null;
-      let categoryName: string = 'Goal Savings';
-
-      if (goalCategory?.id) {
-        goalCategoryId = goalCategory.id;
-        categoryName = goalCategory.name;
-      } else {
-        try {
-          const created = await createCategory({
-            name: 'Goal Savings',
-            color: '#10B981',
-            icon: 'flag',
-            activity_types: ['goal'] as any,
-          });
-          goalCategoryId = created.id;
-          categoryName = created.name;
-        } catch (e) {
-          throw new Error('Goal Savings category not found');
-        }
-      }
-
-      // 1) Spend from source account's personal fund (always)
-      // Contributions always come from personal funds - no fund selection needed
-      const bucketParam = {
-        type: 'personal',
-        id: null,
-      };
-
-      const { data: sourceTxn, error: spendError } = await supabase.rpc('spend_from_account_bucket', {
-        p_user_id: user.id,
-        p_account_id: sourceAccountId,
-        p_bucket: bucketParam,
-        p_amount: amountValue,
-        p_category: categoryName, // Category name is expected
-        p_description: description.trim() || `Contribution to ${goal.title}`,
-        p_date: new Date().toISOString().split('T')[0],
-        p_currency: goal.currency,
-      });
-      if (spendError) throw spendError;
-
-      // 2) Receive into destination account as goal bucket
-      const { error: receiveError } = await supabase.rpc('receive_to_account_bucket', {
-        p_user_id: user.id,
-        p_account_id: destinationAccountId,
-        p_bucket_type: 'goal',
-        p_bucket_id: goal.id,
-        p_amount: amountValue,
-        p_category: categoryName,
-        p_description: description.trim() || `Contribution to ${goal.title}`,
-        p_date: new Date().toISOString().split('T')[0],
-        p_currency: goal.currency,
-      });
-      if (receiveError) throw receiveError;
-
-      // 3) Update goal current amount (sum all goal funds)
-      const { data: goalFunds } = await supabase
-        .from('account_funds')
-        .select('balance')
-        .eq('type', 'goal')
-        .or(`reference_id.eq.${goal.id},metadata->>goal_id.eq.${goal.id}`);
-
-      const totalGoalAmount = goalFunds?.reduce((sum, fund) => {
-        const balance = typeof fund.balance === 'string' ? parseFloat(fund.balance) : fund.balance || 0;
-        return sum + balance;
-      }, 0) || (goal.current_amount + amountValue);
-
-      const isAchieved = totalGoalAmount >= goal.target_amount;
-      const { data: updatedGoal, error: goalUpdateError } = await supabase
-        .from('goals')
-        .update({
-          current_amount: totalGoalAmount,
-          is_achieved: isAchieved,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', goal.id)
-        .select()
-        .single();
-      
-      if (goalUpdateError) throw goalUpdateError;
-
-      // 4) Create goal contribution record (with destination_account_id)
-      const sourceTransactionId = (sourceTxn as any)?.id || (sourceTxn as any)?.transaction_id || null;
-      const { error: contributionError } = await supabase
-        .from('goal_contributions')
-        .insert({
-          goal_id: goal.id,
-          transaction_id: sourceTransactionId,
-          amount: amountValue,
-          source_account_id: sourceAccountId,
-          destination_account_id: destinationAccountId, // Account where goal funds are stored
-          contribution_type: 'manual',
-        });
-      if (contributionError) throw contributionError;
+      // Use utility function - handles all business logic
+      const { goal: updatedGoal } = await addContributionToGoal(contributionData);
       
       // Refresh data
       await globalRefresh();
@@ -294,24 +399,27 @@ export default function AddContributionModal({
         });
       }
 
-      // Check if goal is completed
+      // Check if goal can be completed (but don't auto-complete - manual)
       try {
-        const { isCompleted } = await checkGoalCompletion(goal.id);
-        if (isCompleted) {
-          console.log('Goal completed!', goal.title);
+        const { canComplete } = await checkGoalCompletion(goal.id);
+        if (canComplete) {
+          console.log('Goal can be completed!', goal.title);
+          // User will manually complete when ready
         }
       } catch (error) {
         console.error('Error checking goal completion:', error);
       }
 
       onSuccess?.();
-      onClose();
       
-      // Reset form
+      // Reset form but keep modal open
       setAmount('');
       setSourceAccountId('');
       setDestinationAccountId('');
       setDescription('');
+      setSelectedFundBucket(null);
+      // Refresh goal accounts to show updated balances
+      await fetchGoalAccounts();
     } catch (error: any) {
       console.error('Error adding contribution:', error);
       Alert.alert('Error', error.message || 'Failed to add contribution. Please try again.');
@@ -385,41 +493,137 @@ export default function AddContributionModal({
               </View>
                         </View>
 
-            {/* Source Account Selection - Pays from Personal Fund */}
+            {/* Destination Account Selection - Where Goal Fund Will Be Stored */}
             <InlineAccountSelector
-              accounts={sourceAccounts}
-              selectedAccountId={sourceAccountId}
-              onSelect={(account) => setSourceAccountId(account.id)}
-              label="Pay From Account"
-              showBalance={true}
-            />
-            {sourceAccountId && (
-              <View style={styles.infoBanner}>
-                <Ionicons name="information-circle-outline" size={16} color="#4F6F3E" />
-                <Text style={styles.infoText}>
-                  Money will be deducted from Personal Funds in this account
-                          </Text>
-                        </View>
-            )}
-
-            {/* Destination Account Selection - Stores as Goal Fund */}
-            <InlineAccountSelector
-              accounts={destinationAccounts}
+              accounts={destinationAccounts.map(acc => {
+                // Override balance display to show goal fund balance if exists
+                const goalFundBalance = (acc as any).goalFundBalance;
+                if (goalFundBalance && goalFundBalance > 0) {
+                  return { ...acc, balance: goalFundBalance };
+                }
+                return acc;
+              })}
               selectedAccountId={destinationAccountId}
               onSelect={(account) => setDestinationAccountId(account.id)}
-              label="Store In Account"
+              label="Account to Stay In"
               showBalance={true}
             />
-            {destinationAccountId && (
-              <View style={styles.infoBanner}>
-                <Ionicons name="lock-closed-outline" size={16} color="#4F6F3E" />
-                <Text style={styles.infoText}>
-                  {sourceAccountId === destinationAccountId 
-                    ? 'Money will be deducted from Personal Funds and stored as locked Goal Funds in this same account'
-                    : 'Money will be stored as locked Goal Funds in this account'}
+            {destinationAccountId && (() => {
+              const selectedAccount = destinationAccounts.find(acc => acc.id === destinationAccountId);
+              const goalFundBalance = (selectedAccount as any)?.goalFundBalance ?? 0;
+              return (
+                <View style={styles.infoBanner}>
+                  {goalFundBalance > 0 ? (
+                    <>
+                      <Ionicons name="information-circle-outline" size={16} color="#4F6F3E" />
+                      <Text style={styles.infoText}>
+                        This account already has {formatCurrency(goalFundBalance)} saved for this goal. This contribution will be added to the existing goal fund.
+                      </Text>
+                    </>
+                  ) : (
+                    <>
+                      <Ionicons name="lock-closed-outline" size={16} color="#4F6F3E" />
+                      <Text style={styles.infoText}>
+                        This account will store the goal fund, linked to "{goal?.title}". Money will be locked and cannot be used for normal transactions.
+                      </Text>
+                    </>
+                  )}
+                </View>
+              );
+            })()}
+
+            {/* Source Account Selection - Where Payment Comes From */}
+            <View style={styles.accountsSection}>
+              <Text style={styles.fundSourceLabel}>Account to Deduct</Text>
+              <InlineAccountSelector
+                accounts={sourceAccounts}
+                selectedAccountId={sourceAccountId}
+                onSelect={(account) => {
+                  setSourceAccountId(account.id);
+                  setSelectedFundBucket(null);
+                  // Automatically open fund picker when account is selected
+                  setShowFundPicker(true);
+                }}
+                label=""
+                showBalance={true}
+              />
+            </View>
+            {sourceAccountId && (
+              <>
+                {selectedFundBucket && (
+                  <View style={styles.infoBanner}>
+                    <Ionicons name="information-circle-outline" size={16} color="#4F6F3E" />
+                    <Text style={styles.infoText}>
+                      Money will be deducted from {selectedFundBucket.name} ({formatCurrency(selectedFundBucket.amount)} available) in {sourceAccounts.find(a => a.id === sourceAccountId)?.name || 'this account'} and transferred to the Goal Fund in the selected account above.
                     </Text>
-              </View>
+                  </View>
+                )}
+                {!selectedFundBucket && (
+                  <TouchableOpacity
+                    style={[styles.accountCard, { marginBottom: 16 }]}
+                    onPress={() => setShowFundPicker(true)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.selectedAccountInfo}>
+                      <Ionicons name="wallet-outline" size={20} color="#4F6F3E" />
+                      <View style={styles.accountDetails}>
+                        <Text style={styles.fundName}>
+                          Tap to select which fund to deduct from (Personal, Goal, or Borrowed)
+                        </Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={20} color="#637050" />
+                    </View>
+                  </TouchableOpacity>
+                )}
+              </>
             )}
+
+            {/* Fund Picker Modal */}
+            {sourceAccountId && (
+              <FundPicker
+                visible={showFundPicker}
+                onClose={() => setShowFundPicker(false)}
+                accountId={sourceAccountId}
+                onSelect={(bucket) => {
+                  setSelectedFundBucket(bucket);
+                  setShowFundPicker(false);
+                }}
+                amount={parseFloat(amount) || 0}
+                excludeGoalFunds={true}
+                allowGoalFunds={false}
+              />
+            )}
+
+            {/* Date Selection */}
+            <View style={styles.dateSection}>
+              <Text style={styles.dateLabel}>Date</Text>
+              <TouchableOpacity
+                style={styles.dateButton}
+                onPress={() => setShowDatePicker(true)}
+              >
+                <Ionicons name="calendar-outline" size={20} color="#4F6F3E" />
+                <Text style={styles.dateText}>
+                  {date.toLocaleDateString('en-US', {
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric',
+                  })}
+                </Text>
+              </TouchableOpacity>
+              {showDatePicker && (
+                <DateTimePicker
+                  value={date}
+                  mode="date"
+                  display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                  onChange={(event, selectedDate) => {
+                    setShowDatePicker(Platform.OS === 'ios');
+                    if (selectedDate) {
+                      setDate(selectedDate);
+                    }
+                  }}
+                />
+              )}
+              </View>
 
               {/* Description */}
             <View style={styles.descriptionSection}>
@@ -664,6 +868,64 @@ const styles = StyleSheet.create({
   infoText: {
     flex: 1,
     fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
+  },
+  dateSection: {
+    marginBottom: 24,
+  },
+  dateLabel: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
+    marginBottom: 8,
+  },
+  dateButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: '#F7F9F2',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    padding: 16,
+  },
+  dateText: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
+  },
+  accountCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    padding: 16,
+    marginBottom: 16,
+  },
+  selectedAccountInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  accountIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  accountDetails: {
+    flex: 1,
+  },
+  accountName: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
+    marginBottom: 4,
+  },
+  fundName: {
+    fontSize: 14,
     fontFamily: 'InstrumentSerif-Regular',
     color: '#637050',
   },

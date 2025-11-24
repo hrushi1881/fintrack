@@ -4,6 +4,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
+import { supabase } from '@/lib/supabase';
 
 const { width, height } = Dimensions.get('window');
 
@@ -12,6 +13,7 @@ export default function SplashScreen() {
   const [fadeAnim] = useState(new Animated.Value(0));
   const [scaleAnim] = useState(new Animated.Value(0.8));
   const [slideAnim] = useState(new Animated.Value(50));
+  const [checkingSetup, setCheckingSetup] = useState(false);
 
   useEffect(() => {
     // Start animations
@@ -36,19 +38,62 @@ export default function SplashScreen() {
   }, []);
 
   useEffect(() => {
-    if (!loading) {
-      // Navigate based on authentication status
-      const timer = setTimeout(() => {
+    if (!loading && !checkingSetup) {
+      const checkAndNavigate = async () => {
         if (user) {
-          router.replace('/(tabs)');
-        } else {
-          router.replace('/auth/signin');
-        }
-      }, 2000); // Reduced time since we're checking auth status
+          setCheckingSetup(true);
+          // Check onboarding status first, then account setup
+          try {
+            // Wait a bit for animations
+            await new Promise(resolve => setTimeout(resolve, 1500));
 
-      return () => clearTimeout(timer);
+            // Check if onboarding is completed
+            const { data: profile, error: profileError } = await supabase
+              .from('users_profile')
+              .select('onboarding_completed')
+              .eq('user_id', user.id)
+              .maybeSingle();
+
+            if (profileError) {
+              console.error('Error checking profile:', profileError);
+            }
+
+            // Check if user has accounts
+            const { data: accounts, error: accountsError } = await supabase
+              .from('accounts')
+              .select('id')
+              .eq('user_id', user.id)
+              .limit(1);
+
+            if (accountsError) {
+              console.error('Error checking accounts:', accountsError);
+            }
+
+            // Determine navigation
+            if (profile?.onboarding_completed || (accounts && accounts.length > 0)) {
+              // Onboarding/Setup complete, go to main app
+              router.replace('/(tabs)');
+            } else {
+              // Not completed, go to onboarding
+              router.replace('/onboarding');
+            }
+          } catch (error) {
+            console.error('Error during setup check:', error);
+            // On error, redirect to onboarding to be safe
+            router.replace('/onboarding');
+          }
+        } else {
+          // No user, redirect to sign in
+          const timer = setTimeout(() => {
+            router.replace('/auth/signin');
+          }, 2000);
+          return () => clearTimeout(timer);
+        }
+      };
+
+      checkAndNavigate();
     }
-  }, [user, loading]);
+  }, [user, loading, checkingSetup]);
 
   return (
     <LinearGradient

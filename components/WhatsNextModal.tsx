@@ -12,6 +12,8 @@ interface WhatsNextModalProps {
   onArchiveGoal: () => void;
   onWithdrawFunds: () => void;
   onDeleteGoal: () => void;
+  onMarkComplete?: () => void;
+  onCompleteWithWithdraw?: () => void;
   goal: Goal;
 }
 
@@ -23,8 +25,11 @@ export default function WhatsNextModal({
   onArchiveGoal,
   onWithdrawFunds,
   onDeleteGoal,
+  onMarkComplete,
+  onCompleteWithWithdraw,
   goal,
 }: WhatsNextModalProps) {
+  const canComplete = !goal.is_achieved && goal.current_amount >= goal.target_amount;
   return (
     <Modal
       visible={visible}
@@ -53,12 +58,46 @@ export default function WhatsNextModal({
               </View>
               <View style={styles.goalDetails}>
                 <Text style={styles.goalTitle}>{goal.title}</Text>
-                <Text style={styles.goalStatus}>✅ Goal Achieved</Text>
+                <Text style={styles.goalStatus}>
+                  {goal.is_achieved ? '✅ Goal Achieved' : canComplete ? '🎯 Ready to Complete' : '🎯 In Progress'}
+                </Text>
               </View>
             </View>
 
             {/* Options */}
             <View style={styles.optionsContainer}>
+              {/* Mark Complete - Only show if goal can be completed */}
+              {canComplete && onMarkComplete && (
+                <TouchableOpacity style={styles.optionButton} onPress={onMarkComplete}>
+                  <View style={[styles.optionIcon, { backgroundColor: 'rgba(16, 185, 129, 0.2)' }]}>
+                    <Ionicons name="checkmark-circle" size={24} color="#10B981" />
+                  </View>
+                  <View style={styles.optionContent}>
+                    <Text style={styles.optionTitle}>Mark Complete</Text>
+                    <Text style={styles.optionDescription}>
+                      Goal reached! Mark as complete
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={20} color="#6B7280" />
+                </TouchableOpacity>
+              )}
+
+              {/* Complete With Withdraw - Only show if goal can be completed */}
+              {canComplete && onCompleteWithWithdraw && (
+                <TouchableOpacity style={styles.optionButton} onPress={onCompleteWithWithdraw}>
+                  <View style={[styles.optionIcon, { backgroundColor: 'rgba(16, 185, 129, 0.2)' }]}>
+                    <Ionicons name="cash" size={24} color="#10B981" />
+                  </View>
+                  <View style={styles.optionContent}>
+                    <Text style={styles.optionTitle}>Complete & Withdraw All</Text>
+                    <Text style={styles.optionDescription}>
+                      Mark complete and withdraw all funds to accounts
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={20} color="#6B7280" />
+                </TouchableOpacity>
+              )}
+
               {/* Edit Goal */}
               {onEditGoal && (
                 <TouchableOpacity style={styles.optionButton} onPress={onEditGoal}>

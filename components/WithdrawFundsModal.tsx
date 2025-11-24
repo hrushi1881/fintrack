@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, TextInput, Modal, Alert, ScrollView, SafeAreaView } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, TextInput, Modal, Alert, ScrollView, SafeAreaView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { formatCurrencyAmount } from '@/utils/currency';
 import { Goal, Account } from '@/types';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { useSettings } from '@/contexts/SettingsContext';
-import { getGoalAccounts } from '@/utils/goals';
+import { getGoalAccounts, getLinkedAccountsForGoal } from '@/utils/goals';
 import InlineAccountSelector from './InlineAccountSelector';
 
 interface WithdrawFundsModalProps {
@@ -15,6 +16,7 @@ interface WithdrawFundsModalProps {
     amount: number; 
     sourceAccountId: string; // Account where goal fund is located
     destinationAccountId: string; // Account where money goes
+    date?: string; // Date of withdrawal
     note?: string;
   }) => void;
   goal: Goal;
@@ -26,111 +28,185 @@ export default function WithdrawFundsModal({
   onWithdraw,
   goal,
 }: WithdrawFundsModalProps) {
-  const { accounts, refreshAccounts } = useRealtimeData();
+  const { accounts, refreshAccounts, refreshAccountFunds } = useRealtimeData();
   const { currency } = useSettings();
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
+  const [date, setDate] = useState(new Date());
+  const [showDatePicker, setShowDatePicker] = useState(false);
   const [sourceAccountId, setSourceAccountId] = useState<string | null>(null);
   const [destinationAccountId, setDestinationAccountId] = useState<string | null>(null);
   const [goalAccounts, setGoalAccounts] = useState<Array<{ account: Account; balance: number }>>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
   const [isAmountFocused, setIsAmountFocused] = useState(false);
+  const [linkedAccounts, setLinkedAccounts] = useState<Account[]>([]);
 
   const formatCurrency = (amount: number) => {
-    return formatCurrencyAmount(amount, goal.currency);
+    // Use currency from settings instead of goal currency
+    return formatCurrencyAmount(amount, currency);
   };
 
-  // Refresh accounts when modal opens
-  useEffect(() => {
-    if (visible) {
-      console.log('🔄 Withdraw modal opened, refreshing accounts...');
-      refreshAccounts();
-      console.log('✅ Withdraw modal - current accounts:', accounts.length);
-    }
-  }, [visible, refreshAccounts, accounts.length]);
-
-  // Fetch goal accounts when modal opens
+  // Refresh accounts and account funds when modal opens, then fetch goal accounts
   useEffect(() => {
     if (visible && goal) {
-      fetchGoalAccounts();
+      console.log('🔄 Withdraw modal opened, refreshing accounts and funds...');
+      
       // Reset form when modal opens
       setAmount('');
       setNote('');
+      setDate(new Date());
+      setShowDatePicker(false);
       setSourceAccountId(null);
       setDestinationAccountId(null);
-    }
-  }, [visible, goal]);
-
-  const fetchGoalAccounts = async () => {
-    if (!goal) return;
-    
-    try {
-      setLoadingAccounts(true);
-      const accounts = await getGoalAccounts(goal.id);
-      setGoalAccounts(accounts);
       
-      // Auto-select first account if only one account holds funds
-      if (accounts.length === 1) {
-        setSourceAccountId(accounts[0].account.id);
-      }
-    } catch (error) {
-      console.error('Error fetching goal accounts', error);
-      Alert.alert('Error', 'Failed to load goal accounts');
-    } finally {
-      setLoadingAccounts(false);
-    }
-  };
+      // Refresh data first
+      refreshAccounts();
+      refreshAccountFunds();
+      
+      // Fetch linked accounts first, then goal accounts
+      const fetchLinkedAccounts = async () => {
+        if (!goal) return;
+        
+        try {
+          const accounts = await getLinkedAccountsForGoal(goal.id);
+          setLinkedAccounts(accounts);
+          console.log(`📊 WithdrawFundsModal: Fetched ${accounts.length} linked account(s) for "${goal.title}"`);
+          
+          // After linked accounts are fetched, fetch goal accounts
+          if (accounts.length > 0) {
+            await fetchGoalAccounts(accounts);
+          } else {
+            setGoalAccounts([]);
+          }
+        } catch (error) {
+          console.error('Error fetching linked accounts:', error);
+        }
+      };
 
-  // Filter destination accounts (exclude liability and Goals Savings accounts)
+      const fetchGoalAccounts = async (linkedAccts: Account[]) => {
+        if (!goal) return;
+        
+        try {
+          setLoadingAccounts(true);
+          // Get ALL accounts with goal funds (not just linked ones)
+          const accountsWithFunds = await getGoalAccounts(goal.id);
+          console.log(`📊 WithdrawFundsModal: Fetched ${accountsWithFunds.length} account(s) with goal funds for "${goal.title}"`);
+          
+          // Show all accounts with funds (linked or not)
+          // Priority: linked accounts with funds first, then non-linked accounts with funds
+          const linkedAccountIds = new Set(linkedAccts.map(acc => acc.id));
+          const sorted = accountsWithFunds.sort((a, b) => {
+            const aIsLinked = linkedAccountIds.has(a.account.id);
+            const bIsLinked = linkedAccountIds.has(b.account.id);
+            if (aIsLinked && !bIsLinked) return -1;
+            if (bIsLinked && !aIsLinked) return 1;
+            return a.account.name.localeCompare(b.account.name);
+          });
+          
+          setGoalAccounts(sorted);
+          
+          // Auto-select first account if only one account holds funds
+          if (sorted.length === 1) {
+            setSourceAccountId(sorted[0].account.id);
+            console.log(`✅ Auto-selected source account: ${sorted[0].account.name}`);
+          } else if (sorted.length > 1) {
+            console.log(`ℹ️ Multiple accounts found. User needs to select one.`);
+          } else {
+            console.warn(`⚠️ No accounts found with funds for this goal`);
+          }
+        } catch (error) {
+          console.error('Error fetching goal accounts', error);
+          Alert.alert('Error', 'Failed to load goal accounts');
+        } finally {
+          setLoadingAccounts(false);
+        }
+      };
+
+      // Then fetch linked accounts after a short delay to ensure refresh completes
+      const timer = setTimeout(() => {
+        fetchLinkedAccounts();
+      }, 100);
+      
+      return () => clearTimeout(timer);
+    }
+  }, [visible, goal, refreshAccounts, refreshAccountFunds]);
+
+  // Destination accounts: Show ALL accounts (money goes to personal funds in any account)
+  // Since money goes to personal funds, any account can receive the withdrawal
+  // Filter: exclude liability and Goals Savings accounts, must be active, must match settings currency
   // Goals Savings account is only for displaying aggregate statistics
-  // STRICT: Only show accounts that match the goal currency (required for backend validation)
   const destinationAccounts = useMemo(() => {
     if (!accounts || accounts.length === 0) {
       console.log('⚠️ Withdraw modal: No accounts available for destination');
       return [];
     }
-    if (!goal || !goal.currency) {
-      console.log('⚠️ Withdraw modal: Goal currency not set');
+    if (!currency) {
+      console.log('⚠️ Withdraw modal: Currency from settings not available');
       return [];
     }
     
-    // Filter accounts: exclude liability and goals_savings, must be active, must match goal currency
-    const filtered = accounts.filter(
-      (account) => 
-        account.type !== 'liability' && 
-        account.type !== 'goals_savings' &&
-        (account.is_active === true || account.is_active === undefined || account.is_active === null) &&
-        account.currency === goal.currency // STRICT: Must match goal currency
-    );
+    // Show ALL accounts: exclude only liability and goals_savings, must be active, must match settings currency
+    // Money goes to personal funds, so any account can receive it
+    const filtered = accounts
+      .filter((account) => {
+        const acc = account as Account;
+        return (
+          acc.type !== 'liability' && 
+          acc.type !== 'goals_savings' &&
+          (acc.is_active === true || acc.is_active === undefined || acc.is_active === null) &&
+          acc.currency === currency // Match currency from settings
+        );
+      })
+      .map((account) => account as Account);
     
-    console.log('✅ Withdraw modal destinationAccounts:', filtered.length, 'from', accounts.length, 'total (goal currency:', goal.currency, ')');
+    console.log('✅ Withdraw modal destinationAccounts:', filtered.length, 'from', accounts.length, 'total (ALL accounts, settings currency:', currency, ')');
     if (filtered.length === 0) {
-      console.warn('⚠️ No accounts found matching goal currency:', goal.currency);
+      console.warn('⚠️ No accounts found matching settings currency:', currency);
     }
     return filtered;
-  }, [accounts, goal]);
+  }, [accounts, currency]);
+
+  // Check if there are any accounts at all (for helpful error message)
+  const hasAnyAccounts = useMemo(() => {
+    return accounts && accounts.length > 0;
+  }, [accounts]);
+
+  // Check if accounts exist but don't match currency
+  const accountsWithDifferentCurrency = useMemo(() => {
+    if (!accounts || !currency) return [];
+    return accounts.filter((account) => {
+      const acc = account as Account;
+      return (
+        acc.type !== 'liability' && 
+        acc.type !== 'goals_savings' &&
+        (acc.is_active === true || acc.is_active === undefined || acc.is_active === null) &&
+        acc.currency !== currency
+      );
+    });
+  }, [accounts, currency]);
 
   // Get selected accounts
   const sourceAccount = goalAccounts.find((ga) => ga.account.id === sourceAccountId)?.account;
   const destinationAccount = destinationAccounts.find((acc) => acc.id === destinationAccountId);
   
   // Get available balance for selected source account
-  const availableBalance = sourceAccountId 
-    ? goalAccounts.find((ga) => ga.account.id === sourceAccountId)?.balance || 0
-    : 0;
+  // Use useMemo to ensure it updates when sourceAccountId or goalAccounts change
+  const availableBalance = useMemo(() => {
+    if (!sourceAccountId) return 0;
+    const goalAccount = goalAccounts.find((ga) => ga.account.id === sourceAccountId);
+    return goalAccount?.balance || 0;
+  }, [sourceAccountId, goalAccounts]);
 
   // Auto-select first destination account when source account is selected and destination is empty
+  // Note: Same account can be selected for both source and destination (different fund sources)
   useEffect(() => {
     if (visible && sourceAccountId && destinationAccounts.length > 0 && !destinationAccountId) {
-      // Exclude source account from destination options
-      const availableDestinations = destinationAccounts.filter((acc) => acc.id !== sourceAccountId);
-      if (availableDestinations.length > 0) {
-        // Prefer savings accounts for destination, otherwise first account
-        const savingsAccount = availableDestinations.find((acc) => acc.type === 'bank' || acc.type === 'wallet');
-        const selectedId = savingsAccount?.id || availableDestinations[0].id;
-        setDestinationAccountId(selectedId);
-        console.log('✅ Auto-selected destination account:', savingsAccount?.name || availableDestinations[0].name);
-      }
+      // Same account is allowed since source is goal fund and destination is personal fund
+      // Prefer savings accounts for destination, otherwise first account (can be same as source)
+      const savingsAccount = destinationAccounts.find((acc) => acc.type === 'bank' || acc.type === 'wallet');
+      const selectedId = savingsAccount?.id || destinationAccounts[0].id;
+      setDestinationAccountId(selectedId);
+      console.log('✅ Auto-selected destination account:', savingsAccount?.name || destinationAccounts[0].name);
     }
   }, [visible, sourceAccountId, destinationAccounts, destinationAccountId]);
 
@@ -157,15 +233,14 @@ export default function WithdrawFundsModal({
       return;
     }
 
-    if (sourceAccountId === destinationAccountId) {
-      Alert.alert('Error', 'Source and destination accounts must be different');
-      return;
-    }
+    // Note: Same account is allowed - source is goal fund, destination is personal fund
+    // No need to check if sourceAccountId === destinationAccountId
 
     onWithdraw({ 
       amount: withdrawAmount, 
       sourceAccountId,
       destinationAccountId,
+      date: date.toISOString().split('T')[0],
       note: note.trim() || undefined 
     });
   };
@@ -179,6 +254,8 @@ export default function WithdrawFundsModal({
   const handleClose = () => {
     setAmount('');
     setNote('');
+    setDate(new Date());
+    setShowDatePicker(false);
     setSourceAccountId(null);
     setDestinationAccountId(null);
     setIsAmountFocused(false);
@@ -221,9 +298,12 @@ export default function WithdrawFundsModal({
               </View>
             </View>
 
-            {/* Source Account Selection (Goal Fund) */}
+            {/* Source Account Selection - Only Linked Accounts with Funds for THIS Goal */}
             <InlineAccountSelector
-              accounts={goalAccounts.map((ga) => ga.account)}
+              accounts={goalAccounts.map((ga) => ({
+                ...ga.account,
+                balance: ga.balance, // Override account balance with goal fund balance
+              }))}
               selectedAccountId={sourceAccountId}
               onSelect={(account) => {
                 setSourceAccountId(account.id);
@@ -233,26 +313,66 @@ export default function WithdrawFundsModal({
             />
             {sourceAccountId && availableBalance > 0 && (
               <View style={styles.balanceInfo}>
-                <Text style={styles.balanceLabel}>Available in this account:</Text>
+                <Text style={styles.balanceLabel}>Available Goal Fund in this account:</Text>
                 <Text style={styles.balanceAmount}>{formatCurrency(availableBalance)}</Text>
               </View>
             )}
-
-            {/* Destination Account Selection (Personal Funds) */}
-            <InlineAccountSelector
-              accounts={destinationAccounts}
-              selectedAccountId={destinationAccountId}
-              onSelect={(account) => setDestinationAccountId(account.id)}
-              label="To Account"
-              excludeAccountIds={sourceAccountId ? [sourceAccountId] : []}
-              showBalance={true}
-            />
-            {destinationAccountId && (
+            {goalAccounts.length === 0 && linkedAccounts.length === 0 && (
               <View style={styles.infoBanner}>
-                <Ionicons name="wallet-outline" size={16} color="#4F6F3E" />
+                <Ionicons name="information-circle-outline" size={16} color="#F59E0B" />
                 <Text style={styles.infoText}>
-                  Money will be added to Personal Funds in this account
+                  No accounts linked to this goal. Please link accounts first in goal settings.
                 </Text>
+              </View>
+            )}
+            {goalAccounts.length === 0 && linkedAccounts.length > 0 && (
+              <View style={styles.infoBanner}>
+                <Ionicons name="information-circle-outline" size={16} color="#F59E0B" />
+                <Text style={styles.infoText}>
+                  No goal funds found in linked accounts. Add a contribution first.
+                </Text>
+              </View>
+            )}
+
+            {/* Destination Account Selection - Personal Funds */}
+            {/* Note: Same account can be selected for source and destination since they are different fund sources:
+                - Source: Goal fund (where money is withdrawn from)
+                - Destination: Personal fund (where money goes to)
+            */}
+            {destinationAccounts.length > 0 ? (
+              <>
+                <InlineAccountSelector
+                  accounts={destinationAccounts}
+                  selectedAccountId={destinationAccountId}
+                  onSelect={(account) => setDestinationAccountId(account.id)}
+                  label="To Account (Personal Funds)"
+                  showBalance={true}
+                />
+                {destinationAccountId && (
+                  <View style={styles.infoBanner}>
+                    <Ionicons name="wallet-outline" size={16} color="#4F6F3E" />
+                    <Text style={styles.infoText}>
+                      Money will be withdrawn from the Goal Fund and added to Personal Funds in this account. You can then use it for normal transactions.
+                    </Text>
+                  </View>
+                )}
+              </>
+            ) : (
+              <View style={styles.errorBanner}>
+                <Ionicons name="alert-circle-outline" size={20} color="#EF4444" />
+                <View style={styles.errorContent}>
+                  <Text style={styles.errorTitle}>No Accounts Available</Text>
+                  {hasAnyAccounts && accountsWithDifferentCurrency.length > 0 ? (
+                    <Text style={styles.errorText}>
+                      You need an account with currency {currency} to receive the withdrawal. 
+                      Your accounts use different currencies. Please create an account with currency {currency} first.
+                    </Text>
+                  ) : (
+                    <Text style={styles.errorText}>
+                      You need at least one active account to receive the withdrawal. Please create an account first.
+                    </Text>
+                  )}
+                </View>
               </View>
             )}
 
@@ -280,6 +400,37 @@ export default function WithdrawFundsModal({
                 >
                   <Text style={styles.fullWithdrawText}>Withdraw All ({formatCurrency(availableBalance)})</Text>
                 </TouchableOpacity>
+              )}
+            </View>
+
+            {/* Date Selection */}
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Date</Text>
+              <TouchableOpacity
+                style={styles.dateButton}
+                onPress={() => setShowDatePicker(true)}
+              >
+                <Ionicons name="calendar-outline" size={20} color="#4F6F3E" />
+                <Text style={styles.dateText}>
+                  {date.toLocaleDateString('en-US', {
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric',
+                  })}
+                </Text>
+              </TouchableOpacity>
+              {showDatePicker && (
+                <DateTimePicker
+                  value={date}
+                  mode="date"
+                  display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                  onChange={(event, selectedDate) => {
+                    setShowDatePicker(Platform.OS === 'ios');
+                    if (selectedDate) {
+                      setDate(selectedDate);
+                    }
+                  }}
+                />
               )}
             </View>
 
@@ -503,6 +654,32 @@ const styles = StyleSheet.create({
     fontFamily: 'InstrumentSerif-Regular',
     color: '#FFFFFF',
   },
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 24,
+  },
+  errorContent: {
+    flex: 1,
+  },
+  errorTitle: {
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#DC2626',
+    marginBottom: 4,
+  },
+  errorText: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#991B1B',
+    lineHeight: 20,
+  },
   infoBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -520,5 +697,20 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontFamily: 'InstrumentSerif-Regular',
     color: '#637050',
+  },
+  dateButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: '#F7F9F2',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    padding: 16,
+  },
+  dateText: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F3A24',
   },
 });

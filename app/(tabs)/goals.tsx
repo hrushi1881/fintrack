@@ -6,6 +6,7 @@ import {
   Text,
   TouchableOpacity,
   View,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
@@ -13,6 +14,9 @@ import { useSettings } from '@/contexts/SettingsContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { formatCurrencyAmount } from '@/utils/currency';
 import AddGoalModal from '../modals/add-goal';
+import ActionSheet, { ActionSheetItem } from '@/components/ActionSheet';
+import { archiveGoal, deleteGoal } from '@/utils/goals';
+import { Goal } from '@/types';
 
 const GoalsScreen: React.FC = () => {
   const { currency } = useSettings();
@@ -20,6 +24,8 @@ const GoalsScreen: React.FC = () => {
 
   const [activeSegment, setActiveSegment] = useState<'active' | 'completed'>('active');
   const [showAddGoalModal, setShowAddGoalModal] = useState(false);
+  const [selectedGoal, setSelectedGoal] = useState<Goal | null>(null);
+  const [showActionSheet, setShowActionSheet] = useState(false);
 
   const { activeGoals, completedGoals, totalSaved, totalTarget } = useMemo(() => {
     const active = goals.filter((goal) => !goal.is_achieved);
@@ -51,6 +57,144 @@ const GoalsScreen: React.FC = () => {
 
   const handleGoalPress = (goalId: string) => {
     router.push(`/goal/${goalId}` as any);
+  };
+
+  const handleMoreOptions = (goal: Goal, event: any) => {
+    event?.stopPropagation?.();
+    setSelectedGoal(goal);
+    setShowActionSheet(true);
+  };
+
+  const handleEdit = () => {
+    if (!selectedGoal) return;
+    router.push(`/goal/${selectedGoal.id}` as any);
+    setShowActionSheet(false);
+  };
+
+  const handleExtend = () => {
+    if (!selectedGoal) return;
+    router.push(`/goal/${selectedGoal.id}?action=extend` as any);
+    setShowActionSheet(false);
+  };
+
+  const handleArchive = async () => {
+    if (!selectedGoal) return;
+    
+    Alert.alert(
+      'Archive Goal',
+      `Archive "${selectedGoal.title || selectedGoal.name}"? You can unarchive it later.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Archive',
+          onPress: async () => {
+            try {
+              await archiveGoal(selectedGoal.id);
+              await globalRefresh();
+              setShowActionSheet(false);
+              Alert.alert('Goal archived', 'We tucked this goal away for later.');
+            } catch (error) {
+              console.error('Error archiving goal:', error);
+              Alert.alert('Error', 'Failed to archive goal. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleWithdraw = () => {
+    if (!selectedGoal) return;
+    router.push(`/goal/${selectedGoal.id}?action=withdraw` as any);
+    setShowActionSheet(false);
+  };
+
+  const handleDelete = () => {
+    if (!selectedGoal) return;
+    
+    Alert.alert(
+      'Delete Goal',
+      `Are you sure you want to delete "${selectedGoal.title || selectedGoal.name}"? This will remove the goal and its history permanently.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteGoal(selectedGoal.id);
+              await globalRefresh();
+              setShowActionSheet(false);
+            } catch (error) {
+              console.error('Error deleting goal:', error);
+              Alert.alert('Error', 'Failed to delete goal. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const getActionSheetItems = (goal: Goal): ActionSheetItem[] => {
+    const isArchived = goal.is_archived;
+    const isCompleted = goal.is_achieved;
+    
+    const items: ActionSheetItem[] = [
+      {
+        id: 'edit',
+        label: 'Edit',
+        icon: 'create-outline',
+        onPress: handleEdit,
+      },
+    ];
+
+    if (!isCompleted) {
+      items.push({
+        id: 'extend',
+        label: 'Extend',
+        icon: 'calendar-outline',
+        onPress: handleExtend,
+      });
+
+      if (goal.current_amount && goal.current_amount > 0) {
+        items.push({
+          id: 'withdraw',
+          label: 'Withdraw Funds',
+          icon: 'arrow-down-outline',
+          onPress: handleWithdraw,
+        });
+      }
+    }
+
+    items.push({
+      id: 'separator',
+      label: '',
+      icon: 'ellipsis-horizontal',
+      onPress: () => {},
+      separator: true,
+      disabled: true,
+    });
+
+    if (isArchived) {
+      // Note: Unarchive would need to be implemented
+    } else {
+      items.push({
+        id: 'archive',
+        label: 'Archive',
+        icon: 'archive-outline',
+        onPress: handleArchive,
+      });
+    }
+
+    items.push({
+      id: 'delete',
+      label: 'Delete',
+      icon: 'trash-outline',
+      onPress: handleDelete,
+      destructive: true,
+    });
+
+    return items;
   };
 
   return (
@@ -153,7 +297,17 @@ const GoalsScreen: React.FC = () => {
                   </Text>
                         )}
                       </View>
+                      <View style={styles.goalHeaderRight}>
                       <Text style={styles.goalPercent}>{percent}%</Text>
+                        <TouchableOpacity
+                          style={styles.moreButton}
+                          onPress={(e) => handleMoreOptions(goal, e)}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                        >
+                          <Ionicons name="ellipsis-horizontal" size={20} color="rgba(0, 0, 0, 0.6)" />
+                        </TouchableOpacity>
+                      </View>
                     </View>
 
                     <View style={styles.progressBar}>
@@ -189,6 +343,17 @@ const GoalsScreen: React.FC = () => {
           visible={showAddGoalModal}
           onClose={() => setShowAddGoalModal(false)}
           onSuccess={refreshGoals}
+      />
+
+      {/* Action Sheet */}
+      <ActionSheet
+        visible={showActionSheet}
+        onClose={() => {
+          setShowActionSheet(false);
+          setSelectedGoal(null);
+        }}
+        items={selectedGoal ? getActionSheetItems(selectedGoal) : []}
+        title={selectedGoal?.title || selectedGoal?.name}
       />
       </View>
     </SafeAreaView>
@@ -309,6 +474,19 @@ const styles = StyleSheet.create({
   goalHeader: {
     flexDirection: 'row',
     alignItems: 'center',
+  },
+  goalHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  moreButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
   },
   goalIcon: {
     width: 40,

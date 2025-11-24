@@ -63,6 +63,7 @@ export default function EditLiabilityModal({
   
   // Form state
   const [totalAmount, setTotalAmount] = useState('');
+  const [availableFunds, setAvailableFunds] = useState('');
   const [interestRate, setInterestRate] = useState('');
   const [monthlyPayment, setMonthlyPayment] = useState('');
   const [endDate, setEndDate] = useState<Date>(new Date());
@@ -76,6 +77,11 @@ export default function EditLiabilityModal({
   useEffect(() => {
     if (liability && visible) {
       setTotalAmount(liability.original_amount?.toString() || liability.current_balance.toString());
+      // Initialize available_funds: if it exists, use it; otherwise calculate from original_amount - disbursed_amount
+      const calculatedAvailable = liability.available_funds !== null && liability.available_funds !== undefined
+        ? liability.available_funds
+        : (liability.original_amount || 0) - (liability.disbursed_amount || 0);
+      setAvailableFunds(Math.max(0, calculatedAvailable).toString());
       setInterestRate(liability.interest_rate_apy?.toString() || '0');
       setMonthlyPayment(liability.periodical_payment?.toString() || '0');
       if (liability.targeted_payoff_date) {
@@ -287,6 +293,22 @@ export default function EditLiabilityModal({
       if (newTotalAmount !== undefined && newTotalAmount !== liability.original_amount) {
         updateData.original_amount = newTotalAmount;
       }
+      
+      // Update available_funds if it was changed
+      const newAvailableFunds = availableFunds ? parseFloat(availableFunds) : null;
+      const currentAvailableFunds = liability.available_funds !== null && liability.available_funds !== undefined
+        ? liability.available_funds
+        : (liability.original_amount || 0) - (liability.disbursed_amount || 0);
+      
+      if (newAvailableFunds !== null && newAvailableFunds !== currentAvailableFunds) {
+        // Validate: available_funds <= original_amount
+        const finalTotal = newTotalAmount || liability.original_amount || liability.current_balance;
+        if (newAvailableFunds > finalTotal) {
+          Alert.alert('Invalid Amount', `Available funds (${formatCurrencyAmount(newAvailableFunds, currency)}) cannot exceed total amount (${formatCurrencyAmount(finalTotal, currency)})`);
+          return;
+        }
+        updateData.available_funds = newAvailableFunds;
+      }
       if (newRate !== undefined && newRate !== (liability.interest_rate_apy || 0)) {
         updateData.interest_rate_apy = newRate;
       }
@@ -407,7 +429,7 @@ export default function EditLiabilityModal({
 
               {editingField === 'amount' && (
                 <GlassCard padding={20} marginVertical={12}>
-                  <Text style={styles.inputLabel}>New Total Amount</Text>
+                  <Text style={styles.inputLabel}>Total Amount</Text>
                   <View style={styles.amountInputContainer}>
                     <Text style={styles.currencySymbol}>{currency === 'USD' ? '$' : '₹'}</Text>
                     <TextInput
@@ -416,11 +438,53 @@ export default function EditLiabilityModal({
                       placeholderTextColor="rgba(0, 0, 0, 0.4)"
                       keyboardType="decimal-pad"
                       value={totalAmount}
-                      onChangeText={setTotalAmount}
+                      onChangeText={(value) => {
+                        setTotalAmount(value);
+                        // Intelligent adjustment: when total amount changes, adjust available funds
+                        // Keep used funds constant: used = total - available
+                        const newTotal = parseFloat(value) || 0;
+                        const currentTotal = liability.original_amount || liability.current_balance || 0;
+                        const currentAvailable = parseFloat(availableFunds) || 0;
+                        const usedFunds = currentTotal - currentAvailable; // Used funds remain constant
+                        const newAvailable = Math.max(0, newTotal - usedFunds);
+                        setAvailableFunds(newAvailable.toString());
+                      }}
                     />
                   </View>
                   <Text style={styles.inputHint}>
                     Minimum: {formatCurrencyAmount(liability.current_balance, currency)} (current balance)
+                  </Text>
+
+                  <Text style={[styles.inputLabel, { marginTop: 20 }]}>Available Funds</Text>
+                  <View style={styles.amountInputContainer}>
+                    <Text style={styles.currencySymbol}>{currency === 'USD' ? '$' : '₹'}</Text>
+                    <TextInput
+                      style={styles.amountInput}
+                      placeholder="0.00"
+                      placeholderTextColor="rgba(0, 0, 0, 0.4)"
+                      keyboardType="decimal-pad"
+                      value={availableFunds}
+                      onChangeText={(value) => {
+                        const newAvailable = parseFloat(value) || 0;
+                        const total = parseFloat(totalAmount) || liability.original_amount || liability.current_balance || 0;
+                        // Ensure available funds <= total amount
+                        if (newAvailable <= total) {
+                          setAvailableFunds(value);
+                        } else {
+                          // Auto-adjust to total if user enters more
+                          setAvailableFunds(total.toString());
+                          Alert.alert('Invalid Amount', `Available funds cannot exceed total amount (${formatCurrencyAmount(total, currency)})`);
+                        }
+                      }}
+                    />
+                  </View>
+                  <Text style={styles.inputHint}>
+                    Maximum: {formatCurrencyAmount(parseFloat(totalAmount) || liability.original_amount || liability.current_balance || 0, currency)} (total amount)
+                    {'\n'}
+                    Used Funds: {formatCurrencyAmount(
+                      (parseFloat(totalAmount) || liability.original_amount || liability.current_balance || 0) - (parseFloat(availableFunds) || 0),
+                      currency
+                    )}
                   </Text>
 
                   {/* Recalculation Options */}

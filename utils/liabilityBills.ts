@@ -4,7 +4,7 @@
  */
 
 import { supabase } from '@/lib/supabase';
-import { CreateBillData } from './bills';
+import { CreateBillData, createBill } from './bills';
 import { calculatePaymentBreakdown } from './liabilityCalculations';
 import { 
   generateAmortizationSchedule, 
@@ -476,6 +476,142 @@ export async function autoAdjustLiabilityBills(
   } catch (error: any) {
     console.error('Error in autoAdjustLiabilityBills:', error);
     throw error;
+  }
+}
+
+/**
+ * Generate bills for EMI liability based on frequency
+ * Creates bills for each payment period until end date
+ */
+export async function generateBillsForEmiLiability(
+  userId: string,
+  liabilityId: string,
+  emiAmount: number,
+  frequency: 'monthly' | 'weekly',
+  firstPaymentDate: Date,
+  endDate?: Date,
+  linkedAccountId?: string
+): Promise<{ success: boolean; billsCreated: number; error?: string }> {
+  try {
+    // Get liability details
+    const { data: liability, error: liabilityError } = await supabase
+      .from('liabilities')
+      .select('start_date, targeted_payoff_date, currency, title')
+      .eq('id', liabilityId)
+      .eq('user_id', userId)
+      .single();
+
+    if (liabilityError || !liability) {
+      return {
+        success: false,
+        billsCreated: 0,
+        error: 'Liability not found',
+      };
+    }
+
+    const startDate = new Date(liability.start_date);
+    const finalEndDate = endDate || (liability.targeted_payoff_date ? new Date(liability.targeted_payoff_date) : null);
+
+    // Validate dates are within range
+    if (firstPaymentDate < startDate) {
+      return {
+        success: false,
+        billsCreated: 0,
+        error: 'First payment date cannot be before start date',
+      };
+    }
+
+    if (finalEndDate && firstPaymentDate > finalEndDate) {
+      return {
+        success: false,
+        billsCreated: 0,
+        error: 'First payment date cannot be after end date',
+      };
+    }
+
+    // Generate bill dates
+    const billDates: Date[] = [];
+    let currentDate = new Date(firstPaymentDate);
+    const endDateToUse = finalEndDate || new Date(currentDate.getFullYear() + 10, currentDate.getMonth(), currentDate.getDate()); // Default to 10 years if no end date
+
+    // Generate dates based on frequency
+    while (currentDate <= endDateToUse) {
+      // Validate date is within start_date and end_date range
+      if (currentDate >= startDate && currentDate <= endDateToUse) {
+        billDates.push(new Date(currentDate));
+      }
+
+      // Move to next payment date
+      if (frequency === 'monthly') {
+        currentDate = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, currentDate.getDate());
+      } else {
+        // weekly
+        currentDate = new Date(currentDate.getTime() + 7 * 24 * 60 * 60 * 1000);
+      }
+    }
+
+    // Get existing bills count to determine starting payment number
+    const { data: existingBills, error: existingBillsError } = await supabase
+      .from('bills')
+      .select('payment_number')
+      .eq('liability_id', liabilityId)
+      .eq('user_id', userId)
+      .order('payment_number', { ascending: false })
+      .limit(1);
+
+    let startingPaymentNumber = 1;
+    if (!existingBillsError && existingBills && existingBills.length > 0) {
+      startingPaymentNumber = (existingBills[0].payment_number || 0) + 1;
+    }
+
+    // Create bills
+    const billsToCreate: CreateBillData[] = billDates.map((dueDate, index) => ({
+      title: `${liability.title} - Payment #${startingPaymentNumber + index}`,
+      amount: emiAmount,
+      currency: liability.currency,
+      bill_type: 'liability_linked',
+      due_date: dueDate.toISOString().split('T')[0],
+      original_due_date: dueDate.toISOString().split('T')[0],
+      liability_id: liabilityId,
+      linked_account_id: linkedAccountId || null,
+      payment_number: startingPaymentNumber + index,
+      principal_amount: emiAmount, // For EMI, entire amount is principal (assuming no interest breakdown)
+      interest_amount: 0,
+      interest_included: true,
+      color: '#10B981',
+      icon: 'receipt-outline',
+      reminder_days: [1, 3, 7],
+      metadata: {
+        source_type: 'emi',
+        frequency: frequency,
+        generated_automatically: true,
+      },
+    }));
+
+    // Create bills in batch
+    let billsCreated = 0;
+    for (const billData of billsToCreate) {
+      try {
+        await createBill(billData);
+        billsCreated++;
+      } catch (error: any) {
+        console.error(`Error creating bill for ${billData.due_date}:`, error);
+        // Continue creating other bills even if one fails
+      }
+    }
+
+    return {
+      success: billsCreated > 0,
+      billsCreated,
+      error: billsCreated < billsToCreate.length ? `${billsToCreate.length - billsCreated} bills failed to create` : undefined,
+    };
+  } catch (error: any) {
+    console.error('Error generating bills for EMI liability:', error);
+    return {
+      success: false,
+      billsCreated: 0,
+      error: error.message || 'Failed to generate bills',
+    };
   }
 }
 

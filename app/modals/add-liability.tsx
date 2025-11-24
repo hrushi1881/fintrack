@@ -9,6 +9,7 @@ import {
   TextInput,
   Alert,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
@@ -20,6 +21,7 @@ import GlassCard from '@/components/GlassCard';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
 import { allocateLiabilityFunds } from '@/utils/liabilityFunds';
+import { generateBillsFromCycles } from '@/utils/cycleBillGeneration';
 
 type LiabilityType = 'loan' | 'credit_card' | 'emi' | 'line_of_credit' | 'other';
 
@@ -48,6 +50,14 @@ export default function AddLiabilityModal() {
   const [currentBalance, setCurrentBalance] = useState('');
   const [startDate, setStartDate] = useState<Date>(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
+  
+  // EMI-specific fields
+  const [emiAmount, setEmiAmount] = useState('');
+  const [frequency, setFrequency] = useState<'monthly' | 'weekly'>('monthly');
+  const [paymentDate, setPaymentDate] = useState<Date>(new Date());
+  const [showPaymentDatePicker, setShowPaymentDatePicker] = useState(false);
+  const [endDate, setEndDate] = useState<Date | null>(null);
+  const [showEndDatePicker, setShowEndDatePicker] = useState(false);
   
   // Optional: Did you receive funds?
   const [receivedFunds, setReceivedFunds] = useState<boolean | null>(null);
@@ -84,6 +94,39 @@ export default function AddLiabilityModal() {
       return;
     }
 
+    // EMI-specific validation
+    if (selectedType === 'emi') {
+      const emiAmountValue = parseFloat(emiAmount);
+      if (isNaN(emiAmountValue) || emiAmountValue <= 0) {
+        Alert.alert('Error', 'Please enter a valid EMI amount');
+        return;
+      }
+      
+      // Validate payment date is within start date range
+      if (paymentDate < startDate) {
+        Alert.alert('Error', 'Payment date cannot be before start date');
+        return;
+      }
+      
+      // Validate end date is after start date and payment date
+      if (endDate) {
+        if (endDate <= startDate) {
+          Alert.alert('Error', 'End date must be after start date');
+          return;
+        }
+        if (paymentDate > endDate) {
+          Alert.alert('Error', 'Payment date cannot be after end date');
+          return;
+        }
+      }
+      
+      // Validate EMI amount doesn't exceed balance
+      if (emiAmountValue > balanceValue) {
+        Alert.alert('Error', 'EMI amount cannot exceed current balance');
+        return;
+      }
+    }
+
     // If received funds, validate those fields
     if (receivedFunds === true) {
       const receivedAmountValue = parseFloat(receivedAmount);
@@ -100,24 +143,106 @@ export default function AddLiabilityModal() {
     try {
       setLoading(true);
 
+      // Prepare liability data
+      const liabilityData: any = {
+        user_id: user.id,
+        title: name.trim(),
+        liability_type: selectedType,
+        current_balance: balanceValue,
+        original_amount: balanceValue,
+        start_date: formatDateForInput(startDate),
+        status: 'active',
+        currency: currency,
+        is_deleted: false,
+      };
+
+      // Add payment fields for all liability types (needed for bill generation)
+      if (selectedType === 'emi') {
+        const emiAmountValue = parseFloat(emiAmount);
+        liabilityData.periodical_payment = emiAmountValue;
+        liabilityData.periodical_frequency = frequency;
+        liabilityData.next_due_date = formatDateForInput(paymentDate);
+        if (endDate) {
+          liabilityData.targeted_payoff_date = formatDateForInput(endDate);
+        }
+        // Set linked account if provided
+        if (selectedAccountId) {
+          liabilityData.linked_account_id = selectedAccountId;
+        }
+      } else {
+        // For non-EMI types, set default payment fields if not provided
+        // These can be updated later via edit liability
+        liabilityData.periodical_payment = balanceValue / 12; // Default: monthly payment estimate
+        liabilityData.periodical_frequency = 'monthly';
+        liabilityData.next_due_date = formatDateForInput(startDate);
+      }
+
+      // Set available_funds if user received funds
+      if (receivedFunds && receivedAmount) {
+        const receivedAmountValue = parseFloat(receivedAmount);
+        if (!isNaN(receivedAmountValue) && receivedAmountValue > 0) {
+          liabilityData.available_funds = receivedAmountValue;
+          liabilityData.disbursed_amount = receivedAmountValue;
+        }
+      }
+
       // Create liability in database
       const { data: liability, error: liabilityError } = await supabase
         .from('liabilities')
-        .insert({
-          user_id: user.id,
-          title: name.trim(),
-          liability_type: selectedType,
-          current_balance: balanceValue,
-          original_amount: balanceValue,
-          start_date: formatDateForInput(startDate),
-          status: 'active',
-          currency: currency,
-          is_deleted: false,
-        })
+        .insert(liabilityData)
         .select()
         .single();
 
       if (liabilityError) throw liabilityError;
+
+      // Generate bills from cycles for all liability types that have payment information
+      if (liability && liability.periodical_payment && liability.periodical_frequency) {
+        try {
+          // Map periodical_frequency to cycle frequency format
+          // periodical_frequency can be: 'weekly' | 'monthly' | 'bi-weekly' | 'quarterly' | 'yearly'
+          // cycle frequency expects: 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'yearly' | 'custom'
+          let cycleFrequency: 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'yearly' | 'custom' = 'monthly';
+          
+          if (liability.periodical_frequency === 'weekly') {
+            cycleFrequency = 'weekly';
+          } else if (liability.periodical_frequency === 'monthly') {
+            cycleFrequency = 'monthly';
+          } else if (liability.periodical_frequency === 'bi-weekly') {
+            cycleFrequency = 'weekly'; // Use weekly with interval 2
+          } else if (liability.periodical_frequency === 'quarterly') {
+            cycleFrequency = 'quarterly';
+          } else if (liability.periodical_frequency === 'yearly') {
+            cycleFrequency = 'yearly';
+          }
+          
+          // Calculate payment day from next_due_date or start_date
+          const dueDate = liability.next_due_date ? new Date(liability.next_due_date) : startDate;
+          const paymentDay = dueDate.getDate();
+
+          // Calculate interval for bi-weekly
+          const interval = liability.periodical_frequency === 'bi-weekly' ? 2 : 1;
+
+          const billsResult = await generateBillsFromCycles({
+            liabilityId: liability.id,
+            userId: user.id,
+            startDate: liability.start_date,
+            endDate: liability.targeted_payoff_date || null,
+            frequency: cycleFrequency,
+            interval: interval,
+            dueDay: paymentDay,
+            paymentAmount: Number(liability.periodical_payment),
+            interestRate: Number(liability.interest_rate_apy || 0),
+            currency: liability.currency || currency,
+            linkedAccountId: liability.linked_account_id || undefined,
+            maxCycles: 12, // Generate first 12 cycles, more will be generated as needed
+          });
+          
+          console.log(`✅ Generated ${billsResult.billsCreated} bills for liability`);
+        } catch (error) {
+          console.error('Error generating bills from cycles:', error);
+          Alert.alert('Warning', 'Liability created but bills could not be generated. You can create them manually.');
+        }
+      }
 
       // If user received funds, allocate them to an account
       if (receivedFunds && receivedAmount && selectedAccountId && liability) {
@@ -240,14 +365,141 @@ export default function AddLiabilityModal() {
                 mode="date"
                 display="default"
                 onChange={(event, date) => {
-                  setShowDatePicker(false);
-                  if (date) {
+                  if (Platform.OS === 'android') {
+                    setShowDatePicker(false);
+                  }
+                  if (date && (Platform.OS === 'ios' || event.type === 'set')) {
                     setStartDate(date);
+                    if (Platform.OS === 'ios') {
+                      setShowDatePicker(false);
+                    }
                   }
                 }}
               />
             )}
           </View>
+
+          {/* EMI-specific fields */}
+          {selectedType === 'emi' && (
+            <>
+              {/* EMI Amount */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>EMI Amount *</Text>
+                <View style={styles.amountInputContainer}>
+                  <Text style={styles.currencySymbol}>{currency === 'INR' ? '₹' : '$'}</Text>
+                  <TextInput
+                    style={styles.amountInput}
+                    placeholder="0.00"
+                    value={emiAmount}
+                    onChangeText={setEmiAmount}
+                    keyboardType="numeric"
+                  />
+                </View>
+                <Text style={styles.helperText}>
+                  The fixed amount to pay per {frequency === 'monthly' ? 'month' : 'week'}
+                </Text>
+              </View>
+
+              {/* Frequency */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Payment Frequency *</Text>
+                <View style={styles.optionButtons}>
+                  <TouchableOpacity
+                    style={[
+                      styles.optionButton,
+                      frequency === 'monthly' && styles.optionButtonSelected,
+                    ]}
+                    onPress={() => setFrequency('monthly')}
+                  >
+                    <Text style={[
+                      styles.optionButtonText,
+                      frequency === 'monthly' && styles.optionButtonTextSelected
+                    ]}>Monthly</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[
+                      styles.optionButton,
+                      frequency === 'weekly' && styles.optionButtonSelected,
+                    ]}
+                    onPress={() => setFrequency('weekly')}
+                  >
+                    <Text style={[
+                      styles.optionButtonText,
+                      frequency === 'weekly' && styles.optionButtonTextSelected
+                    ]}>Weekly</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              {/* Payment Date (First Payment Date) */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>First Payment Date *</Text>
+                <TouchableOpacity 
+                  style={styles.dateButton} 
+                  onPress={() => setShowPaymentDatePicker(true)}
+                >
+                  <Ionicons name="calendar-outline" size={20} color="rgba(0, 0, 0, 0.6)" />
+                  <Text style={styles.dateButtonText}>{formatDate(paymentDate)}</Text>
+                </TouchableOpacity>
+                {showPaymentDatePicker && (
+                  <DateTimePicker
+                    value={paymentDate}
+                    mode="date"
+                    display="default"
+                    onChange={(event, date) => {
+                      if (Platform.OS === 'android') {
+                        setShowPaymentDatePicker(false);
+                      }
+                      if (date && (Platform.OS === 'ios' || event.type === 'set')) {
+                        setPaymentDate(date);
+                        if (Platform.OS === 'ios') {
+                          setShowPaymentDatePicker(false);
+                        }
+                      }
+                    }}
+                  />
+                )}
+                <Text style={styles.helperText}>
+                  Date of the first payment (must be on or after start date)
+                </Text>
+              </View>
+
+              {/* End Date (Optional) */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>End Date (Optional)</Text>
+                <TouchableOpacity 
+                  style={styles.dateButton} 
+                  onPress={() => setShowEndDatePicker(true)}
+                >
+                  <Ionicons name="calendar-outline" size={20} color="rgba(0, 0, 0, 0.6)" />
+                  <Text style={styles.dateButtonText}>
+                    {endDate ? formatDate(endDate) : 'Select end date'}
+                  </Text>
+                </TouchableOpacity>
+                {showEndDatePicker && (
+                  <DateTimePicker
+                    value={endDate || new Date()}
+                    mode="date"
+                    display="default"
+                    onChange={(event, date) => {
+                      if (Platform.OS === 'android') {
+                        setShowEndDatePicker(false);
+                      }
+                      if (date && (Platform.OS === 'ios' || event.type === 'set')) {
+                        setEndDate(date);
+                        if (Platform.OS === 'ios') {
+                          setShowEndDatePicker(false);
+                        }
+                      }
+                    }}
+                  />
+                )}
+                <Text style={styles.helperText}>
+                  When the EMI will end (bills will be generated until this date)
+                </Text>
+              </View>
+            </>
+          )}
 
           {/* Did you receive funds? */}
           <View style={styles.inputGroup}>
@@ -342,7 +594,12 @@ export default function AddLiabilityModal() {
         <TouchableOpacity
           style={[styles.createButton, loading && styles.createButtonDisabled]}
           onPress={handleSave}
-          disabled={loading || !name.trim() || !currentBalance}
+          disabled={
+            loading || 
+            !name.trim() || 
+            !currentBalance ||
+            (selectedType === 'emi' && (!emiAmount || parseFloat(emiAmount) <= 0))
+          }
         >
           {loading ? (
             <ActivityIndicator color="#FFFFFF" />

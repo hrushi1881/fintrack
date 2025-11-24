@@ -1,0 +1,549 @@
+import React, { useState } from 'react';
+import { StyleSheet, Text, View, ScrollView, ActivityIndicator, TouchableOpacity, TextInput, Modal } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { useLiabilityCycles } from '@/hooks/useLiabilityCycles';
+import CycleCard from './CycleCard';
+import { Transaction } from '@/types';
+import GlassmorphCard from '../GlassmorphCard';
+import { useSettings } from '@/contexts/SettingsContext';
+import { formatCurrencyAmount } from '@/utils/currency';
+import { Cycle } from '@/utils/cycles';
+import UnifiedPaymentModal from '@/app/modals/unified-payment-modal';
+
+interface LiabilityCyclesProps {
+  liabilityId: string;
+  maxCycles?: number;
+}
+
+export default function LiabilityCycles({
+  liabilityId,
+  maxCycles = 12,
+}: LiabilityCyclesProps) {
+  const {
+    liability,
+    cycles,
+    currentCycle,
+    statistics,
+    loading,
+    error,
+    updateCycleNote,
+    refresh,
+  } = useLiabilityCycles({ liabilityId, maxCycles });
+
+  const { currency } = useSettings();
+
+  const [selectedCycleForNote, setSelectedCycleForNote] = useState<number | null>(null);
+  const [noteText, setNoteText] = useState('');
+  const [noteModalVisible, setNoteModalVisible] = useState(false);
+  const [savingNote, setSavingNote] = useState(false);
+  const [selectedCycleForBill, setSelectedCycleForBill] = useState<Cycle | null>(null);
+  const [showBillModal, setShowBillModal] = useState(false);
+
+  const formatCurrency = (amount: number) => {
+    return formatCurrencyAmount(amount, currency);
+  };
+
+  const handleAddNote = (cycleNumber: number, currentNote: string) => {
+    setSelectedCycleForNote(cycleNumber);
+    setNoteText(currentNote);
+    setNoteModalVisible(true);
+  };
+
+  const handleSaveNote = async () => {
+    if (selectedCycleForNote === null) return;
+
+    setSavingNote(true);
+    try {
+      await updateCycleNote(selectedCycleForNote, noteText);
+      setNoteModalVisible(false);
+      setSelectedCycleForNote(null);
+      setNoteText('');
+    } catch (err) {
+      console.error('Failed to save note:', err);
+      alert('Failed to save note. Please try again.');
+    } finally {
+      setSavingNote(false);
+    }
+  };
+
+  const handleViewTransactions = (transactions: Transaction[]) => {
+    // TODO: Navigate to transaction list or show transactions modal
+    console.log('View transactions:', transactions);
+  };
+
+  const handleCreateBill = (cycle: Cycle) => {
+    setSelectedCycleForBill(cycle);
+    setShowBillModal(true);
+  };
+
+  const handleBillModalClose = () => {
+    setShowBillModal(false);
+    setSelectedCycleForBill(null);
+  };
+
+  const handleBillSuccess = () => {
+    // Refresh cycles data after bill is created or payment is made
+    refresh();
+    handleBillModalClose();
+  };
+
+  if (loading) {
+    return (
+      <View style={styles.centerContainer}>
+        <ActivityIndicator size="large" color="#6366F1" />
+        <Text style={styles.loadingText}>Loading cycles...</Text>
+      </View>
+    );
+  }
+
+  if (error) {
+    return (
+      <View style={styles.centerContainer}>
+        <Ionicons name="alert-circle" size={48} color="#EF4444" />
+        <Text style={styles.errorText}>{error}</Text>
+      </View>
+    );
+  }
+
+  if (!liability || cycles.length === 0) {
+    return (
+      <View style={styles.centerContainer}>
+        <Ionicons name="calendar-outline" size={48} color="#9CA3AF" />
+        <Text style={styles.emptyText}>No cycles to display</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.container}>
+      {/* Header */}
+      <View style={styles.header}>
+        <Text style={styles.title}>Payment Cycles</Text>
+        <Text style={styles.subtitle}>
+          Track your debt repayment progress
+        </Text>
+      </View>
+
+      {/* Liability Summary Card */}
+      <GlassmorphCard
+        style={styles.summaryCard}
+        overlayColor="rgba(239, 68, 68, 0.05)"
+        borderRadius={16}
+      >
+        <View style={styles.summaryRow}>
+          <View>
+            <Text style={styles.summaryLabel}>Outstanding Balance</Text>
+            <Text style={styles.summaryValue}>{formatCurrency(liability.current_balance)}</Text>
+          </View>
+          <View style={styles.summaryRight}>
+            <Text style={styles.summaryLabel}>Monthly Payment</Text>
+            <Text style={[styles.summaryValue, { color: '#EF4444' }]}>
+              {formatCurrency(liability.periodical_payment || 0)}
+            </Text>
+          </View>
+        </View>
+        
+        {liability.interest_rate_apy > 0 && (
+          <View style={styles.summaryDetailRow}>
+            <Text style={styles.summaryDetailLabel}>Interest Rate</Text>
+            <Text style={styles.summaryDetailValue}>{liability.interest_rate_apy.toFixed(2)}% APY</Text>
+          </View>
+        )}
+      </GlassmorphCard>
+
+      {/* Statistics Card */}
+      <GlassmorphCard
+        style={styles.statsCard}
+        overlayColor="rgba(99, 102, 241, 0.05)"
+        borderRadius={16}
+      >
+        <View style={styles.statsGrid}>
+          <View style={styles.statItem}>
+            <Text style={styles.statValue}>{statistics.total}</Text>
+            <Text style={styles.statLabel}>Total</Text>
+          </View>
+          <View style={styles.statItem}>
+            <Text style={[styles.statValue, { color: '#10B981' }]}>
+              {statistics.paid}
+            </Text>
+            <Text style={styles.statLabel}>Paid</Text>
+          </View>
+          <View style={styles.statItem}>
+            <Text style={[styles.statValue, { color: '#EF4444' }]}>
+              {statistics.notPaid}
+            </Text>
+            <Text style={styles.statLabel}>Missed</Text>
+          </View>
+          <View style={styles.statItem}>
+            <Text style={[styles.statValue, { color: '#6B7280' }]}>
+              {statistics.upcoming}
+            </Text>
+            <Text style={styles.statLabel}>Upcoming</Text>
+          </View>
+        </View>
+
+        <View style={styles.statsRow}>
+          <View style={styles.statsRowItem}>
+            <Text style={styles.statsRowLabel}>Total Paid</Text>
+            <Text style={styles.statsRowValue}>{formatCurrency(statistics.totalActual)}</Text>
+          </View>
+          <View style={styles.statsRowItem}>
+            <Text style={styles.statsRowLabel}>On-Time Rate</Text>
+            <Text style={styles.statsRowValue}>{statistics.onTimeRate}%</Text>
+          </View>
+        </View>
+      </GlassmorphCard>
+
+      {/* Current Cycle Highlight */}
+      {currentCycle && (
+        <View style={styles.currentCycleContainer}>
+          <View style={styles.currentCycleHeader}>
+            <Ionicons name="time" size={20} color="#EF4444" />
+            <Text style={styles.currentCycleTitle}>Current Cycle</Text>
+          </View>
+          <CycleCard
+            cycle={currentCycle}
+            onAddNote={handleAddNote}
+            onViewTransactions={handleViewTransactions}
+            onCreateBill={handleCreateBill}
+            expanded={true}
+          />
+        </View>
+      )}
+
+      {/* All Cycles List */}
+      <View style={styles.cyclesListContainer}>
+        <Text style={styles.cyclesListTitle}>All Cycles</Text>
+        <ScrollView
+          style={styles.cyclesList}
+          showsVerticalScrollIndicator={false}
+        >
+          {cycles.map((cycle) => (
+            <CycleCard
+              key={cycle.cycleNumber}
+              cycle={cycle}
+              onAddNote={handleAddNote}
+              onViewTransactions={handleViewTransactions}
+              onCreateBill={handleCreateBill}
+            />
+          ))}
+        </ScrollView>
+      </View>
+
+      {/* Note Modal */}
+      <Modal
+        visible={noteModalVisible}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setNoteModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>
+                {noteText ? 'Edit Note' : 'Add Note'}
+              </Text>
+              <TouchableOpacity
+                onPress={() => setNoteModalVisible(false)}
+                style={styles.modalCloseButton}
+              >
+                <Ionicons name="close" size={24} color="#6B7280" />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.modalSubtitle}>
+              Cycle {selectedCycleForNote}
+            </Text>
+
+            <TextInput
+              style={styles.noteInput}
+              value={noteText}
+              onChangeText={setNoteText}
+              placeholder="Enter your note here..."
+              placeholderTextColor="#9CA3AF"
+              multiline={true}
+              numberOfLines={4}
+              textAlignVertical="top"
+            />
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalButtonCancel]}
+                onPress={() => setNoteModalVisible(false)}
+                disabled={savingNote}
+              >
+                <Text style={styles.modalButtonTextCancel}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.modalButtonSave]}
+                onPress={handleSaveNote}
+                disabled={savingNote}
+              >
+                {savingNote ? (
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.modalButtonTextSave}>Save</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Create Bill Modal */}
+      {selectedCycleForBill && liability && (
+        <UnifiedPaymentModal
+          visible={showBillModal}
+          onClose={handleBillModalClose}
+          onSuccess={handleBillSuccess}
+          liabilityId={liability.id}
+          createBillFromCycle={{
+            cycleNumber: selectedCycleForBill.cycleNumber,
+            expectedAmount: selectedCycleForBill.expectedAmount,
+            expectedDate: selectedCycleForBill.expectedDate,
+            liabilityId: liability.id,
+            cycle: {
+              expectedPrincipal: selectedCycleForBill.expectedPrincipal,
+              expectedInterest: selectedCycleForBill.expectedInterest,
+              remainingBalance: selectedCycleForBill.remainingBalance,
+            },
+          }}
+          prefillAmount={selectedCycleForBill.expectedAmount}
+          prefillDate={new Date(selectedCycleForBill.expectedDate)}
+        />
+      )}
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  centerContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  header: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  title: {
+    fontSize: 24,
+    fontFamily: 'Poppins-Bold',
+    color: '#1F2937',
+    marginBottom: 4,
+  },
+  subtitle: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#6B7280',
+  },
+  loadingText: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#6B7280',
+    marginTop: 12,
+  },
+  errorText: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#EF4444',
+    marginTop: 12,
+    textAlign: 'center',
+  },
+  emptyText: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#9CA3AF',
+    marginTop: 12,
+  },
+  summaryCard: {
+    marginHorizontal: 16,
+    marginBottom: 12,
+  },
+  summaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  summaryRight: {
+    alignItems: 'flex-end',
+  },
+  summaryLabel: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#6B7280',
+    marginBottom: 4,
+  },
+  summaryValue: {
+    fontSize: 20,
+    fontFamily: 'Poppins-Bold',
+    color: '#1F2937',
+  },
+  summaryDetailRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#E5E7EB',
+  },
+  summaryDetailLabel: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#6B7280',
+  },
+  summaryDetailValue: {
+    fontSize: 14,
+    fontFamily: 'Poppins-Medium',
+    color: '#1F2937',
+  },
+  statsCard: {
+    marginHorizontal: 16,
+    marginBottom: 16,
+  },
+  statsGrid: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    marginBottom: 16,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5E7EB',
+  },
+  statItem: {
+    alignItems: 'center',
+  },
+  statValue: {
+    fontSize: 24,
+    fontFamily: 'Poppins-Bold',
+    color: '#1F2937',
+    marginBottom: 4,
+  },
+  statLabel: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#6B7280',
+  },
+  statsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+  },
+  statsRowItem: {
+    alignItems: 'center',
+  },
+  statsRowLabel: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#6B7280',
+    marginBottom: 4,
+  },
+  statsRowValue: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#EF4444',
+  },
+  currentCycleContainer: {
+    marginBottom: 16,
+  },
+  currentCycleHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    marginBottom: 8,
+  },
+  currentCycleTitle: {
+    fontSize: 18,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#EF4444',
+  },
+  cyclesListContainer: {
+    flex: 1,
+  },
+  cyclesListTitle: {
+    fontSize: 18,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#1F2937',
+    paddingHorizontal: 16,
+    marginBottom: 8,
+  },
+  cyclesList: {
+    flex: 1,
+    paddingHorizontal: 8,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContent: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    padding: 24,
+    width: '100%',
+    maxWidth: 400,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontFamily: 'Poppins-Bold',
+    color: '#1F2937',
+  },
+  modalCloseButton: {
+    padding: 4,
+  },
+  modalSubtitle: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#6B7280',
+    marginBottom: 16,
+  },
+  noteInput: {
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+    borderRadius: 12,
+    padding: 12,
+    fontSize: 15,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#1F2937',
+    minHeight: 120,
+    marginBottom: 20,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  modalButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalButtonCancel: {
+    backgroundColor: '#F3F4F6',
+  },
+  modalButtonSave: {
+    backgroundColor: '#EF4444',
+  },
+  modalButtonTextCancel: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#6B7280',
+  },
+  modalButtonTextSave: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#FFFFFF',
+  },
+});
+

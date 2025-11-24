@@ -1,74 +1,149 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
-  Modal,
-  View,
-  Text,
-  TouchableOpacity,
   StyleSheet,
+  Text,
+  View,
+  TouchableOpacity,
   ScrollView,
-  Alert,
-  ActivityIndicator,
+  SafeAreaView,
   TextInput,
-  Switch,
+  Alert,
   Platform,
+  ActivityIndicator,
+  Modal,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useAuth } from '@/contexts/AuthContext';
-import { supabase } from '@/lib/supabase';
-import { Bill } from '@/types';
-import GlassCard from '@/components/GlassCard';
-import { formatCurrencyAmount } from '@/utils/currency';
-import { useSettings } from '@/contexts/SettingsContext';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/contexts/AuthContext';
+import { useSettings } from '@/contexts/SettingsContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
-import { fetchCategories } from '@/utils/categories';
+import { formatCurrencyAmount } from '@/utils/currency';
+import GlassCard from '@/components/GlassCard';
 import FundPicker, { FundBucket } from '@/components/FundPicker';
+import { fetchBillById } from '@/utils/bills';
+import { fetchCategories } from '@/utils/categories';
+import { useLocalSearchParams, router } from 'expo-router';
+
+type BillData = {
+  id: string;
+  title: string;
+  amount?: number;
+  due_date: string;
+  status: string;
+  linked_account_id?: string;
+  category_id?: string;
+  description?: string;
+  parent_bill_id?: string;
+  bill_type: string;
+};
 
 interface PayBillModalProps {
-  visible: boolean;
-  onClose: () => void;
-  bill: Bill | null;
+  visible?: boolean;
+  onClose?: () => void;
+  bill?: BillData | null;
   onSuccess?: () => void;
 }
 
-export default function PayBillModal({ visible, onClose, bill, onSuccess }: PayBillModalProps) {
+export default function PayBillModal({ visible: propVisible, onClose: propOnClose, bill: propBill, onSuccess }: PayBillModalProps) {
+  const { id } = useLocalSearchParams();
   const { user } = useAuth();
   const { currency } = useSettings();
-  const { accounts, globalRefresh } = useRealtimeData();
-
-  const [paymentDate, setPaymentDate] = useState(new Date());
+  const { globalRefresh, refreshAccounts, refreshAccountFunds, refreshTransactions, accounts: realtimeAccounts } = useRealtimeData();
+  
+  const [bill, setBill] = useState<BillData | null>(propBill || null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [accounts, setAccounts] = useState<any[]>([]);
+  
+  // Payment form state
   const [amount, setAmount] = useState('');
-  const [interestAmount, setInterestAmount] = useState('');
-  const [interestIncluded, setInterestIncluded] = useState(false);
-  const [dueDate, setDueDate] = useState(new Date());
+  const [paymentDate, setPaymentDate] = useState(new Date());
+  const [showDatePicker, setShowDatePicker] = useState(false);
   const [description, setDescription] = useState('');
-  const [selectedAccountId, setSelectedAccountId] = useState<string>('');
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [selectedFundBucket, setSelectedFundBucket] = useState<FundBucket | null>(null);
   const [showFundPicker, setShowFundPicker] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [showDatePicker, setShowDatePicker] = useState(false);
-  const [showDueDatePicker, setShowDueDatePicker] = useState(false);
 
-  // Reset form when bill changes
+  // Determine if modal is visible (from props or route)
+  const visible = propVisible !== undefined ? propVisible : (id !== undefined);
+
   useEffect(() => {
-    if (bill) {
-      setAmount(bill.amount?.toString() || '');
-      setInterestAmount(bill.interest_amount?.toString() || '');
-      setInterestIncluded(bill.interest_included || false);
-      setDueDate(new Date(bill.due_date));
-      setPaymentDate(bill.last_paid_date ? new Date(bill.last_paid_date) : new Date());
-      setDescription(bill.description || `Payment for ${bill.title}`);
-      setSelectedAccountId(bill.linked_account_id || (accounts.length > 0 ? accounts[0].id : ''));
-      setSelectedFundBucket(null); // Reset fund selection when bill changes
+    if ((visible || id) && user) {
+      // Reset form when modal opens
+      setAmount('');
+      setSelectedAccountId(null);
+      setSelectedFundBucket(null);
+      setDescription('');
+      setPaymentDate(new Date());
+      fetchBill();
+      fetchAccounts();
     }
-  }, [bill, accounts]);
+  }, [visible, id, user]);
 
-  // Auto-show fund picker when account is selected (only for unpaid bills)
+  const fetchAccounts = async () => {
+    if (!user) return;
+    try {
+      const { data, error } = await supabase
+        .from('accounts')
+        .select('*')
+        .eq('user_id', user.id)
+        .eq('is_active', true)
+        .order('name');
+
+      if (error) throw error;
+      setAccounts(data || []);
+    } catch (error) {
+      console.error('Error fetching accounts:', error);
+      setAccounts([]);
+    }
+  };
+
+  const fetchBill = async () => {
+    if (!user) return;
+    
+    try {
+      setLoading(true);
+      const billId = id || propBill?.id;
+      if (!billId) {
+        setBill(null);
+        return;
+      }
+
+      const billData = await fetchBillById(billId as string);
+      if (billData) {
+        setBill(billData);
+        // Pre-fill amount with bill amount if available
+        if (billData.amount) {
+          setAmount(billData.amount.toString());
+        }
+        // Pre-fill account if linked
+        if (billData.linked_account_id) {
+          setSelectedAccountId(billData.linked_account_id);
+        } else if (accounts.length > 0) {
+          setSelectedAccountId(accounts[0].id);
+        }
+        // Pre-fill description
+        if (billData.description) {
+          setDescription(billData.description);
+        } else {
+          setDescription(`Payment for ${billData.title}`);
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching bill:', error);
+      Alert.alert('Error', 'Failed to load bill');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Auto-show fund picker when account is selected
   useEffect(() => {
-    if (selectedAccountId && !selectedFundBucket && visible && bill && bill.status !== 'paid') {
+    if (selectedAccountId && !selectedFundBucket && visible) {
       setShowFundPicker(true);
     }
-  }, [selectedAccountId, visible, bill, selectedFundBucket]);
+  }, [selectedAccountId, visible]);
 
   // Reset fund bucket when account changes
   useEffect(() => {
@@ -77,106 +152,27 @@ export default function PayBillModal({ visible, onClose, bill, onSuccess }: PayB
     }
   }, [selectedAccountId]);
 
-  const formatCurrency = (value: number) => {
-    return formatCurrencyAmount(value, currency);
-  };
+  // Calculate regular accounts
+  const regularAccounts = useMemo(() => {
+    if (!accounts || accounts.length === 0) return [];
+    return accounts.filter((a) => 
+      a.type !== 'liability' && 
+      a.type !== 'goals_savings' && 
+      a.is_active === true
+    );
+  }, [accounts]);
 
-  const formatDate = (date: Date) => {
-    return date.toLocaleDateString(undefined, {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-    });
-  };
-
-  const formatDateForInput = (date: Date) => {
-    return date.toISOString().split('T')[0];
-  };
-
-  const handleSave = async () => {
-    if (!user || !bill) return;
-
-    const amountValue = parseFloat(amount);
-    if (isNaN(amountValue) || amountValue <= 0) {
+  const handlePayment = async () => {
+    if (!user || !bill || !amount) return;
+    
+    const amountNum = parseFloat(amount);
+    if (isNaN(amountNum) || amountNum <= 0) {
       Alert.alert('Error', 'Please enter a valid amount');
       return;
     }
 
-    const interestValue = parseFloat(interestAmount || '0');
-    if (interestAmount && (isNaN(interestValue) || interestValue < 0)) {
-      Alert.alert('Error', 'Please enter a valid interest amount');
-      return;
-    }
-
-    try {
-      setSaving(true);
-
-      // Calculate total amount and principal
-      let totalAmount = amountValue;
-      let principalAmount = amountValue;
-
-      if (interestIncluded && interestValue > 0) {
-        totalAmount = amountValue;
-        principalAmount = Math.max(0, amountValue - interestValue);
-      } else if (!interestIncluded && interestValue > 0) {
-        totalAmount = amountValue + interestValue;
-        principalAmount = amountValue;
-      }
-
-      // Update bill with new values
-      const { error: billError } = await supabase
-        .from('bills')
-        .update({
-          amount: totalAmount,
-          principal_amount: principalAmount,
-          interest_amount: interestValue || 0,
-          interest_included: interestIncluded,
-          due_date: formatDateForInput(dueDate), // Update deadline
-          original_due_date: bill.original_due_date || formatDateForInput(dueDate),
-          description: description || null,
-          linked_account_id: selectedAccountId || bill.linked_account_id,
-          updated_at: new Date().toISOString(),
-          metadata: {
-            ...bill.metadata,
-            payment_amount: amountValue,
-            total_amount: totalAmount,
-            deadline_changed: true,
-            deadline_changed_date: formatDateForInput(dueDate),
-          },
-        })
-        .eq('id', bill.id);
-
-      if (billError) throw billError;
-
-      await globalRefresh();
-
-      Alert.alert('Success', 'Bill updated successfully', [
-        {
-          text: 'OK',
-          onPress: () => {
-            onSuccess?.();
-          },
-        },
-      ]);
-    } catch (error: any) {
-      console.error('Error updating bill:', error);
-      Alert.alert('Error', error.message || 'Failed to update bill');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handlePayment = async () => {
-    if (!user || !bill) return;
-
-    const amountValue = parseFloat(amount);
-    if (isNaN(amountValue) || amountValue <= 0) {
-      Alert.alert('Error', 'Please enter a valid payment amount');
-      return;
-    }
-
     if (!selectedAccountId) {
-      Alert.alert('Error', 'Please select an account');
+      Alert.alert('Error', 'Please select a payment account');
       return;
     }
 
@@ -185,53 +181,9 @@ export default function PayBillModal({ visible, onClose, bill, onSuccess }: PayB
       return;
     }
 
-    // Validate fund selection for liability bills
-    if (bill.liability_id) {
-      // For liability bills, only allow Personal Fund or the correct Liability Fund
-      if (selectedFundBucket.type === 'borrowed' && selectedFundBucket.id !== bill.liability_id) {
-        Alert.alert(
-          'Invalid Fund Selection',
-          `This bill is for a different liability. Please select Personal Fund or the Liability Fund for this bill.`
-        );
-        return;
-      }
-    }
-
     try {
       setSaving(true);
-
-      // Calculate total amount and principal (in case user edited them)
-      const interestValue = parseFloat(interestAmount || '0');
-      let totalAmount = amountValue;
-      let principalAmount = amountValue;
-
-      if (interestIncluded && interestValue > 0) {
-        // Interest is included in the payment amount
-        totalAmount = amountValue;
-        principalAmount = Math.max(0, amountValue - interestValue);
-      } else if (!interestIncluded && interestValue > 0) {
-        // Interest is additional, so total = principal + interest
-        totalAmount = amountValue + interestValue;
-        principalAmount = amountValue;
-      }
-
-      // First, update bill with any changes (deadline, amounts, etc.)
-      const { error: updateError } = await supabase
-        .from('bills')
-        .update({
-          amount: totalAmount,
-          principal_amount: principalAmount,
-          interest_amount: interestValue || 0,
-          interest_included: interestIncluded,
-          due_date: formatDateForInput(dueDate),
-          description: description || null,
-          linked_account_id: selectedAccountId,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', bill.id);
-
-      if (updateError) throw updateError;
-
+      
       // Get or find "Bills" category for bill payments
       let billCategoryId: string | null = null;
       try {
@@ -254,39 +206,36 @@ export default function PayBillModal({ visible, onClose, bill, onSuccess }: PayB
         console.error('Error fetching category:', error);
       }
 
-      // 1. Create expense transaction via RPC - Use totalAmount (includes interest if not included)
       // Construct bucket parameter from selected fund
       const bucketParam = {
         type: selectedFundBucket.type === 'borrowed' ? 'liability' : selectedFundBucket.type,
         id: selectedFundBucket.type !== 'personal' ? selectedFundBucket.id : null,
       };
 
+      // Create expense transaction via RPC
       const { data: rpcData, error: rpcError } = await supabase.rpc('spend_from_account_bucket', {
         p_user_id: user.id,
         p_account_id: selectedAccountId,
         p_bucket: bucketParam,
-        p_amount: totalAmount, // Use totalAmount which includes interest when interest is not included
-        p_category: billCategoryId || null,
+        p_amount: amountNum,
+        p_category: billCategoryId || bill.category_id || null,
         p_description: description || `Payment for ${bill.title}`,
-        p_date: formatDateForInput(paymentDate),
+        p_date: paymentDate.toISOString().split('T')[0],
         p_currency: currency,
       });
 
       if (rpcError) throw rpcError;
 
-      // 2. Mark bill as paid
+      // Mark bill as paid
       const { error: billError } = await supabase
         .from('bills')
         .update({
           status: 'paid',
-          last_paid_date: formatDateForInput(paymentDate),
+          last_paid_date: paymentDate.toISOString().split('T')[0],
           updated_at: new Date().toISOString(),
           metadata: {
-            ...bill.metadata,
-            paid_amount: totalAmount, // Store the total amount paid (includes interest)
-            principal_paid: principalAmount,
-            interest_paid: interestValue || 0,
-            paid_date: formatDateForInput(paymentDate),
+            paid_amount: amountNum,
+            paid_date: paymentDate.toISOString().split('T')[0],
             transaction_id: (rpcData as any)?.id || null,
           },
         })
@@ -294,40 +243,93 @@ export default function PayBillModal({ visible, onClose, bill, onSuccess }: PayB
 
       if (billError) throw billError;
 
-      // 3. Update liability balance if this is a liability bill
-      if (bill.liability_id) {
-        const { error: liabilityError } = await supabase.rpc('update_liability_balance', {
-          p_liability_id: bill.liability_id,
-          p_payment_amount: principalAmount,
-        });
-
-        if (liabilityError) {
-          console.error('Error updating liability balance:', liabilityError);
-        }
-
-        // Check if liability is fully paid
-        const { data: liability } = await supabase
-          .from('liabilities')
-          .select('current_balance')
-          .eq('id', bill.liability_id)
+      // If this is a payment bill (has parent), check if we need to generate next payment bill
+      if (bill.parent_bill_id) {
+        // Check if container bill has auto-create enabled and generate next payment bill
+        const { data: containerBill } = await supabase
+          .from('bills')
+          .select('*')
+          .eq('id', bill.parent_bill_id)
           .single();
 
-        if (liability && liability.current_balance <= 0) {
-          await supabase
-            .from('liabilities')
-            .update({ status: 'paid_off' })
-            .eq('id', bill.liability_id);
+        if (containerBill && containerBill.auto_create && containerBill.frequency) {
+          // Calculate next due date based on frequency
+          const currentDueDate = new Date(bill.due_date);
+          let nextDueDate = new Date(currentDueDate);
+
+          switch (containerBill.frequency) {
+            case 'daily':
+              nextDueDate.setDate(nextDueDate.getDate() + (containerBill.recurrence_interval || 1));
+              break;
+            case 'weekly':
+              nextDueDate.setDate(nextDueDate.getDate() + 7 * (containerBill.recurrence_interval || 1));
+              break;
+            case 'biweekly':
+              nextDueDate.setDate(nextDueDate.getDate() + 14);
+              break;
+            case 'monthly':
+              nextDueDate.setMonth(nextDueDate.getMonth() + (containerBill.recurrence_interval || 1));
+              break;
+            case 'bimonthly':
+              nextDueDate.setMonth(nextDueDate.getMonth() + 2);
+              break;
+            case 'quarterly':
+              nextDueDate.setMonth(nextDueDate.getMonth() + 3);
+              break;
+            case 'halfyearly':
+              nextDueDate.setMonth(nextDueDate.getMonth() + 6);
+              break;
+            case 'yearly':
+              nextDueDate.setFullYear(nextDueDate.getFullYear() + 1);
+              break;
+          }
+
+          // Create next payment bill
+          const { error: nextBillError } = await supabase
+            .from('bills')
+            .insert({
+              user_id: user.id,
+              title: `${containerBill.title} - Payment`,
+              description: containerBill.description,
+              amount: containerBill.amount,
+              currency: containerBill.currency,
+              due_date: nextDueDate.toISOString().split('T')[0],
+              original_due_date: nextDueDate.toISOString().split('T')[0],
+              status: 'upcoming',
+              bill_type: containerBill.bill_type,
+              parent_bill_id: containerBill.id,
+              linked_account_id: containerBill.linked_account_id || selectedAccountId,
+              category_id: containerBill.category_id,
+              color: containerBill.color,
+              icon: containerBill.icon,
+              reminder_days: containerBill.reminder_days || [3, 1],
+              is_active: true,
+              is_deleted: false,
+            });
+
+          if (nextBillError) {
+            console.error('Error creating next payment bill:', nextBillError);
+          }
         }
       }
 
-      await globalRefresh();
+      // Wait for database commit
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Refresh all data
+      await Promise.all([
+        refreshAccounts(),
+        refreshAccountFunds(),
+        refreshTransactions(),
+      ]);
 
       Alert.alert('Success', 'Payment recorded successfully', [
         {
           text: 'OK',
           onPress: () => {
-            handleClose();
+            globalRefresh();
             onSuccess?.();
+            handleClose();
           },
         },
       ]);
@@ -339,31 +341,91 @@ export default function PayBillModal({ visible, onClose, bill, onSuccess }: PayB
     }
   };
 
-  const handleClose = () => {
-    setAmount('');
-    setInterestAmount('');
-    setInterestIncluded(false);
-    setDueDate(new Date());
-    setDescription('');
-    setPaymentDate(new Date());
-    setSelectedAccountId('');
-    setSelectedFundBucket(null);
-    setShowFundPicker(false);
-    onClose();
+  const formatCurrency = (amount: number) => {
+    return formatCurrencyAmount(amount, currency);
   };
 
-  if (!bill) return null;
+  const formatDate = (date: Date) => {
+    return date.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+  };
 
-  return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={handleClose}>
-      <View style={styles.modalOverlay}>
-        <View style={styles.modalContent}>
-          <View style={styles.modalContainer}>
+  const handleClose = () => {
+    if (propOnClose) {
+      propOnClose();
+    } else {
+      router.back();
+    }
+  };
+
+  if (!visible) return null;
+
+  if (loading) {
+    return (
+      <Modal visible={visible} animationType="slide" onRequestClose={handleClose}>
+        <SafeAreaView style={styles.safeArea}>
+          <View style={styles.container}>
             <View style={styles.header}>
-              <Text style={styles.headerTitle}>{bill.status === 'paid' ? 'Bill Details' : 'Pay Bill'}</Text>
               <TouchableOpacity onPress={handleClose} style={styles.closeButton}>
                 <Ionicons name="close" size={24} color="#000000" />
               </TouchableOpacity>
+              <Text style={styles.headerTitle}>Pay Bill</Text>
+              <View style={styles.closeButton} />
+            </View>
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="large" color="#000000" />
+              <Text style={styles.loadingText}>Loading...</Text>
+            </View>
+          </View>
+        </SafeAreaView>
+      </Modal>
+    );
+  }
+
+  if (!bill) {
+    return (
+      <Modal visible={visible} animationType="slide" onRequestClose={handleClose}>
+        <SafeAreaView style={styles.safeArea}>
+          <View style={styles.container}>
+            <View style={styles.header}>
+              <TouchableOpacity onPress={handleClose} style={styles.closeButton}>
+                <Ionicons name="close" size={24} color="#000000" />
+              </TouchableOpacity>
+              <Text style={styles.headerTitle}>Pay Bill</Text>
+              <View style={styles.closeButton} />
+            </View>
+            <View style={styles.errorContainer}>
+              <Text style={styles.errorText}>Bill not found</Text>
+              <TouchableOpacity style={styles.backButton} onPress={handleClose}>
+                <Text style={styles.backButtonText}>Go Back</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </SafeAreaView>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      transparent
+      onRequestClose={handleClose}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalContent}>
+          <View style={styles.modalContainer}>
+            {/* Header */}
+            <View style={styles.header}>
+              <TouchableOpacity onPress={handleClose} style={styles.closeButton}>
+                <Ionicons name="close" size={24} color="#000000" />
+              </TouchableOpacity>
+              <Text style={styles.headerTitle}>Pay Bill</Text>
+              <View style={styles.closeButton} />
             </View>
 
             <ScrollView 
@@ -373,363 +435,194 @@ export default function PayBillModal({ visible, onClose, bill, onSuccess }: PayB
               keyboardShouldPersistTaps="handled"
             >
               {/* Bill Info */}
-              <View style={styles.billInfo}>
-                <Text style={styles.billTitle}>{bill.title}</Text>
-                {bill.payment_number && (
-                  <Text style={styles.billNumber}>Payment #{bill.payment_number}</Text>
-                )}
-                {bill.status === 'paid' && bill.last_paid_date && (
-                  <Text style={styles.billPaidDate}>
-                    Paid on: {new Date(bill.last_paid_date).toLocaleDateString()}
+              <GlassCard padding={20} marginVertical={12}>
+                <Text style={styles.infoLabel}>Bill</Text>
+                <Text style={styles.infoValue}>{bill.title}</Text>
+                <View style={styles.infoRow}>
+                  <Text style={styles.infoLabel}>Amount Due</Text>
+                  <Text style={styles.infoBalance}>
+                    {bill.amount ? formatCurrency(bill.amount) : 'Variable'}
                   </Text>
-                )}
-              </View>
-
-              {/* Due Date (Deadline) - Editable */}
-              <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Due Date (Deadline) *</Text>
-                <TouchableOpacity 
-                  style={[styles.dateButton, bill.status === 'paid' && styles.dateButtonDisabled]}
-                  onPress={() => bill.status !== 'paid' && setShowDueDatePicker(true)}
-                  disabled={bill.status === 'paid'}
-                >
-                  <Ionicons name="calendar-outline" size={20} color={bill.status === 'paid' ? 'rgba(0, 0, 0, 0.3)' : 'rgba(0, 0, 0, 0.6)'} />
-                  <Text style={[styles.dateButtonText, bill.status === 'paid' && styles.dateButtonTextDisabled]}>
-                    {formatDate(dueDate)}
+                </View>
+                <View style={styles.infoRow}>
+                  <Text style={styles.infoLabel}>Due Date</Text>
+                  <Text style={styles.infoBalance}>
+                    {new Date(bill.due_date).toLocaleDateString('en-US', {
+                      year: 'numeric',
+                      month: 'short',
+                      day: 'numeric',
+                    })}
                   </Text>
-                  {bill.status !== 'paid' && (
-                    <Ionicons name="chevron-down" size={16} color="rgba(0, 0, 0, 0.4)" />
-                  )}
-                </TouchableOpacity>
-                {showDueDatePicker && (
-                  <DateTimePicker
-                    value={dueDate}
-                    mode="date"
-                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                    onChange={(event, date) => {
-                      if (Platform.OS === 'android') {
-                        setShowDueDatePicker(false);
-                      }
-                      if (date) {
-                        setDueDate(date);
-                        if (Platform.OS === 'ios') {
-                          setShowDueDatePicker(false);
-                        }
-                      }
-                    }}
-                  />
-                )}
-                <Text style={styles.helperText}>
-                  Deadline can be changed. Calendar will update automatically.
-                </Text>
-              </View>
-
-              {/* Payment Amount - Editable */}
-              <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Payment Amount *</Text>
-                <View style={[styles.amountInputContainer, bill.status === 'paid' && styles.amountInputContainerDisabled]}>
-                  <Text style={styles.currencySymbol}>{currency === 'INR' ? '₹' : '$'}</Text>
-                  <TextInput
-                    style={[styles.amountInput, bill.status === 'paid' && styles.amountInputDisabled]}
-                    placeholder="0.00"
-                    value={amount}
-                    onChangeText={setAmount}
-                    keyboardType="numeric"
-                    editable={bill.status !== 'paid'}
-                  />
                 </View>
-              </View>
-
-              {/* Interest Amount - Editable */}
-              <View style={styles.inputGroup}>
-                <View style={styles.labelRow}>
-                  <Text style={styles.inputLabel}>Interest Amount (Optional)</Text>
-                  {bill.status !== 'paid' && (
-                    <View style={styles.switchContainer}>
-                      <Text style={styles.switchLabel}>Included</Text>
-                      <Switch
-                        value={interestIncluded}
-                        onValueChange={setInterestIncluded}
-                        trackColor={{ false: '#D1D5DB', true: '#10B981' }}
-                        thumbColor="#FFFFFF"
-                      />
-                    </View>
-                  )}
-                </View>
-                <View style={[styles.amountInputContainer, bill.status === 'paid' && styles.amountInputContainerDisabled]}>
-                  <Text style={styles.currencySymbol}>{currency === 'INR' ? '₹' : '$'}</Text>
-                  <TextInput
-                    style={[styles.amountInput, bill.status === 'paid' && styles.amountInputDisabled]}
-                    placeholder="0.00"
-                    value={interestAmount}
-                    onChangeText={setInterestAmount}
-                    keyboardType="numeric"
-                    editable={bill.status !== 'paid'}
-                  />
-                </View>
-                <Text style={styles.helperText}>
-                  {interestAmount && amount ? (
-                    interestIncluded 
-                      ? `Interest (${formatCurrency(parseFloat(interestAmount))}) is included. Principal: ${formatCurrency(parseFloat(amount) - parseFloat(interestAmount))}`
-                      : `Interest will be added. Total: ${formatCurrency(parseFloat(amount) + parseFloat(interestAmount))}`
-                  ) : (
-                    interestIncluded 
-                      ? 'Interest is part of the payment amount'
-                      : 'Interest will be added to the payment amount'
-                  )}
-                </Text>
-              </View>
-
-              {/* Payment Date (When actually paying) */}
-              <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Payment Date *</Text>
-                <TouchableOpacity 
-                  style={styles.dateButton} 
-                  onPress={() => setShowDatePicker(true)}
-                >
-                  <Ionicons name="calendar-outline" size={20} color="rgba(0, 0, 0, 0.6)" />
-                  <Text style={styles.dateButtonText}>{formatDate(paymentDate)}</Text>
-                  <Ionicons name="chevron-down" size={16} color="rgba(0, 0, 0, 0.4)" />
-                </TouchableOpacity>
-                <Text style={styles.helperText}>
-                  Date when payment is actually made (can be different from due date)
-                </Text>
-                {showDatePicker && (
-                  <DateTimePicker
-                    value={paymentDate}
-                    mode="date"
-                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                    onChange={(event, date) => {
-                      if (Platform.OS === 'android') {
-                        setShowDatePicker(false);
-                      }
-                      if (date) {
-                        setPaymentDate(date);
-                        if (Platform.OS === 'ios') {
-                          setShowDatePicker(false);
-                        }
-                      }
-                    }}
-                  />
-                )}
-              </View>
+              </GlassCard>
 
               {/* Account Selection */}
-              <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Account *</Text>
-                {accounts.length === 0 ? (
-                  <Text style={styles.helperText}>No accounts available. Please create an account first.</Text>
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Select Account</Text>
+                {regularAccounts.length === 0 ? (
+                  <GlassCard padding={20} marginVertical={8}>
+                    <Text style={styles.emptyText}>
+                      No accounts available. Please create an account first.
+                    </Text>
+                  </GlassCard>
                 ) : (
                   <View style={styles.accountList}>
-                    {accounts.map((account) => (
+                    {regularAccounts.map((acc) => (
                       <TouchableOpacity
-                        key={account.id}
+                        key={acc.id}
                         style={[
-                          styles.accountOption,
-                          selectedAccountId === account.id && styles.accountOptionSelected,
+                          styles.accountItem,
+                          selectedAccountId === acc.id && styles.accountItemActive,
                         ]}
-                        onPress={() => setSelectedAccountId(account.id)}
+                        onPress={() => setSelectedAccountId(acc.id)}
                       >
-                        <View style={styles.accountOptionLeft}>
-                          <Ionicons
-                            name={account.type === 'card' ? 'card-outline' : 'wallet-outline'}
-                            size={20}
-                            color={selectedAccountId === account.id ? '#000000' : 'rgba(0, 0, 0, 0.6)'}
-                          />
-                          <View>
-                            <Text style={styles.accountName}>{account.name}</Text>
-                            <Text style={styles.accountBalance}>{formatCurrency(account.balance)}</Text>
-                          </View>
+                        <View style={styles.accountInfo}>
+                          <Text style={[
+                            styles.accountName,
+                            selectedAccountId === acc.id && styles.accountNameActive,
+                          ]}>
+                            {acc.name}
+                          </Text>
+                          <Text style={styles.accountBalance}>
+                            {formatCurrency(Number(acc.balance || 0))}
+                          </Text>
                         </View>
-                        <Ionicons
-                          name={selectedAccountId === account.id ? 'checkmark-circle' : 'ellipse-outline'}
-                          size={24}
-                          color={selectedAccountId === account.id ? '#10B981' : 'rgba(0, 0, 0, 0.3)'}
-                        />
+                        {selectedAccountId === acc.id && (
+                          <Ionicons name="checkmark-circle" size={24} color="#000000" />
+                        )}
                       </TouchableOpacity>
                     ))}
                   </View>
                 )}
               </View>
 
-              {/* Fund Selection - Only show if account is selected and bill is not paid */}
-              {selectedAccountId && bill.status !== 'paid' && (
-                <View style={styles.inputGroup}>
-                  <Text style={styles.inputLabel}>Fund Source *</Text>
-                  <TouchableOpacity
-                    style={styles.fundButton}
-                    onPress={() => setShowFundPicker(true)}
-                  >
-                    {selectedFundBucket ? (
-                      <View style={styles.fundButtonContent}>
-                        <View style={styles.fundButtonLeft}>
+              {/* Fund Source Selection */}
+              {selectedAccountId && (
+                <View style={styles.section}>
+                  <Text style={styles.sectionTitle}>Fund Source</Text>
+                  {selectedFundBucket ? (
+                    <TouchableOpacity
+                      style={styles.fundBucketButton}
+                      onPress={() => setShowFundPicker(true)}
+                    >
+                      <View style={styles.fundBucketInfo}>
+                        <View style={[styles.fundBucketIcon, { backgroundColor: (selectedFundBucket.color || '#6366F1') + '20' }]}>
                           <Ionicons
-                            name={selectedFundBucket.type === 'borrowed' ? 'card-outline' : 'wallet-outline'}
+                            name={
+                              selectedFundBucket.type === 'personal'
+                                ? 'wallet-outline'
+                                : selectedFundBucket.type === 'borrowed'
+                                ? 'card-outline'
+                                : 'layers-outline'
+                            }
                             size={20}
-                            color={selectedFundBucket.type === 'borrowed' ? '#EF4444' : '#10B981'}
+                            color={selectedFundBucket.color || '#6366F1'}
                           />
-                          <View>
-                            <Text style={styles.fundButtonName}>{selectedFundBucket.name}</Text>
-                            <Text style={styles.fundButtonBalance}>
-                              Available: {formatCurrency(selectedFundBucket.amount)}
-                            </Text>
-                          </View>
                         </View>
-                        <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
+                        <View style={styles.fundBucketDetails}>
+                          <Text style={styles.fundBucketName}>{selectedFundBucket.name}</Text>
+                          <Text style={styles.fundBucketAmount}>
+                            Available: {formatCurrencyAmount(selectedFundBucket.amount, currency)}
+                          </Text>
+                        </View>
                       </View>
-                    ) : (
-                      <View style={styles.fundButtonContent}>
-                        <Text style={styles.fundButtonPlaceholder}>Select fund source</Text>
-                        <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
-                      </View>
-                    )}
-                  </TouchableOpacity>
-                  <Text style={styles.helperText}>
-                    {bill.liability_id
-                      ? 'Select Personal Fund or Liability Fund for this bill'
-                      : 'Select which fund to pay from'}
-                  </Text>
-                  {selectedFundBucket && amount && parseFloat(amount) > 0 && (
-                    <View style={styles.fundWarning}>
-                      {(() => {
-                        const totalAmount = interestIncluded
-                          ? parseFloat(amount)
-                          : parseFloat(amount) + parseFloat(interestAmount || '0');
-                        if (totalAmount > selectedFundBucket.amount) {
-                          return (
-                            <Text style={styles.fundWarningText}>
-                              ⚠️ Insufficient funds. Available: {formatCurrency(selectedFundBucket.amount)}, 
-                              Required: {formatCurrency(totalAmount)}
-                            </Text>
-                          );
-                        }
-                        return null;
-                      })()}
-                    </View>
+                      <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
+                    </TouchableOpacity>
+                  ) : (
+                    <TouchableOpacity
+                      style={styles.selectFundButton}
+                      onPress={() => setShowFundPicker(true)}
+                    >
+                      <Ionicons name="wallet-outline" size={20} color="#000000" />
+                      <Text style={styles.selectFundText}>Select Fund Source</Text>
+                    </TouchableOpacity>
                   )}
                 </View>
               )}
 
-              {/* Description */}
-              <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Description (Optional)</Text>
-                <TextInput
-                  style={[styles.input, styles.textArea]}
-                  placeholder="Add notes..."
-                  value={description}
-                  onChangeText={setDescription}
-                  multiline
-                  numberOfLines={3}
-                  editable={bill.status !== 'paid'}
-                />
+              {/* Amount */}
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Payment Amount</Text>
+                <View style={styles.amountInputContainer}>
+                  <Text style={styles.currencySymbol}>{currency === 'USD' ? '$' : '₹'}</Text>
+                  <TextInput
+                    style={styles.amountInput}
+                    placeholder="0.00"
+                    placeholderTextColor="rgba(0, 0, 0, 0.4)"
+                    keyboardType="decimal-pad"
+                    value={amount}
+                    onChangeText={setAmount}
+                  />
+                </View>
+                {bill.amount && (
+                  <TouchableOpacity
+                    style={styles.suggestedAmountButton}
+                    onPress={() => setAmount(bill.amount!.toString())}
+                  >
+                    <Text style={styles.suggestedAmountText}>
+                      Use bill amount: {formatCurrency(bill.amount)}
+                    </Text>
+                  </TouchableOpacity>
+                )}
               </View>
 
-              {/* Bill Summary */}
-              {amount && (
-                <View style={styles.summaryCard}>
-                  <Text style={styles.summaryTitle}>Bill Summary</Text>
-                  <View style={styles.summaryRow}>
-                    <Text style={styles.summaryLabel}>Payment Amount:</Text>
-                    <Text style={styles.summaryValue}>
-                      {formatCurrency(parseFloat(amount) || 0)}
-                    </Text>
-                  </View>
-                  {interestAmount && parseFloat(interestAmount) > 0 && (
-                    <>
-                      <View style={styles.summaryRow}>
-                        <Text style={styles.summaryLabel}>
-                          Interest ({interestIncluded ? 'Included' : 'Additional'}):
-                        </Text>
-                        <Text style={styles.summaryValue}>
-                          {formatCurrency(parseFloat(interestAmount))}
-                        </Text>
-                      </View>
-                      <View style={styles.summaryDivider} />
-                      <View style={styles.summaryRow}>
-                        <Text style={styles.summaryLabel}>Principal:</Text>
-                        <Text style={styles.summaryValue}>
-                          {formatCurrency(
-                            interestIncluded
-                              ? Math.max(0, parseFloat(amount) - parseFloat(interestAmount))
-                              : parseFloat(amount)
-                          )}
-                        </Text>
-                      </View>
-                    </>
-                  )}
-                  <View style={styles.summaryDivider} />
-                  <View style={[styles.summaryRow, styles.summaryTotal]}>
-                    <Text style={styles.summaryTotalLabel}>Total Amount:</Text>
-                    <Text style={styles.summaryTotalValue}>
-                      {formatCurrency(
-                        interestAmount && parseFloat(interestAmount) > 0 && !interestIncluded
-                          ? parseFloat(amount) + parseFloat(interestAmount)
-                          : parseFloat(amount)
-                      )}
-                    </Text>
-                  </View>
-                  <View style={styles.summaryRow}>
-                    <Text style={styles.summaryLabel}>Due Date:</Text>
-                    <Text style={styles.summaryValue}>{formatDate(dueDate)}</Text>
-                  </View>
-                </View>
-              )}
+              {/* Date */}
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Payment Date</Text>
+                <TouchableOpacity
+                  style={styles.dateButton}
+                  onPress={() => setShowDatePicker(true)}
+                >
+                  <Ionicons name="calendar-outline" size={20} color="#000000" />
+                  <Text style={styles.dateText}>{formatDate(paymentDate)}</Text>
+                  <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
+                </TouchableOpacity>
+                {showDatePicker && (
+                  <DateTimePicker
+                    value={paymentDate}
+                    mode="date"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onChange={(event, selectedDate) => {
+                      setShowDatePicker(Platform.OS === 'ios');
+                      if (selectedDate) setPaymentDate(selectedDate);
+                    }}
+                  />
+                )}
+              </View>
+
+              {/* Description */}
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Description (Optional)</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Add notes about this payment"
+                  placeholderTextColor="rgba(0, 0, 0, 0.4)"
+                  multiline
+                  numberOfLines={3}
+                  value={description}
+                  onChangeText={setDescription}
+                />
+              </View>
             </ScrollView>
 
-            {/* Action Buttons */}
+            {/* Footer with Submit Button */}
             <View style={styles.footer}>
-              <TouchableOpacity style={styles.cancelButton} onPress={handleClose}>
-                <Text style={styles.cancelButtonText}>Cancel</Text>
+              <TouchableOpacity
+                style={[styles.submitButton, saving && styles.submitButtonDisabled]}
+                onPress={handlePayment}
+                disabled={saving || !selectedAccountId || !selectedFundBucket || !amount}
+              >
+                {saving ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <Text style={styles.submitButtonText}>Record Payment</Text>
+                )}
               </TouchableOpacity>
-              {bill.status !== 'paid' && (
-                <>
-                  <TouchableOpacity
-                    style={[styles.saveButton, saving && styles.saveButtonDisabled]}
-                    onPress={handleSave}
-                    disabled={saving || !amount}
-                  >
-                    {saving ? (
-                      <ActivityIndicator color="#FFFFFF" />
-                    ) : (
-                      <Text style={styles.saveButtonText}>Save</Text>
-                    )}
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.payButton, saving && styles.payButtonDisabled]}
-                    onPress={handlePayment}
-                    disabled={saving || !amount || !selectedAccountId || !selectedFundBucket}
-                  >
-                    {saving ? (
-                      <ActivityIndicator color="#FFFFFF" />
-                    ) : (
-                      <Text style={styles.payButtonText}>
-                        Pay {formatCurrency(
-                          (() => {
-                            const amountValue = parseFloat(amount) || 0;
-                            const interestValue = parseFloat(interestAmount || '0');
-                            if (interestIncluded || interestValue === 0) {
-                              return amountValue;
-                            } else {
-                              return amountValue + interestValue;
-                            }
-                          })()
-                        )}
-                      </Text>
-                    )}
-                  </TouchableOpacity>
-                </>
-              )}
-              {bill.status === 'paid' && (
-                <View style={styles.paidBadge}>
-                  <Ionicons name="checkmark-circle" size={20} color="#10B981" />
-                  <Text style={styles.paidBadgeText}>Paid</Text>
-                </View>
-              )}
             </View>
           </View>
         </View>
       </View>
-
+      
       {/* Fund Picker Modal */}
       {selectedAccountId && bill && (
         <FundPicker
@@ -737,37 +630,19 @@ export default function PayBillModal({ visible, onClose, bill, onSuccess }: PayB
           onClose={() => setShowFundPicker(false)}
           accountId={selectedAccountId}
           onSelect={(bucket) => {
-            // For liability bills, validate fund selection
-            if (bill.liability_id) {
-              // Allow Personal Fund or the correct Liability Fund
-              if (bucket.type === 'personal' || (bucket.type === 'borrowed' && bucket.id === bill.liability_id)) {
-                setSelectedFundBucket(bucket);
-                setShowFundPicker(false);
-              } else {
-                Alert.alert(
-                  'Invalid Selection',
-                  'You can only pay from Personal Fund or the Liability Fund for this bill.'
-                );
-              }
+            // For bills, allow Personal Fund only (goal funds are excluded)
+            if (bucket.type === 'personal') {
+              setSelectedFundBucket(bucket);
+              setShowFundPicker(false);
             } else {
-              // For non-liability bills, allow Personal Fund only (goal funds are excluded)
-              if (bucket.type === 'personal') {
-                setSelectedFundBucket(bucket);
-                setShowFundPicker(false);
-              } else {
-                Alert.alert(
-                  'Invalid Selection',
-                  'For this bill, you can only pay from Personal Fund.'
-                );
-              }
+              Alert.alert(
+                'Invalid Selection',
+                'For bills, you can only pay from Personal Fund.'
+              );
             }
           }}
-          amount={
-            interestIncluded
-              ? parseFloat(amount) || 0
-              : (parseFloat(amount) || 0) + (parseFloat(interestAmount || '0') || 0)
-          }
-          excludeGoalFunds={true} // Goal funds cannot be spent
+          amount={parseFloat(amount) || 0}
+          excludeGoalFunds={true}
         />
       )}
     </Modal>
@@ -801,406 +676,312 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     flexDirection: 'column',
   },
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
+  container: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
   header: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 20,
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(0, 0, 0, 0.1)',
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
     flexShrink: 0,
     backgroundColor: 'rgba(255, 255, 255, 0.98)',
+  },
+  headerTitle: {
+    fontSize: 20,
+    fontFamily: 'HelveticaNeue-Bold',
+    fontWeight: '700',
+    color: '#000000',
+  },
+  closeButton: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   scrollView: {
     flex: 1,
     flexShrink: 1,
   },
   scrollContent: {
-    paddingBottom: 40,
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 20,
     flexGrow: 1,
   },
-  headerTitle: {
-    fontSize: 22,
-    fontFamily: 'HelveticaNeue-Bold',
-    fontWeight: 'bold',
-    color: '#000000',
-  },
-  headerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  editButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
-    backgroundColor: 'rgba(0, 0, 0, 0.05)',
-  },
-  editButtonText: {
-    fontSize: 14,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
-  },
-  editButtonTextActive: {
-    color: '#10B981',
-  },
-  closeButton: {
-    padding: 5,
-  },
-  billInfo: {
-    padding: 20,
-    alignItems: 'center',
-    backgroundColor: 'rgba(16, 185, 129, 0.05)',
-  },
-  billTitle: {
-    fontSize: 18,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
-    marginBottom: 4,
-  },
-  billNumber: {
-    fontSize: 13,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
-    marginBottom: 4,
-  },
-  billPaidDate: {
-    fontSize: 13,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: '#10B981',
-    marginTop: 4,
-  },
-  billDue: {
-    fontSize: 14,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
-  },
-  inputGroup: {
-    paddingHorizontal: 20,
-    marginBottom: 20,
-  },
-  inputLabel: {
-    fontSize: 14,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.7)',
-    marginBottom: 8,
-  },
-  labelRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  switchContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  switchLabel: {
-    fontSize: 13,
-    fontFamily: 'Poppins-SemiBold',
-    color: 'rgba(0, 0, 0, 0.6)',
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: 'rgba(0, 0, 0, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    fontSize: 16,
-    fontFamily: 'Poppins-SemiBold',
-    color: '#000000',
-    backgroundColor: '#FFFFFF',
-  },
-  textArea: {
-    height: 80,
-    textAlignVertical: 'top',
-  },
-  amountInputContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(0, 0, 0, 0.1)',
-    borderRadius: 12,
-    backgroundColor: '#FFFFFF',
-    paddingLeft: 16,
-  },
-  amountInputContainerDisabled: {
-    backgroundColor: 'rgba(0, 0, 0, 0.03)',
-    borderColor: 'rgba(0, 0, 0, 0.05)',
-  },
-  currencySymbol: {
-    fontSize: 20,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: 'rgba(0, 0, 0, 0.6)',
-    marginRight: 8,
-  },
-  amountInput: {
-    flex: 1,
-    padding: 16,
-    paddingLeft: 0,
-    fontSize: 20,
-    fontFamily: 'Poppins-SemiBold',
-    color: '#000000',
-  },
-  amountInputDisabled: {
-    color: 'rgba(0, 0, 0, 0.4)',
-  },
-  helperText: {
-    fontSize: 12,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.5)',
-    marginTop: 6,
-  },
-  dateButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(0, 0, 0, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    backgroundColor: '#FFFFFF',
-  },
-  dateButtonDisabled: {
-    backgroundColor: 'rgba(0, 0, 0, 0.03)',
-    borderColor: 'rgba(0, 0, 0, 0.05)',
-  },
-  dateButtonText: {
-    flex: 1,
-    fontSize: 16,
-    fontFamily: 'Poppins-SemiBold',
-    color: '#000000',
-  },
-  dateButtonTextDisabled: {
-    color: 'rgba(0, 0, 0, 0.4)',
-  },
-  accountList: {
-    gap: 12,
-  },
-  accountOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    borderWidth: 1,
-    borderColor: 'rgba(0, 0, 0, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    backgroundColor: '#FFFFFF',
-  },
-  accountOptionSelected: {
-    borderColor: '#10B981',
-    borderWidth: 2,
-    backgroundColor: 'rgba(16, 185, 129, 0.05)',
-  },
-  accountOptionLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    flex: 1,
-  },
-  accountName: {
-    fontSize: 15,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
-  },
-  accountBalance: {
-    fontSize: 13,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
-    marginTop: 2,
-  },
   footer: {
-    flexDirection: 'row',
-    padding: 20,
+    paddingHorizontal: 20,
     paddingTop: 16,
     paddingBottom: 24,
-    gap: 12,
     borderTopWidth: 1,
-    borderTopColor: 'rgba(0, 0, 0, 0.1)',
+    borderTopColor: 'rgba(0, 0, 0, 0.05)',
     backgroundColor: 'rgba(255, 255, 255, 0.98)',
     flexShrink: 0,
     width: '100%',
   },
-  cancelButton: {
+  loadingContainer: {
     flex: 1,
-    paddingVertical: 16,
-    borderRadius: 12,
-    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    justifyContent: 'center',
     alignItems: 'center',
+    gap: 16,
+    paddingVertical: 60,
+    minHeight: 200,
   },
-  cancelButtonText: {
+  loadingText: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  errorContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 16,
+    padding: 20,
+    paddingVertical: 60,
+    minHeight: 200,
+  },
+  errorText: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    textAlign: 'center',
+  },
+  backButton: {
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+  },
+  backButtonText: {
     fontSize: 16,
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
     color: '#000000',
   },
-  payButton: {
-    flex: 2,
-    paddingVertical: 16,
-    borderRadius: 12,
-    backgroundColor: '#10B981',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  payButtonDisabled: {
-    opacity: 0.5,
-  },
-  payButtonText: {
-    fontSize: 16,
+  infoLabel: {
+    fontSize: 12,
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
-    color: '#FFFFFF',
+    color: 'rgba(0, 0, 0, 0.6)',
+    marginBottom: 4,
   },
-  saveButton: {
-    flex: 1,
-    paddingVertical: 16,
-    borderRadius: 12,
-    backgroundColor: '#000000',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 8,
+  infoValue: {
+    fontSize: 20,
+    fontFamily: 'HelveticaNeue-Bold',
+    fontWeight: '700',
+    color: '#000000',
+    marginBottom: 12,
   },
-  saveButtonDisabled: {
-    opacity: 0.5,
-  },
-  saveButtonText: {
-    fontSize: 16,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#FFFFFF',
-  },
-  paidBadge: {
-    flex: 2,
+  infoRow: {
     flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 16,
-    borderRadius: 12,
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    marginTop: 8,
   },
-  paidBadgeText: {
-    fontSize: 16,
+  infoBalance: {
+    fontSize: 14,
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
-    color: '#10B981',
+    color: '#000000',
   },
-  summaryCard: {
-    marginHorizontal: 20,
-    marginBottom: 20,
-    padding: 20,
-    backgroundColor: 'rgba(16, 185, 129, 0.05)',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.1)',
+  section: {
+    marginTop: 24,
   },
-  summaryTitle: {
+  sectionTitle: {
     fontSize: 16,
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
     color: '#000000',
     marginBottom: 12,
   },
-  summaryRow: {
+  accountList: {
+    gap: 8,
+  },
+  accountItem: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: 'transparent',
   },
-  summaryLabel: {
+  accountItemActive: {
+    backgroundColor: 'rgba(0, 0, 0, 0.08)',
+    borderColor: '#000000',
+  },
+  accountInfo: {
+    flex: 1,
+  },
+  accountName: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    marginBottom: 4,
+  },
+  accountNameActive: {
+    color: '#000000',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+  },
+  accountBalance: {
     fontSize: 14,
     fontFamily: 'InstrumentSerif-Regular',
     color: 'rgba(0, 0, 0, 0.6)',
   },
-  summaryValue: {
+  emptyText: {
     fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    textAlign: 'center',
+  },
+  fundBucketButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+  },
+  fundBucketInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  fundBucketIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  fundBucketDetails: {
+    flex: 1,
+  },
+  fundBucketName: {
+    fontSize: 16,
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
     color: '#000000',
+    marginBottom: 4,
   },
-  summaryDivider: {
-    height: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.1)',
-    marginVertical: 8,
+  fundBucketAmount: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
   },
-  summaryTotal: {
-    marginTop: 4,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(0, 0, 0, 0.1)',
+  selectFundButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    borderStyle: 'dashed',
+    gap: 8,
   },
-  summaryTotalLabel: {
+  selectFundText: {
     fontSize: 16,
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
     color: '#000000',
   },
-  summaryTotalValue: {
-    fontSize: 18,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#10B981',
-  },
-  helperText: {
-    fontSize: 12,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.5)',
-    marginTop: 6,
-  },
-  fundButton: {
+  amountInputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    paddingHorizontal: 16,
     borderWidth: 1,
     borderColor: 'rgba(0, 0, 0, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    backgroundColor: '#FFFFFF',
   },
-  fundButtonContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+  currencySymbol: {
+    fontSize: 24,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginRight: 8,
   },
-  fundButtonLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
+  amountInput: {
     flex: 1,
-  },
-  fundButtonName: {
-    fontSize: 15,
+    paddingVertical: 16,
+    fontSize: 24,
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
     color: '#000000',
   },
-  fundButtonBalance: {
-    fontSize: 13,
+  suggestedAmountButton: {
+    marginTop: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    alignSelf: 'flex-start',
+  },
+  suggestedAmountText: {
+    fontSize: 14,
     fontFamily: 'InstrumentSerif-Regular',
     color: 'rgba(0, 0, 0, 0.6)',
-    marginTop: 2,
+    textDecorationLine: 'underline',
   },
-  fundButtonPlaceholder: {
-    fontSize: 15,
-    fontFamily: 'Poppins-SemiBold',
-    color: 'rgba(0, 0, 0, 0.4)',
-    flex: 1,
-  },
-  fundWarning: {
-    marginTop: 8,
-    padding: 12,
-    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-    borderRadius: 8,
+  dateButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.2)',
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    gap: 12,
   },
-  fundWarningText: {
-    fontSize: 13,
+  dateText: {
+    flex: 1,
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
+  },
+  input: {
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    padding: 16,
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    minHeight: 80,
+    textAlignVertical: 'top',
+  },
+  submitButton: {
+    backgroundColor: '#000000',
+    borderRadius: 12,
+    padding: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+  },
+  submitButtonDisabled: {
+    backgroundColor: 'rgba(0, 0, 0, 0.2)',
+  },
+  submitButtonText: {
+    fontSize: 18,
     fontFamily: 'Poppins-SemiBold',
-    color: '#EF4444',
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
 });

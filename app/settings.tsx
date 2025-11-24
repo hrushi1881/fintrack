@@ -201,6 +201,21 @@ export default function SettingsScreen() {
             </View>
             <Ionicons name="chevron-forward" size={20} color="rgba(255,255,255,0.7)" />
           </TouchableOpacity>
+
+          {/* Preview/Test Button - Onboarding */}
+          <TouchableOpacity 
+            style={[styles.settingItem, styles.previewItem]}
+            onPress={() => router.push('/onboarding?preview=true')}
+          >
+            <View style={styles.settingInfo}>
+              <Ionicons name="rocket" size={20} color="#10B981" />
+              <View style={styles.settingText}>
+                <Text style={styles.settingLabel}>Preview Onboarding</Text>
+                <Text style={styles.settingDescription}>Test the new onboarding flow</Text>
+              </View>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color="rgba(255,255,255,0.7)" />
+          </TouchableOpacity>
         </GlassmorphCard>
 
         {/* Sign Out */}
@@ -502,5 +517,12 @@ const styles = StyleSheet.create({
   },
   currencyName: {
     ...theme.typography.glassCaption,
+  },
+  previewItem: {
+    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    borderRadius: 8,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.2)',
   },
 });

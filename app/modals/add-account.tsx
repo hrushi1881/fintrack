@@ -190,7 +190,18 @@ const AddAccountModal: React.FC<AddAccountModalProps> = ({
       onSuccess?.(accountRows as Account, finalOrgId);
 
       Alert.alert('Account created', `${formState.name.trim()} added successfully.`);
-      handleClose();
+      
+      // Reset form but keep modal open
+      setFormState({
+        name: '',
+        type: 'debit',
+        initialBalance: '',
+        creditLimit: '',
+        description: '',
+      });
+      setSelectedOrganizationId(organizationId ?? null);
+      
+      // Modal stays open - user can add another account
     } catch (error: any) {
       console.error('Failed to create account', error);
       const message =

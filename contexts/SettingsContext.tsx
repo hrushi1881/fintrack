@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useAuth } from './AuthContext';
+import { supabase } from '@/lib/supabase';
 
 interface SettingsContextType {
   // Notification Settings
@@ -71,21 +73,39 @@ const DEFAULT_SETTINGS = {
 };
 
 export function SettingsProvider({ children }: SettingsProviderProps) {
+  const { user } = useAuth();
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Load settings on app start
+  // Load settings on app start and when user changes
   useEffect(() => {
     loadSettings();
-  }, []);
+  }, [user]);
 
   const loadSettings = async () => {
     try {
+      // First, try to load currency from user profile (onboarding sets this)
+      let currencyFromProfile: string | null = null;
+      if (user) {
+        try {
+          const { data: profile } = await supabase
+            .from('users_profile')
+            .select('base_currency, default_currency')
+            .eq('user_id', user.id)
+            .maybeSingle();
+          
+          currencyFromProfile = profile?.base_currency || profile?.default_currency || null;
+        } catch (error) {
+          console.error('Error loading currency from profile:', error);
+        }
+      }
+
+      // Load other settings from AsyncStorage
       const [
         notifications,
         biometric,
         darkMode,
-        currency,
+        currencyFromStorage,
         language,
         defaultAccount,
         dataSharing,
@@ -101,11 +121,19 @@ export function SettingsProvider({ children }: SettingsProviderProps) {
         AsyncStorage.getItem(SETTINGS_KEYS.ANALYTICS),
       ]);
 
+      // Priority: Profile currency > AsyncStorage currency > Default
+      const finalCurrency = currencyFromProfile || currencyFromStorage || DEFAULT_SETTINGS.currency;
+
+      // If we got currency from profile but not from storage, sync it
+      if (currencyFromProfile && currencyFromProfile !== currencyFromStorage) {
+        await AsyncStorage.setItem(SETTINGS_KEYS.CURRENCY, currencyFromProfile);
+      }
+
       setSettings({
         notificationsEnabled: notifications !== null ? JSON.parse(notifications) : DEFAULT_SETTINGS.notificationsEnabled,
         biometricEnabled: biometric !== null ? JSON.parse(biometric) : DEFAULT_SETTINGS.biometricEnabled,
         darkModeEnabled: darkMode !== null ? JSON.parse(darkMode) : DEFAULT_SETTINGS.darkModeEnabled,
-        currency: currency || DEFAULT_SETTINGS.currency,
+        currency: finalCurrency,
         language: language || DEFAULT_SETTINGS.language,
         defaultAccount: defaultAccount || DEFAULT_SETTINGS.defaultAccount,
         dataSharingEnabled: dataSharing !== null ? JSON.parse(dataSharing) : DEFAULT_SETTINGS.dataSharingEnabled,
@@ -144,6 +172,23 @@ export function SettingsProvider({ children }: SettingsProviderProps) {
   const setCurrency = async (currency: string) => {
     setSettings(prev => ({ ...prev, currency }));
     await saveSetting(SETTINGS_KEYS.CURRENCY, currency);
+    
+    // Also update user profile if user is logged in
+    if (user) {
+      try {
+        await supabase
+          .from('users_profile')
+          .update({
+            base_currency: currency,
+            default_currency: currency,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('user_id', user.id);
+      } catch (error) {
+        console.error('Error updating currency in profile:', error);
+        // Don't fail if profile update fails, settings are still saved
+      }
+    }
   };
 
   const setLanguage = async (language: string) => {

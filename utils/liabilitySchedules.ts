@@ -1,8 +1,15 @@
 /**
  * Utility functions for managing liability schedules (bills)
+ * Uses recurrence engine for schedule generation
  */
 
 import { supabase } from '@/lib/supabase';
+import { 
+  RecurrenceDefinition,
+  calculateNextOccurrence,
+  generateSchedule,
+  calculateStatus as calculateRecurrenceStatus
+} from '@/utils/recurrence';
 
 export interface LiabilitySchedule {
   id: string;

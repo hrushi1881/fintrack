@@ -181,8 +181,21 @@ export default function MarkBillPaidModal() {
         // as this is handled by the recurrence system
       }
 
-      globalRefresh();
-      router.back();
+      await globalRefresh();
+      onSuccess?.();
+      
+      // Reset form but keep modal open
+      setFormData({
+        amount: '',
+        payment_date: new Date().toISOString().split('T')[0],
+        account_id: '',
+        notes: '',
+        generate_next: true,
+      });
+      setSelectedFundBucket(null);
+      setShowFundPicker(false);
+      
+      // Modal stays open - user can mark another bill as paid
     } catch (error: any) {
       console.error('Error marking bill as paid:', error);
       Alert.alert('Error', error.message || 'Failed to mark bill as paid. Please try again.');

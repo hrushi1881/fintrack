@@ -114,6 +114,13 @@ export default function ReceiveModal({ visible, onClose, onSuccess, preselectedA
     }
   }, [realtimeAccounts]);
 
+  // Refresh account funds when modal opens to ensure funds are loaded
+  useEffect(() => {
+    if (visible) {
+      refreshAccountFunds();
+    }
+  }, [visible, refreshAccountFunds]);
+
   // Set preselected account
   useEffect(() => {
     if (visible && preselectedAccountId) {
@@ -273,7 +280,6 @@ export default function ReceiveModal({ visible, onClose, onSuccess, preselectedA
         p_category: categoryName,
         p_description: description.trim() || categoryName || 'Income received',
         p_date: date.toISOString().split('T')[0],
-        p_notes: `Income received on ${date.toLocaleDateString()}`,
         p_currency: currency,
       });
 
@@ -317,7 +323,7 @@ export default function ReceiveModal({ visible, onClose, onSuccess, preselectedA
       await globalRefresh();
       onSuccess?.();
       
-      // Reset form
+      // Reset form but keep modal open
       setAmount('');
       setDescription('');
       setCategory('');
@@ -328,7 +334,9 @@ export default function ReceiveModal({ visible, onClose, onSuccess, preselectedA
       setSelectedFundDestination(null);
       setShowFundDestinationPicker(false);
       setShowNoteInput(false);
-      onClose();
+      setShowAmountInput(true);
+      
+      // Modal stays open - user can add another transaction
     } catch (error) {
       console.error('Error creating transaction:', error);
       Alert.alert('Error', 'Failed to record income. Please try again.');
@@ -645,17 +653,19 @@ export default function ReceiveModal({ visible, onClose, onSuccess, preselectedA
         </Modal>
       
       {/* Fund Destination Picker - Only show if account has funds and other funds besides personal */}
+      {/* NOTE: Goal funds are EXCLUDED - income can only go to Personal Funds */}
       {accountHasFunds && accountHasOtherFunds && (
         <FundPicker
           visible={showFundDestinationPicker}
           onClose={() => setShowFundDestinationPicker(false)}
           accountId={account}
           amount={amountValue}
-          excludeGoalFunds={false} // Allow goal funds for income allocation
-          allowGoalFunds={true} // Allow goal funds for income allocation
+          excludeGoalFunds={true} // Goal funds cannot receive income - only Personal Funds can
+          allowGoalFunds={false}
           excludeBorrowedFunds={true} // Exclude borrowed/liability funds (income cannot go to liability funds)
           onSelect={(bucket) => {
-            // All fund types are allowed (borrowed funds are already excluded by excludeBorrowedFunds)
+            // Only Personal, Reserved, and Sinking funds can receive income
+            // Goal and Borrowed funds are excluded
             setSelectedFundDestination(bucket);
             setShowFundDestinationPicker(false);
           }}

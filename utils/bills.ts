@@ -1,5 +1,12 @@
 import { supabase } from '../lib/supabase';
-import { Bill, BillPayment } from '../types';
+import { Bill, BillPayment, RecurringFrequency, RecurringNature, RecurringAmountType } from '../types';
+import { 
+  RecurrenceDefinition,
+  calculateNextOccurrence,
+  calculateStatus as calculateRecurrenceStatus,
+  generateSchedule,
+  getDaysUntil
+} from './recurrence';
 
 export interface BillFilters {
   status?: string;
@@ -19,7 +26,7 @@ export interface CreateBillData {
   currency: string;
   category_id?: string;
   bill_type: 'one_time' | 'recurring_fixed' | 'recurring_variable' | 'goal_linked' | 'liability_linked';
-  recurrence_pattern?: 'daily' | 'weekly' | 'monthly' | 'yearly' | 'custom';
+  recurrence_pattern?: 'daily' | 'weekly' | 'biweekly' | 'monthly' | 'bimonthly' | 'quarterly' | 'halfyearly' | 'yearly' | 'custom';
   recurrence_interval?: number;
   custom_recurrence_config?: any;
   due_date: string;
@@ -37,6 +44,31 @@ export interface CreateBillData {
   reminder_days: number[];
   notes?: string;
   metadata?: any;
+  
+  // New recurring transaction fields
+  direction?: 'income' | 'expense';
+  nature?: RecurringNature;
+  amount_type?: RecurringAmountType;
+  estimated_amount?: number;
+  fund_type?: 'personal' | 'liability' | 'goal';
+  specific_fund_id?: string;
+  frequency?: RecurringFrequency;
+  custom_pattern?: {
+    type?: 'specific_days' | 'specific_dates';
+    days?: number[];
+    weekdays?: string[];
+  };
+  end_type?: 'never' | 'on_date' | 'after_count';
+  occurrence_count?: number;
+  auto_create?: boolean;
+  auto_create_days_before?: number;
+  remind_before?: boolean;
+  is_subscription?: boolean;
+  subscription_provider?: string;
+  subscription_plan?: string;
+  subscription_start_date?: string;
+  linked_budget_id?: string;
+  day_of_month?: number;
 }
 
 export interface UpdateBillData extends Partial<CreateBillData> {
@@ -57,19 +89,30 @@ export interface PaymentData {
 
 /**
  * Calculate bill status based on due date and current status
+ * Uses recurrence engine for accurate status calculation
  */
 export function calculateBillStatus(bill: Bill): Bill['status'] {
-  const today = new Date();
-  const dueDate = new Date(bill.due_date);
-  
+  // Preserve terminal states
   if (bill.status === 'paid') return 'paid';
   if (bill.status === 'cancelled') return 'cancelled';
   if (bill.status === 'skipped') return 'skipped';
   if (bill.status === 'postponed') return 'postponed';
   
-  if (today > dueDate) return 'overdue';
-  if (today.toDateString() === dueDate.toDateString()) return 'due_today';
-  return 'upcoming';
+  // Use recurrence engine for status calculation
+  const today = new Date().toISOString().split('T')[0];
+  const status = calculateRecurrenceStatus(bill.due_date, today, bill.status as any);
+  
+  // Map recurrence status to bill status
+  switch (status) {
+    case 'upcoming':
+      return 'upcoming';
+    case 'due_today':
+      return 'due_today';
+    case 'overdue':
+      return 'overdue';
+    default:
+      return bill.status;
+  }
 }
 
 /**
@@ -77,15 +120,26 @@ export function calculateBillStatus(bill: Bill): Bill['status'] {
  */
 export async function fetchBills(
   userId: string, 
-  filters: BillFilters = {}
+  filters: BillFilters = {},
+  includePaymentBills: boolean = false // If false, only return containers (parent_bill_id IS NULL)
 ): Promise<Bill[]> {
   try {
     let query = supabase
       .from('bills')
       .select('*')
       .eq('user_id', userId)
-      .eq('is_deleted', false)
-      .order('due_date', { ascending: true });
+      .eq('is_deleted', false);
+
+    // By default, only show container bills (parent_bill_id IS NULL)
+    // Unless explicitly requested to include payment bills
+    // This is CRITICAL: payment bills have parent_bill_id set, containers have it NULL
+    if (!includePaymentBills) {
+      query = query.is('parent_bill_id', null);
+    }
+    
+    // Order by next_transaction_date for containers (when they're due next)
+    // or due_date for payment bills
+    query = query.order('due_date', { ascending: true });
 
     // Apply status filter
     if (filters.status) {
@@ -153,9 +207,13 @@ export async function fetchBillById(billId: string): Promise<Bill | null> {
       .select('*')
       .eq('id', billId)
       .eq('is_deleted', false)
-      .single();
+      .maybeSingle();
 
     if (error) {
+      // If it's a "no rows" error, return null instead of throwing
+      if (error.code === 'PGRST116') {
+        return null;
+      }
       console.error('Error fetching bill:', error);
       throw error;
     }
@@ -166,10 +224,176 @@ export async function fetchBillById(billId: string): Promise<Bill | null> {
       ...data,
       status: calculateBillStatus(data)
     };
-  } catch (error) {
+  } catch (error: any) {
+    // Handle "no rows" error gracefully
+    if (error?.code === 'PGRST116') {
+      return null;
+    }
     console.error('Error in fetchBillById:', error);
     throw error;
   }
+}
+
+/**
+ * Map old recurrence_pattern to new frequency format
+ */
+function mapOldPatternToFrequency(pattern: string): 'day' | 'week' | 'month' | 'quarter' | 'year' | 'custom' {
+  switch (pattern) {
+    case 'daily':
+      return 'day';
+    case 'weekly':
+      return 'week';
+    case 'monthly':
+      return 'month';
+    case 'quarterly':
+      return 'quarter';
+    case 'yearly':
+      return 'year';
+    case 'custom':
+      return 'custom';
+    default:
+      return 'month';
+  }
+}
+
+/**
+ * Map new frequency to old recurrence_pattern for backward compatibility
+ */
+function mapFrequencyToRecurrencePattern(frequency?: RecurringFrequency): 'daily' | 'weekly' | 'monthly' | 'yearly' | 'custom' | undefined {
+  if (!frequency) return undefined;
+  
+  // Map new frequencies to old values
+  switch (frequency) {
+    case 'daily':
+      return 'daily';
+    case 'weekly':
+    case 'biweekly':
+      return 'weekly';
+    case 'monthly':
+    case 'bimonthly':
+      return 'monthly';
+    case 'quarterly':
+    case 'halfyearly':
+      return 'monthly'; // Store as monthly, use interval for differentiation
+    case 'yearly':
+      return 'yearly';
+    case 'custom':
+      return 'custom';
+    default:
+      return 'monthly';
+  }
+}
+
+/**
+ * Determine bill_type from nature, amount_type, and liability_id
+ */
+function determineBillTypeFromNature(
+  nature?: RecurringNature,
+  amountType?: RecurringAmountType,
+  hasLiabilityId?: boolean
+): 'one_time' | 'recurring_fixed' | 'recurring_variable' | 'goal_linked' | 'liability_linked' {
+  if (hasLiabilityId) {
+    return 'liability_linked';
+  }
+  
+  if (!nature) {
+    return 'recurring_fixed'; // Default for recurring
+  }
+  
+  switch (nature) {
+    case 'subscription':
+      return 'recurring_fixed';
+    case 'bill':
+      return amountType === 'variable' ? 'recurring_variable' : 'recurring_fixed';
+    case 'payment':
+      return 'recurring_fixed';
+    case 'income':
+      return 'recurring_fixed';
+    default:
+      return 'recurring_fixed';
+  }
+}
+
+/**
+ * Calculate next transaction date based on frequency, interval, and start date
+ */
+function calculateNextTransactionDate(
+  frequency: RecurringFrequency,
+  interval: number,
+  startDate: string,
+  customPattern?: {
+    type?: 'specific_days' | 'specific_dates';
+    days?: number[];
+    weekdays?: string[];
+  },
+  dayOfMonth?: number
+): string {
+  const start = new Date(startDate);
+  const next = new Date(start);
+  
+  switch (frequency) {
+    case 'daily':
+      next.setDate(start.getDate() + interval);
+      break;
+    case 'weekly':
+      next.setDate(start.getDate() + (interval * 7));
+      break;
+    case 'biweekly':
+      next.setDate(start.getDate() + (interval * 14));
+      break;
+    case 'monthly':
+      // Use day_of_month if provided, otherwise use the same day next month
+      if (dayOfMonth) {
+        next.setMonth(start.getMonth() + interval);
+        next.setDate(dayOfMonth);
+      } else {
+        next.setMonth(start.getMonth() + interval);
+      }
+      break;
+    case 'bimonthly':
+      next.setMonth(start.getMonth() + (interval * 2));
+      if (dayOfMonth) {
+        next.setDate(dayOfMonth);
+      }
+      break;
+    case 'quarterly':
+      next.setMonth(start.getMonth() + (interval * 3));
+      if (dayOfMonth) {
+        next.setDate(dayOfMonth);
+      }
+      break;
+    case 'halfyearly':
+      next.setMonth(start.getMonth() + (interval * 6));
+      if (dayOfMonth) {
+        next.setDate(dayOfMonth);
+      }
+      break;
+    case 'yearly':
+      next.setFullYear(start.getFullYear() + interval);
+      break;
+    case 'custom':
+      // For custom patterns, calculate based on custom_pattern
+      if (customPattern?.type === 'specific_days' && customPattern.days) {
+        // Find next matching day in the month
+        const days = customPattern.days.sort((a, b) => a - b);
+        const currentDay = start.getDate();
+        const nextDay = days.find(d => d > currentDay) || days[0];
+        if (nextDay > currentDay) {
+          next.setDate(nextDay);
+        } else {
+          next.setMonth(start.getMonth() + 1);
+          next.setDate(days[0]);
+        }
+      } else {
+        // Default to monthly for custom
+        next.setMonth(start.getMonth() + interval);
+      }
+      break;
+    default:
+      next.setMonth(start.getMonth() + interval);
+  }
+  
+  return next.toISOString().split('T')[0];
 }
 
 /**
@@ -180,6 +404,142 @@ export async function createBill(data: CreateBillData): Promise<Bill> {
     const { data: user } = await supabase.auth.getUser();
     if (!user.user) throw new Error('User not authenticated');
 
+    // Determine bill_type from nature if not explicitly provided
+    const billType = data.bill_type || determineBillTypeFromNature(
+      data.nature,
+      data.amount_type,
+      !!data.liability_id
+    );
+
+    // Use frequency if provided, otherwise use recurrence_pattern
+    const frequency = data.frequency || (data.recurrence_pattern as RecurringFrequency) || 'monthly';
+    const recurrenceInterval = data.recurrence_interval || 1;
+    
+    // Map frequency to recurrence_pattern for backward compatibility
+    const recurrencePattern = data.recurrence_pattern || mapFrequencyToRecurrencePattern(frequency);
+
+    // Calculate next_transaction_date if frequency and start_date are provided
+    let nextTransactionDate: string | null = null;
+    if (frequency && data.due_date && billType !== 'one_time') {
+      try {
+        nextTransactionDate = calculateNextTransactionDate(
+          frequency,
+          recurrenceInterval,
+          data.due_date,
+          data.custom_pattern,
+          data.day_of_month
+        );
+      } catch (err) {
+        console.warn('Error calculating next transaction date:', err);
+        // Fallback: calculate from recurrence_pattern if available
+        if (data.recurrence_pattern === 'monthly' && data.due_date) {
+          const next = new Date(data.due_date);
+          next.setMonth(next.getMonth() + recurrenceInterval);
+          nextTransactionDate = next.toISOString().split('T')[0];
+        }
+      }
+    }
+
+    // Handle end_type and recurrence_end_date
+    let recurrenceEndDate: string | null = null;
+    let occurrenceCount: number | null = null;
+    const endType = data.end_type || 'never';
+    
+    if (endType === 'on_date' && data.recurrence_end_date) {
+      recurrenceEndDate = data.recurrence_end_date;
+    } else if (endType === 'after_count' && data.occurrence_count) {
+      occurrenceCount = data.occurrence_count;
+      // Calculate end date from occurrence count (approximate)
+      if (frequency && data.due_date) {
+        const startDate = new Date(data.due_date);
+        const count = data.occurrence_count;
+        let endDate = new Date(startDate);
+        
+        switch (frequency) {
+          case 'daily':
+            endDate.setDate(startDate.getDate() + (count * recurrenceInterval));
+            break;
+          case 'weekly':
+          case 'biweekly':
+            endDate.setDate(startDate.getDate() + (count * (frequency === 'biweekly' ? 14 : 7) * recurrenceInterval));
+            break;
+          case 'monthly':
+          case 'bimonthly':
+            endDate.setMonth(startDate.getMonth() + (count * (frequency === 'bimonthly' ? 2 : 1) * recurrenceInterval));
+            break;
+          case 'quarterly':
+            endDate.setMonth(startDate.getMonth() + (count * 3 * recurrenceInterval));
+            break;
+          case 'halfyearly':
+            endDate.setMonth(startDate.getMonth() + (count * 6 * recurrenceInterval));
+            break;
+          case 'yearly':
+            endDate.setFullYear(startDate.getFullYear() + (count * recurrenceInterval));
+            break;
+          default:
+            endDate.setMonth(startDate.getMonth() + (count * recurrenceInterval));
+        }
+        recurrenceEndDate = endDate.toISOString().split('T')[0];
+      }
+    }
+
+    // Set subscription details
+    const isSubscription = data.is_subscription !== undefined 
+      ? data.is_subscription 
+      : (data.nature === 'subscription');
+
+    // Set defaults for reminder settings based on nature
+    const remindBefore = data.remind_before !== undefined ? data.remind_before : true;
+    const autoCreate = data.auto_create !== undefined ? data.auto_create : true;
+    const autoCreateDaysBefore = data.auto_create_days_before !== undefined ? data.auto_create_days_before : 3;
+    
+    // Default reminder days based on nature
+    let defaultReminderDays = data.reminder_days || [3, 1];
+    if (!data.reminder_days && data.nature) {
+      switch (data.nature) {
+        case 'subscription':
+          defaultReminderDays = [3, 1];
+          break;
+        case 'bill':
+          defaultReminderDays = [7, 3, 1];
+          break;
+        case 'payment':
+          defaultReminderDays = [7, 3, 1];
+          break;
+        case 'income':
+          defaultReminderDays = [1];
+          break;
+        default:
+          defaultReminderDays = [3, 1];
+      }
+    }
+
+    // Set fund_type defaults
+    const fundType = data.fund_type || 'personal';
+    
+    // Set status for recurring bills
+    // Note: Database constraint only allows: 'upcoming', 'due_today', 'overdue', 'paid', 'skipped', 'cancelled', 'postponed'
+    // For recurring bills, we use 'upcoming' as the initial status
+    const billStatus = 'upcoming';
+
+    // Store custom_pattern as JSONB
+    let customPatternJson: any = null;
+    if (data.custom_pattern || (frequency === 'custom' && data.custom_recurrence_config)) {
+      customPatternJson = data.custom_pattern || data.custom_recurrence_config;
+    }
+
+    // Prepare metadata
+    const metadata = {
+      ...(data.metadata || {}),
+      ...(data.nature && { nature: data.nature }),
+      ...(data.direction && { direction: data.direction }),
+    };
+
+    // For recurring bills, create as container (parent_bill_id = NULL)
+    // For one-time bills, also create as standalone (parent_bill_id = NULL)
+    // Only payment bills generated from containers will have parent_bill_id set
+    const parentBillId = null; // Always NULL when creating a new bill (container or one-time)
+
     const { data: bill, error } = await supabase
       .from('bills')
       .insert({
@@ -189,13 +549,13 @@ export async function createBill(data: CreateBillData): Promise<Bill> {
         amount: data.amount,
         currency: data.currency,
         category_id: data.category_id || null,
-        bill_type: data.bill_type,
-        recurrence_pattern: data.recurrence_pattern,
-        recurrence_interval: data.recurrence_interval || 1,
-        custom_recurrence_config: data.custom_recurrence_config,
+        bill_type: billType,
+        recurrence_pattern: recurrencePattern,
+        recurrence_interval: recurrenceInterval,
+        custom_recurrence_config: customPatternJson,
         due_date: data.due_date,
         original_due_date: data.original_due_date || data.due_date,
-        recurrence_end_date: data.recurrence_end_date || null,
+        recurrence_end_date: recurrenceEndDate,
         goal_id: data.goal_id || null,
         linked_account_id: data.linked_account_id || null,
         liability_id: data.liability_id || null,
@@ -205,9 +565,42 @@ export async function createBill(data: CreateBillData): Promise<Bill> {
         interest_included: data.interest_included !== undefined ? data.interest_included : true,
         color: data.color,
         icon: data.icon,
-        reminder_days: data.reminder_days,
+        reminder_days: defaultReminderDays,
         notes: data.notes,
-        metadata: data.metadata || {},
+        metadata: metadata,
+        
+        // Bill container support
+        parent_bill_id: parentBillId, // NULL for containers/one-time bills
+        
+        // New recurring transaction fields
+        direction: data.direction || 'expense',
+        nature: data.nature || null,
+        amount_type: data.amount_type || 'fixed',
+        estimated_amount: data.amount_type === 'variable' ? (data.estimated_amount || data.amount || null) : null,
+        fund_type: fundType,
+        specific_fund_id: data.specific_fund_id || null,
+        frequency: frequency,
+        custom_pattern: customPatternJson,
+        end_type: endType,
+        occurrence_count: occurrenceCount,
+        auto_create: autoCreate,
+        auto_create_days_before: autoCreateDaysBefore,
+        remind_before: remindBefore,
+        is_subscription: isSubscription,
+        subscription_provider: isSubscription ? (data.subscription_provider || null) : null,
+        subscription_plan: isSubscription ? (data.subscription_plan || null) : null,
+        subscription_start_date: isSubscription ? (data.subscription_start_date || data.due_date) : null,
+        linked_budget_id: data.linked_budget_id || null,
+        status: billStatus,
+        paused_until: null,
+        total_occurrences: 0,
+        completed_occurrences: 0,
+        skipped_occurrences: 0,
+        total_paid: 0,
+        average_amount: data.amount || 0,
+        last_transaction_date: null,
+        next_transaction_date: nextTransactionDate,
+        next_due_date: nextTransactionDate || data.due_date,
       })
       .select()
       .single();
@@ -217,12 +610,165 @@ export async function createBill(data: CreateBillData): Promise<Bill> {
       throw error;
     }
 
-    return {
+    const createdBill = {
       ...bill,
-      status: calculateBillStatus(bill)
+      status: calculateBillStatus(bill) || 'upcoming'
     };
+
+    // If this is a recurring bill container (not one-time), generate the first payment bill
+    if (billType !== 'one_time' && autoCreate && createdBill.next_transaction_date) {
+      try {
+        await generatePaymentBillFromContainer(createdBill.id, createdBill.next_transaction_date);
+      } catch (err) {
+        console.warn('Error generating first payment bill from container:', err);
+        // Don't fail the creation if payment bill generation fails
+      }
+    }
+
+    return createdBill;
   } catch (error) {
     console.error('Error in createBill:', error);
+    throw error;
+  }
+}
+
+/**
+ * Generate a payment bill from a bill container (similar to liability bills)
+ * This creates a child bill that can be paid
+ */
+export async function generatePaymentBillFromContainer(
+  containerBillId: string,
+  dueDate: string,
+  actualAmount?: number
+): Promise<Bill> {
+  try {
+    const { data: user } = await supabase.auth.getUser();
+    if (!user.user) throw new Error('User not authenticated');
+
+    // Fetch the container bill
+    const { data: containerBill, error: containerError } = await supabase
+      .from('bills')
+      .select('*')
+      .eq('id', containerBillId)
+      .eq('user_id', user.user.id)
+      .is('parent_bill_id', null) // Ensure it's a container
+      .single();
+
+    if (containerError || !containerBill) {
+      throw new Error('Container bill not found');
+    }
+
+    // Determine the amount for this payment bill
+    // Use actualAmount if provided, otherwise use container's amount
+    // For variable bills (recurring_variable), amount might be null (user enters actual each time)
+    const paymentAmount = actualAmount !== undefined 
+      ? actualAmount 
+      : (containerBill.amount || 0);
+
+    // Create payment bill (only use fields that exist in bills table)
+    // Payment bills should NOT have recurrence_pattern (only containers do)
+    const { data: paymentBill, error: paymentError } = await supabase
+      .from('bills')
+      .insert({
+        user_id: user.user.id,
+        parent_bill_id: containerBillId, // Link to container
+        title: containerBill.title,
+        description: containerBill.description,
+        amount: paymentAmount,
+        currency: containerBill.currency,
+        category_id: containerBill.category_id,
+        bill_type: containerBill.bill_type,
+        due_date: dueDate, // Required for payment bills
+        original_due_date: containerBill.original_due_date || containerBill.due_date,
+        goal_id: containerBill.goal_id,
+        linked_account_id: containerBill.linked_account_id,
+        color: containerBill.color,
+        icon: containerBill.icon,
+        reminder_days: containerBill.reminder_days || [3, 1],
+        notes: containerBill.notes,
+        metadata: containerBill.metadata || {},
+        
+        // Payment bill doesn't have recurrence fields (only container has them)
+        // Do NOT set recurrence_pattern, recurrence_interval, or recurrence_end_date
+        status: 'upcoming',
+        is_active: true,
+        is_deleted: false,
+      })
+      .select()
+      .single();
+
+    if (paymentError) {
+      console.error('Error creating payment bill:', paymentError);
+      throw paymentError;
+    }
+
+    // Update container's next_due_date using recurrence engine
+    let nextDueDate: string | null = null;
+    if (containerBill.recurrence_pattern && containerBill.recurrence_interval) {
+      // Convert old recurrence_pattern to new format
+      const frequency = mapOldPatternToFrequency(containerBill.recurrence_pattern);
+      const interval = containerBill.recurrence_interval || 1;
+      
+      const def: RecurrenceDefinition = {
+        frequency,
+        interval,
+        start_date: containerBill.due_date || dueDate,
+        end_date: containerBill.recurrence_end_date || undefined,
+        date_of_occurrence: (containerBill as any).day_of_month || undefined,
+      };
+      
+      // Calculate next occurrence from the payment bill's due date
+      nextDueDate = calculateNextOccurrence(def, dueDate);
+    }
+
+    // Update container's next_due_date (if it exists in the table)
+    if (nextDueDate) {
+      await supabase
+        .from('bills')
+        .update({
+          next_due_date: nextDueDate,
+          last_paid_date: dueDate,
+        })
+        .eq('id', containerBillId);
+    }
+
+    return {
+      ...paymentBill,
+      status: calculateBillStatus(paymentBill) || 'upcoming'
+    };
+  } catch (error) {
+    console.error('Error in generatePaymentBillFromContainer:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get all payment bills for a container bill
+ */
+export async function getPaymentBillsForContainer(containerBillId: string): Promise<Bill[]> {
+  try {
+    const { data: user } = await supabase.auth.getUser();
+    if (!user.user) throw new Error('User not authenticated');
+
+    const { data: paymentBills, error } = await supabase
+      .from('bills')
+      .select('*')
+      .eq('parent_bill_id', containerBillId)
+      .eq('user_id', user.user.id)
+      .eq('is_deleted', false)
+      .order('due_date', { ascending: true });
+
+    if (error) {
+      console.error('Error fetching payment bills:', error);
+      throw error;
+    }
+
+    return (paymentBills || []).map(bill => ({
+      ...bill,
+      status: calculateBillStatus(bill)
+    }));
+  } catch (error) {
+    console.error('Error in getPaymentBillsForContainer:', error);
     throw error;
   }
 }

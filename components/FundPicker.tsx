@@ -41,12 +41,31 @@ export default function FundPicker({
 }: FundPickerProps) {
   const { currency } = useSettings();
   const { liabilities } = useLiabilities();
-  const { accountFunds, goals } = useRealtimeData();
+  const { accountFunds, goals, accounts, getFundSummary } = useRealtimeData();
 
   const accountFundsForAccount = useMemo(() => {
     if (!accountId) return [];
     return (accountFunds || []).filter((fund) => fund.account_id === accountId);
   }, [accountFunds, accountId]);
+
+  // Get account and calculate personal fund balance
+  const account = useMemo(() => {
+    return accounts.find((acc) => acc.id === accountId);
+  }, [accounts, accountId]);
+
+  const fundSummary = useMemo(() => {
+    if (!accountId) return { total: 0, spendable: 0, locked: 0, goal: 0, borrowed: 0 };
+    return getFundSummary(accountId);
+  }, [accountId, getFundSummary]);
+
+  // Calculate Personal Fund balance (Account Balance - Liability - Goal)
+  const personalFundBalance = useMemo(() => {
+    if (!accountId || !account) return 0;
+    const accountBalance = typeof account.balance === 'string' ? parseFloat(account.balance) : account.balance ?? 0;
+    const totalLiability = fundSummary.borrowed || 0;
+    const totalGoal = fundSummary.goal || 0;
+    return Math.max(0, accountBalance - totalLiability - totalGoal);
+  }, [accountId, account, fundSummary.borrowed, fundSummary.goal]);
 
   const buildBuckets = (): FundBucket[] => {
     if (!accountId) return [];
@@ -55,15 +74,30 @@ export default function FundPicker({
     const liabilitiesById = new Map(liabilities.map((liability) => [liability.id, liability]));
     const goalsById = new Map(goals.map((goal) => [goal.id, goal]));
 
+    // ALWAYS include Personal Fund (calculated, not stored)
+    // Personal Fund is always available for payments and transfers
+    // Always show personal fund (even if balance is 0) because it's the default fund
+    buckets.push({
+      type: 'personal',
+      id: 'personal',
+      name: 'Personal Funds',
+      amount: personalFundBalance,
+      color: '#10B981',
+      spendable: true,
+      lockedReason: undefined,
+    });
+
+    // Add borrowed/liability funds from account_funds
     accountFundsForAccount.forEach((fund) => {
       const balance = typeof fund.balance === 'string' ? parseFloat(fund.balance) : fund.balance ?? 0;
       if (balance <= 0) return;
 
+      // Skip personal funds (already added above)
+      if (fund.fund_type === 'personal') return;
+
       // STRICT RULE: Goal funds are NEVER selectable in FundPicker for payments/transfers
-      // They are locked and can only be withdrawn (not spent/transferred)
-      // Goal funds should never appear for payments, transfers, or bill payments
       if (fund.fund_type === 'goal') {
-        // Only include goal funds if explicitly allowed (withdrawals don't use FundPicker)
+        // Only include goal funds if explicitly allowed (withdrawals)
         if (!(allowGoalFunds === true && excludeGoalFunds === false)) {
           return; // Skip goal funds - they cannot be used for spending/transfers
         }
@@ -76,17 +110,13 @@ export default function FundPicker({
 
       const bucket: FundBucket = {
         type: fund.fund_type as FundBucketType,
-        // For personal funds, use 'personal' as ID
         // For liability funds, use linked_liability_id as ID (for matching with liability)
         // For goal funds, use linked_goal_id as ID (for matching with goal)
-        // For other funds, use fund.id
-        id: fund.fund_type === 'personal' 
-          ? 'personal' 
-          : fund.fund_type === 'borrowed' && fund.linked_liability_id
+        id: fund.fund_type === 'borrowed' && fund.linked_liability_id
           ? fund.linked_liability_id
           : fund.fund_type === 'goal' && fund.linked_goal_id
           ? fund.linked_goal_id
-          : fund.id,
+          : fund.reference_id || fund.id,
         name: fund.display_name || fund.name,
         amount: balance,
         color: fund.metadata?.color,
@@ -107,9 +137,7 @@ export default function FundPicker({
           : undefined;
         bucket.name = liability?.title || bucket.name || 'Borrowed Funds';
         bucket.color = '#EF4444';
-        bucket.lockedReason = fund.spendable
-          ? undefined
-          : 'Review the loan to unlock spendable balance.';
+        bucket.spendable = true; // Liability funds are spendable
       } else if (bucket.type === 'reserved') {
         bucket.color = '#1C4B6C';
         if (!fund.spendable) {
@@ -120,15 +148,16 @@ export default function FundPicker({
         if (!fund.spendable) {
           bucket.lockedReason = 'Convert a portion to personal funds before spending.';
         }
-      } else if (bucket.type === 'personal') {
-        bucket.name = fund.display_name || 'Personal Funds';
-        bucket.color = '#10B981';
       }
 
       buckets.push(bucket);
     });
 
     return buckets.sort((a, b) => {
+      // Personal fund always first
+      if (a.type === 'personal') return -1;
+      if (b.type === 'personal') return 1;
+      // Then by spendable status
       if (a.spendable === b.spendable) {
         return a.name.localeCompare(b.name);
       }

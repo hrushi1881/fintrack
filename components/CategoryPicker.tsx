@@ -16,7 +16,7 @@ import { supabase } from '../lib/supabase';
 
 interface CategoryPickerProps {
   selectedCategoryId?: string;
-  onCategorySelect: (category: Category | null) => void;
+  onCategorySelect?: (category: Category | null) => void;
   activityType?: 'income' | 'expense' | 'goal' | 'bill' | 'liability' | 'budget';
   placeholder?: string;
   disabled?: boolean;
@@ -91,14 +91,18 @@ export default function CategoryPicker({
 
   const handleCategorySelect = (category: Category) => {
     setSelectedCategory(category);
-    onCategorySelect(category);
+    if (onCategorySelect) {
+      onCategorySelect(category);
+    }
     setIsModalVisible(false);
     setSearchTerm('');
   };
 
   const handleClear = () => {
     setSelectedCategory(null);
-    onCategorySelect(null);
+    if (onCategorySelect) {
+      onCategorySelect(null);
+    }
   };
 
   const renderCategoryItem = ({ item }: { item: Category }) => (

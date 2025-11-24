@@ -10,9 +10,18 @@ import {
   View,
   Platform,
   KeyboardAvoidingView,
+  Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSettings } from '@/contexts/SettingsContext';
+import { useAuth } from '@/contexts/AuthContext';
+import {
+  createOrganization,
+  validateOrganizationData,
+  getSuggestedOrganizationSettings,
+  type CreateOrganizationData,
+} from '@/utils/organizations';
 
 export interface OrganizationFormValues {
   name: string;
@@ -24,39 +33,141 @@ export interface OrganizationFormValues {
 interface AddOrganizationModalProps {
   visible: boolean;
   onClose: () => void;
-  onSubmit: (values: OrganizationFormValues) => void;
+  onSubmit?: (values: OrganizationFormValues) => void;
+  onSuccess?: () => void;
 }
 
 const AddOrganizationModal: React.FC<AddOrganizationModalProps> = ({
   visible,
   onClose,
   onSubmit,
+  onSuccess,
 }) => {
+  const { user } = useAuth();
   const { currency: userCurrency } = useSettings();
   const [name, setName] = useState('');
+  const [type, setType] = useState<'bank' | 'wallet' | 'investment' | 'cash' | 'custom'>('custom');
   const [themeColor, setThemeColor] = useState<string | undefined>();
+  const [description, setDescription] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [errors, setErrors] = useState<string[]>([]);
 
   const resolvedCurrency = useMemo(() => userCurrency || 'USD', [userCurrency]);
   const isValid = useMemo(() => name.trim().length > 0, [name]);
 
-  const handleSave = () => {
-    if (!isValid) {
+  // Get suggested settings when name or type changes
+  const suggestions = useMemo(() => {
+    if (name.trim().length > 0) {
+      return getSuggestedOrganizationSettings(name.trim(), type);
+    }
+    return {};
+  }, [name, type]);
+
+  // Apply suggested color when available
+  React.useEffect(() => {
+    if (suggestions.color_theme && !themeColor) {
+      setThemeColor(suggestions.color_theme);
+    }
+  }, [suggestions.color_theme, themeColor]);
+
+  const handleSave = async () => {
+    if (!isValid || !user?.id) {
       return;
     }
-    onSubmit({
+
+    const formData: CreateOrganizationData = {
       name: name.trim(),
+      type,
       currency: resolvedCurrency,
-      themeColor,
-    });
-    setName('');
-    setThemeColor(undefined);
+      color_theme: themeColor,
+      description: description.trim() || undefined,
+    };
+
+    const validation = validateOrganizationData(formData);
+    if (!validation.valid) {
+      setErrors(validation.errors);
+      Alert.alert('Validation Error', validation.errors.join('\n'));
+      return;
+    }
+
+    setIsSaving(true);
+    setErrors([]);
+
+    try {
+      const organization = await createOrganization(formData, user.id);
+      
+      // Call legacy onSubmit if provided
+      if (onSubmit) {
+        onSubmit({
+          name: organization.name,
+          currency: organization.currency,
+          themeColor: organization.theme_color || undefined,
+        });
+      }
+
+      // Reset form but keep modal open
+      setName('');
+      setType('custom');
+      setThemeColor(undefined);
+      setDescription('');
+      setErrors([]);
+
+      Alert.alert('Success', `${organization.name} created successfully!`);
+      
+      // Call onSuccess callback
+      if (onSuccess) {
+        onSuccess();
+      }
+
+      // Modal stays open - user can add another organization
+    } catch (error: any) {
+      console.error('Failed to create organization:', error);
+      const message =
+        (error && typeof error === 'object' && 'message' in error && error.message) ||
+        'Something went wrong while creating the organization.';
+      Alert.alert('Could not create organization', String(message));
+      setErrors([message]);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleClose = () => {
     setName('');
+    setType('custom');
     setThemeColor(undefined);
+    setDescription('');
+    setErrors([]);
+    setIsSaving(false);
     onClose();
   };
+
+  const ORGANIZATION_TYPES: Array<{
+    value: 'bank' | 'wallet' | 'investment' | 'cash' | 'custom';
+    label: string;
+    icon: keyof typeof Ionicons.glyphMap;
+  }> = [
+    { value: 'bank', label: 'Bank', icon: 'business-outline' },
+    { value: 'wallet', label: 'Wallet', icon: 'wallet-outline' },
+    { value: 'investment', label: 'Investment', icon: 'trending-up-outline' },
+    { value: 'cash', label: 'Cash', icon: 'cash-outline' },
+    { value: 'custom', label: 'Custom', icon: 'add-circle-outline' },
+  ];
+
+  const COLOR_OPTIONS = [
+    '#4F6F3E',
+    '#0E4D8B',
+    '#FF6B35',
+    '#00BAF2',
+    '#5F259F',
+    '#2E7D32',
+    '#E4002B',
+    '#FBBF24',
+    '#8A614D',
+    '#2B6777',
+    '#6A7FDB',
+    '#B83228',
+  ];
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={handleClose}>
@@ -80,18 +191,49 @@ const AddOrganizationModal: React.FC<AddOrganizationModalProps> = ({
             <View style={styles.fieldBlock}>
               <Text style={styles.fieldLabel}>Organization Name</Text>
               <TextInput
-                style={styles.input}
-                placeholder="e.g., Chase Bank"
+                style={[styles.input, errors.length > 0 && styles.inputError]}
+                placeholder="e.g., HDFC Bank, Paytm"
                 placeholderTextColor="#9AA88B"
                 value={name}
-                onChangeText={setName}
+                onChangeText={(text) => {
+                  setName(text);
+                  setErrors([]);
+                }}
               />
+              {errors.length > 0 && (
+                <Text style={styles.errorText}>{errors[0]}</Text>
+              )}
             </View>
 
             <View style={styles.fieldBlock}>
-              <Text style={styles.fieldLabel}>Accent Color (optional)</Text>
+              <Text style={styles.fieldLabel}>Organization Type</Text>
+              <View style={styles.typeRow}>
+                {ORGANIZATION_TYPES.map((orgType) => {
+                  const isActive = type === orgType.value;
+                  return (
+                    <TouchableOpacity
+                      key={orgType.value}
+                      style={[styles.typeChip, isActive && styles.typeChipActive]}
+                      onPress={() => setType(orgType.value)}
+                    >
+                      <Ionicons
+                        name={orgType.icon}
+                        size={16}
+                        color={isActive ? '#FFFFFF' : '#0E401C'}
+                      />
+                      <Text style={[styles.typeChipText, isActive && styles.typeChipTextActive]}>
+                        {orgType.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+
+            <View style={styles.fieldBlock}>
+              <Text style={styles.fieldLabel}>Theme Color</Text>
               <View style={styles.colorGrid}>
-                {['#4F6F3E', '#8A614D', '#2B6777', '#6A7FDB', '#B83228', '#0E4D64'].map((colorOption) => {
+                {COLOR_OPTIONS.map((colorOption) => {
                   const active = themeColor === colorOption;
                   return (
                     <TouchableOpacity
@@ -104,6 +246,24 @@ const AddOrganizationModal: React.FC<AddOrganizationModalProps> = ({
                   );
                 })}
               </View>
+              {suggestions.color_theme && (
+                <Text style={styles.helperText}>
+                  Suggested: {suggestions.color_theme} (based on name/type)
+                </Text>
+              )}
+            </View>
+
+            <View style={styles.fieldBlock}>
+              <Text style={styles.fieldLabel}>Description (optional)</Text>
+              <TextInput
+                style={[styles.input, styles.multilineInput]}
+                placeholder="Add a description for this organization"
+                placeholderTextColor="#9AA88B"
+                value={description}
+                onChangeText={setDescription}
+                multiline
+                numberOfLines={3}
+              />
             </View>
 
             <View style={styles.logoPlaceholder}>
@@ -114,11 +274,15 @@ const AddOrganizationModal: React.FC<AddOrganizationModalProps> = ({
 
           <View style={styles.footer}>
             <TouchableOpacity
-              style={[styles.saveButton, !isValid && styles.saveButtonDisabled]}
+              style={[styles.saveButton, (!isValid || isSaving) && styles.saveButtonDisabled]}
               onPress={handleSave}
-              disabled={!isValid}
+              disabled={!isValid || isSaving}
             >
-              <Text style={styles.saveButtonText}>Save Organization</Text>
+              {isSaving ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
+              ) : (
+                <Text style={styles.saveButtonText}>Save Organization</Text>
+              )}
             </TouchableOpacity>
           </View>
         </KeyboardAvoidingView>
@@ -183,6 +347,53 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     fontSize: 14,
     color: '#1F3A24',
+    fontFamily: 'Poppins-Regular',
+  },
+  inputError: {
+    borderColor: '#EF4444',
+  },
+  multilineInput: {
+    minHeight: 72,
+    textAlignVertical: 'top',
+  },
+  errorText: {
+    marginTop: 6,
+    fontSize: 12,
+    color: '#EF4444',
+    fontFamily: 'Poppins-Regular',
+  },
+  typeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  typeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#D7DECC',
+    backgroundColor: '#FFFFFF',
+  },
+  typeChipActive: {
+    backgroundColor: '#4F6F3E',
+    borderColor: '#4F6F3E',
+  },
+  typeChipText: {
+    fontSize: 13,
+    color: '#0E401C',
+    fontFamily: 'Poppins-Medium',
+  },
+  typeChipTextActive: {
+    color: '#FFFFFF',
+  },
+  helperText: {
+    marginTop: 6,
+    fontSize: 12,
+    color: '#6B7D5D',
     fontFamily: 'Poppins-Regular',
   },
   colorGrid: {

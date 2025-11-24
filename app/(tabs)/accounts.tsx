@@ -8,9 +8,14 @@ import { formatCurrencyAmount } from '@/utils/currency';
 import AddAccountModal from '../modals/add-account';
 import AddOrganizationModal from '../modals/add-organization';
 import { useOrganizations } from '@/contexts/OrganizationsContext';
+import ActionSheet, { ActionSheetItem } from '@/components/ActionSheet';
+import { useAuth } from '@/contexts/AuthContext';
+import { Account } from '@/types';
+import { deleteAccount } from '@/utils/accounts';
 
 export default function AccountsScreen() {
-  const { accounts, totalBalance, loading, refreshAccounts } = useRealtimeData();
+  const { user } = useAuth();
+  const { accounts, totalBalance, loading, refreshAccounts, globalRefresh } = useRealtimeData();
   const { currency } = useSettings();
   const { organizations, organizationsWithAccounts, createOrganization, defaultOrganizationId } = useOrganizations();
 
@@ -18,6 +23,8 @@ export default function AccountsScreen() {
   const [addOrganizationModalVisible, setAddOrganizationModalVisible] = useState(false);
   const [expandedOrganizations, setExpandedOrganizations] = useState<Record<string, boolean>>({});
   const [selectedOrganizationId, setSelectedOrganizationId] = useState<string | undefined>(undefined);
+  const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
+  const [showActionSheet, setShowActionSheet] = useState(false);
 
   useFocusEffect(
     React.useCallback(() => {
@@ -92,6 +99,112 @@ export default function AccountsScreen() {
     () => (selectedOrganizationId ? organizationViews.find((org) => org.id === selectedOrganizationId) : undefined),
     [selectedOrganizationId, organizationViews]
   );
+
+  const handleMoreOptions = (account: Account, event: any) => {
+    event?.stopPropagation?.();
+    setSelectedAccount(account);
+    setShowActionSheet(true);
+  };
+
+  const handleEdit = () => {
+    if (!selectedAccount) return;
+    router.push(`/modals/edit-account?id=${selectedAccount.id}` as any);
+    setShowActionSheet(false);
+  };
+
+  const handleArchive = async () => {
+    if (!selectedAccount || !user?.id) return;
+    
+    Alert.alert(
+      'Archive Account',
+      `Archive "${selectedAccount.name}"? Archived accounts won't appear in your main list.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Archive',
+          onPress: async () => {
+            try {
+              const { archiveAccount } = await import('@/utils/accounts');
+              await archiveAccount(selectedAccount.id, user.id);
+              await globalRefresh();
+              setShowActionSheet(false);
+              Alert.alert('Success', 'Account archived successfully!');
+            } catch (error) {
+              console.error('Error archiving account:', error);
+              Alert.alert('Error', 'Failed to archive account. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleDelete = () => {
+    if (!selectedAccount || !user?.id) return;
+    
+    Alert.alert(
+      'Delete Account',
+      `Are you sure you want to delete "${selectedAccount.name}"? This action cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteAccount(selectedAccount.id, user.id);
+              await globalRefresh();
+              setShowActionSheet(false);
+            } catch (error) {
+              console.error('Error deleting account:', error);
+              Alert.alert('Error', 'Failed to delete account. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const getActionSheetItems = (account: Account): ActionSheetItem[] => {
+    const isArchived = !account.is_active;
+    
+    const items: ActionSheetItem[] = [
+      {
+        id: 'edit',
+        label: 'Edit',
+        icon: 'create-outline',
+        onPress: handleEdit,
+      },
+    ];
+
+    items.push({
+      id: 'separator',
+      label: '',
+      icon: 'ellipsis-horizontal',
+      onPress: () => {},
+      separator: true,
+      disabled: true,
+    });
+
+    if (!isArchived) {
+      items.push({
+        id: 'archive',
+        label: 'Archive',
+        icon: 'archive-outline',
+        onPress: handleArchive,
+      });
+    }
+
+    items.push({
+      id: 'delete',
+      label: 'Delete',
+      icon: 'trash-outline',
+      onPress: handleDelete,
+      destructive: true,
+    });
+
+    return items;
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -193,6 +306,7 @@ export default function AccountsScreen() {
                                   {String(accountType).replace(/_/g, ' ')}
                                 </Text>
                               </View>
+                              <View style={styles.accountRight}>
                               <View style={styles.accountBalanceColumn}>
                                 <Text style={styles.accountBalance}>{formatCurrency(Number(account.balance ?? 0))}</Text>
                                 {isCreditAccount && (account as any).credit_limit ? (
@@ -201,6 +315,15 @@ export default function AccountsScreen() {
                                     {formatCurrency(Number((account as any).credit_limit ?? 0))}
                                   </Text>
                                 ) : null}
+                                </View>
+                                <TouchableOpacity
+                                  style={styles.moreButton}
+                                  onPress={(e) => handleMoreOptions(account, e)}
+                                  activeOpacity={0.7}
+                                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                                >
+                                  <Ionicons name="ellipsis-horizontal" size={18} color="rgba(0, 0, 0, 0.6)" />
+                                </TouchableOpacity>
                               </View>
                             </TouchableOpacity>
                           );
@@ -239,6 +362,17 @@ export default function AccountsScreen() {
         visible={addOrganizationModalVisible}
         onClose={() => setAddOrganizationModalVisible(false)}
         onSubmit={handleOrganizationCreated}
+      />
+
+      {/* Action Sheet */}
+      <ActionSheet
+        visible={showActionSheet}
+        onClose={() => {
+          setShowActionSheet(false);
+          setSelectedAccount(null);
+        }}
+        items={selectedAccount ? getActionSheetItems(selectedAccount) : []}
+        title={selectedAccount?.name}
       />
         </SafeAreaView>
   );
@@ -390,9 +524,22 @@ const styles = StyleSheet.create({
     color: '#6B7D5D',
     fontFamily: 'InstrumentSerif-Regular',
   },
+  accountRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
   accountBalanceColumn: {
     alignItems: 'flex-end',
     gap: 4,
+  },
+  moreButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
   },
   accountBalance: {
     fontSize: 14,

@@ -3,6 +3,7 @@ import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, Tex
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/contexts/AuthContext';
+import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { supabase } from '@/lib/supabase';
 
 interface Account {
@@ -44,6 +45,7 @@ const iconOptions = [
 
 export default function EditAccountModal({ visible, onClose, account, onSuccess }: EditAccountModalProps) {
   const { user } = useAuth();
+  const { globalRefresh } = useRealtimeData();
   const [formData, setFormData] = useState({
     name: '',
     type: 'checking',
@@ -110,12 +112,13 @@ export default function EditAccountModal({ visible, onClose, account, onSuccess 
 
       if (error) throw error;
 
-      Alert.alert('Success', 'Account updated successfully!', [
-        { text: 'OK', onPress: () => {
-          onSuccess();
-          onClose();
-        }}
-      ]);
+      // Global refresh to update all data
+      await globalRefresh();
+      onSuccess();
+      
+      Alert.alert('Success', 'Account updated successfully!');
+      
+      // Modal stays open - user can continue editing if needed
 
     } catch (error) {
       console.error('Error updating account:', error);
@@ -146,12 +149,13 @@ export default function EditAccountModal({ visible, onClose, account, onSuccess 
 
               if (error) throw error;
 
-              Alert.alert('Success', 'Account deleted successfully!', [
-                { text: 'OK', onPress: () => {
-                  onSuccess();
-                  onClose();
-                }}
-              ]);
+              // Global refresh to update all data
+              await globalRefresh();
+              onSuccess();
+              
+              Alert.alert('Success', 'Account deleted successfully!');
+              
+              // Modal stays open - user can continue if needed
             } catch (error) {
               console.error('Error deleting account:', error);
               Alert.alert('Error', 'Failed to delete account. Please try again.');

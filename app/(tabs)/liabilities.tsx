@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   View,
   ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
@@ -14,12 +15,19 @@ import { useLiabilities } from '@/contexts/LiabilitiesContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { formatCurrencyAmount } from '@/utils/currency';
 import GlassCard from '@/components/GlassCard';
+import ActionSheet, { ActionSheetItem } from '@/components/ActionSheet';
+import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/contexts/AuthContext';
+import { Liability } from '@/types';
 
 const LiabilitiesScreen: React.FC = () => {
-  const { liabilities, loading } = useLiabilities();
+  const { user } = useAuth();
+  const { liabilities, loading, refreshLiabilities } = useLiabilities();
   const { currency } = useSettings();
 
   const [activeSegment, setActiveSegment] = useState<'upcoming' | 'all'>('upcoming');
+  const [selectedLiability, setSelectedLiability] = useState<Liability | null>(null);
+  const [showActionSheet, setShowActionSheet] = useState(false);
 
   const { upcoming, all, summary } = useMemo(() => {
     const now = new Date();
@@ -57,6 +65,173 @@ const LiabilitiesScreen: React.FC = () => {
 
   const list = activeSegment === 'upcoming' ? upcoming : all;
   const formatCurrency = (value: number) => formatCurrencyAmount(value, currency);
+
+  const handleMoreOptions = (liability: Liability, event: any) => {
+    event?.stopPropagation?.();
+    setSelectedLiability(liability);
+    setShowActionSheet(true);
+  };
+
+  const handleEdit = () => {
+    if (!selectedLiability) return;
+    router.push(`/modals/edit-liability?id=${selectedLiability.id}` as any);
+    setShowActionSheet(false);
+  };
+
+  const handlePayOff = () => {
+    if (!selectedLiability) return;
+    router.push(`/liability/${selectedLiability.id}?action=settle` as any);
+    setShowActionSheet(false);
+  };
+
+  const handleExtend = () => {
+    if (!selectedLiability) return;
+    router.push(`/modals/edit-liability-schedule?id=${selectedLiability.id}` as any);
+    setShowActionSheet(false);
+  };
+
+  const handlePause = async () => {
+    if (!selectedLiability) return;
+    
+    try {
+      const { error } = await supabase
+        .from('liabilities')
+        .update({ 
+          status: 'paused',
+        })
+        .eq('id', selectedLiability.id);
+      
+      if (error) throw error;
+      await globalRefresh();
+      setShowActionSheet(false);
+    } catch (error) {
+      console.error('Error pausing liability:', error);
+      Alert.alert('Error', 'Failed to pause liability. Please try again.');
+    }
+  };
+
+  const handleResume = async () => {
+    if (!selectedLiability) return;
+    
+    try {
+      const { error } = await supabase
+        .from('liabilities')
+        .update({ 
+          status: 'active',
+        })
+        .eq('id', selectedLiability.id);
+      
+      if (error) throw error;
+      await globalRefresh();
+      setShowActionSheet(false);
+    } catch (error) {
+      console.error('Error resuming liability:', error);
+      Alert.alert('Error', 'Failed to resume liability. Please try again.');
+    }
+  };
+
+  const handleDelete = () => {
+    if (!selectedLiability) return;
+    
+    Alert.alert(
+      'Delete Liability',
+      `Are you sure you want to delete "${selectedLiability.title}"? This action cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const { error } = await supabase
+                .from('liabilities')
+                .update({ 
+                  status: 'cancelled',
+                  is_deleted: true,
+                  deleted_at: new Date().toISOString(),
+                })
+                .eq('id', selectedLiability.id);
+              
+              if (error) throw error;
+              await refreshLiabilities();
+              setShowActionSheet(false);
+            } catch (error) {
+              console.error('Error deleting liability:', error);
+              Alert.alert('Error', 'Failed to delete liability. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const getActionSheetItems = (liability: Liability): ActionSheetItem[] => {
+    const isPaused = liability.status === 'paused';
+    const isPaidOff = liability.status === 'paid_off';
+    const currentBalance = Number(liability.current_balance ?? 0);
+    
+    const items: ActionSheetItem[] = [
+      {
+        id: 'edit',
+        label: 'Edit',
+        icon: 'create-outline',
+        onPress: handleEdit,
+      },
+    ];
+
+    if (!isPaidOff && currentBalance > 0) {
+      items.push({
+        id: 'payoff',
+        label: 'Pay Off',
+        icon: 'checkmark-circle-outline',
+        onPress: handlePayOff,
+      });
+    }
+
+    if (!isPaidOff) {
+      items.push({
+        id: 'extend',
+        label: 'Extend Term',
+        icon: 'calendar-outline',
+        onPress: handleExtend,
+      });
+
+      if (isPaused) {
+        items.push({
+          id: 'resume',
+          label: 'Resume',
+          icon: 'play-outline',
+          onPress: handleResume,
+        });
+      } else {
+        items.push({
+          id: 'pause',
+          label: 'Pause',
+          icon: 'pause-outline',
+          onPress: handlePause,
+        });
+      }
+    }
+
+    items.push({
+      id: 'separator',
+      label: '',
+      icon: 'ellipsis-horizontal',
+      onPress: () => {},
+      separator: true,
+      disabled: true,
+    });
+
+    items.push({
+      id: 'delete',
+      label: 'Delete',
+      icon: 'trash-outline',
+      onPress: handleDelete,
+      destructive: true,
+    });
+
+    return items;
+  };
 
   const renderEmptyState = (message: string, icon: keyof typeof Ionicons.glyphMap) => (
     <GlassCard padding={48} marginVertical={24}>
@@ -188,7 +363,17 @@ const LiabilitiesScreen: React.FC = () => {
                               {item.liability_type?.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()) ?? 'Liability'}
                             </Text>
                           </View>
-                          <StatusBadge status={item.status} />
+                          <View style={styles.liabilityHeaderRight}>
+                            <StatusBadge status={item.status} />
+                            <TouchableOpacity
+                              style={styles.moreButton}
+                              onPress={(e) => handleMoreOptions(item, e)}
+                              activeOpacity={0.7}
+                              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                            >
+                              <Ionicons name="ellipsis-horizontal" size={20} color="rgba(0, 0, 0, 0.6)" />
+                            </TouchableOpacity>
+                          </View>
                         </View>
 
                         {/* Balance and Payment */}
@@ -255,6 +440,17 @@ const LiabilitiesScreen: React.FC = () => {
           </View>
         </ScrollView>
       </View>
+
+      {/* Action Sheet */}
+      <ActionSheet
+        visible={showActionSheet}
+        onClose={() => {
+          setShowActionSheet(false);
+          setSelectedLiability(null);
+        }}
+        items={selectedLiability ? getActionSheetItems(selectedLiability) : []}
+        title={selectedLiability?.title}
+      />
     </SafeAreaView>
   );
 };
@@ -392,6 +588,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
+  },
+  liabilityHeaderRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  moreButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
   },
   liabilityIconContainer: {
     width: 48,

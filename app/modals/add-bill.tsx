@@ -8,91 +8,138 @@ import {
   SafeAreaView,
   TextInput,
   Alert,
+  Platform,
+  ActivityIndicator,
 } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
-import { useLocalSearchParams, router } from 'expo-router';
-import { useRealtimeData } from '../../hooks/useRealtimeData';
-import { useSettings } from '../../contexts/SettingsContext';
-import { Bill } from '../../types';
-import { createBill } from '../../utils/bills';
-import { formatCurrencyAmount } from '../../utils/currency';
-import CategoryPicker from '../../components/CategoryPicker';
+import { router } from 'expo-router';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { useRealtimeData } from '@/hooks/useRealtimeData';
+import { useSettings } from '@/contexts/SettingsContext';
+import { useAuth } from '@/contexts/AuthContext';
+import { RecurringTransactionNature, RecurringFrequency, RecurringAmountType } from '@/types';
+import { formatCurrencyAmount } from '@/utils/currency';
+import CategoryPicker from '@/components/CategoryPicker';
+import GlassCard from '@/components/GlassCard';
+import { createBill } from '@/utils/bills';
+import {
+  RECURRING_TRANSACTION_TYPES,
+  getAllRecurringTypeDefinitions,
+  FREQUENCY_LABELS,
+} from '@/constants/recurringTransactionTypes';
+
+type Direction = 'income' | 'expense';
+type CustomFrequencyUnit = 'days' | 'weeks' | 'months' | 'years';
+
+interface FormData {
+  direction: Direction;
+  nature: RecurringTransactionNature | null;
+  is_one_time: boolean; // Flag for one-time bills
+  title: string;
+  description: string;
+  amount: string;
+  amount_type: RecurringAmountType;
+  category_id: string;
+  account_ids: string[]; // Changed to array for multiple selection
+  all_accounts: boolean; // Flag for "All Accounts" option
+  
+  // Schedule (for recurring bills only)
+  frequency: RecurringFrequency;
+  custom_frequency_number: string;
+  custom_frequency_unit: CustomFrequencyUnit;
+  interval: string;
+  start_date: Date | null;
+  end_date: Date | null;
+  day_of_month: string;
+}
 
 export default function AddBillModal() {
-  const { categories, accounts, goals } = useRealtimeData();
+  const { user } = useAuth();
+  const { categories, accounts, globalRefresh } = useRealtimeData();
   const { currency } = useSettings();
+  
   const [currentStep, setCurrentStep] = useState(1);
   const [loading, setLoading] = useState(false);
-  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showStartDatePicker, setShowStartDatePicker] = useState(false);
   const [showEndDatePicker, setShowEndDatePicker] = useState(false);
-  const [datePickerMode, setDatePickerMode] = useState<'due_date' | 'end_date'>('due_date');
-  const [showGoalPicker, setShowGoalPicker] = useState(false);
   const [showAccountPicker, setShowAccountPicker] = useState(false);
   
-  // Form data
-  const [formData, setFormData] = useState({
+  // Visual locked state
+  const [amountLocked, setAmountLocked] = useState(true);
+  const [intervalLocked, setIntervalLocked] = useState(true);
+  const [frequencyLocked, setFrequencyLocked] = useState(true);
+  
+  const [formData, setFormData] = useState<FormData>({
+    direction: 'expense',
+    nature: null,
     title: '',
     description: '',
     amount: '',
-    currency: currency,
+    amount_type: 'fixed',
     category_id: '',
-    bill_type: 'one_time' as Bill['bill_type'],
-    recurrence_pattern: 'monthly' as Bill['recurrence_pattern'],
-    recurrence_interval: 1,
-    due_date: '',
-    next_due_date: '',
-    recurrence_end_date: '',
-    goal_id: '',
-    linked_account_id: '',
-    color: '#F59E0B',
-    icon: 'receipt',
-    reminder_days: [1, 3, 7],
-    notes: '',
+    account_ids: [],
+    all_accounts: false,
+    
+    frequency: 'monthly',
+    custom_frequency_number: '45',
+    custom_frequency_unit: 'days',
+    interval: '1',
+    start_date: null,
+    end_date: null,
+    day_of_month: '1',
   });
 
-  const billTypes = [
-    { key: 'one_time', label: 'One-time Bill', description: 'Paid once, no recurrence', icon: 'receipt' },
-    { key: 'recurring_fixed', label: 'Recurring Fixed', description: 'Same amount every cycle', icon: 'repeat' },
-    { key: 'recurring_variable', label: 'Recurring Variable', description: 'Due every cycle, amount changes', icon: 'trending-up' },
-    { key: 'goal_linked', label: 'Goal-linked Bill', description: 'Connected to a savings goal', icon: 'flag' },
-  ];
+  // Apply defaults when nature is selected
+  useEffect(() => {
+    if (formData.nature) {
+      const typeDef = RECURRING_TRANSACTION_TYPES[formData.nature];
+      if (typeDef) {
+        setFormData(prev => ({
+          ...prev,
+          direction: typeDef.defaultType,
+          amount_type: typeDef.defaults.amount_type,
+          frequency: typeDef.defaults.frequency,
+          interval: typeDef.defaults.interval.toString(),
+        }));
+      }
+    }
+  }, [formData.nature]);
 
-  const recurrencePatterns = [
-    { key: 'daily', label: 'Daily' },
-    { key: 'weekly', label: 'Weekly' },
-    { key: 'monthly', label: 'Monthly' },
-    { key: 'yearly', label: 'Yearly' },
-  ];
-
-  const colors = [
-    '#F59E0B', '#EF4444', '#10B981', '#3B82F6', '#8B5CF6', '#F97316',
-    '#84CC16', '#06B6D4', '#EC4899', '#6366F1', '#14B8A6', '#F43F5E'
-  ];
-
-  const icons = [
-    'receipt', 'flash', 'home', 'car', 'phone', 'wifi', 'card', 'medical',
-    'school', 'restaurant', 'shirt', 'game-controller', 'fitness', 'book'
-  ];
-
-  const handleInputChange = (field: string, value: any) => {
+  const handleInputChange = (field: keyof FormData, value: any) => {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
   const handleNext = () => {
-    if (currentStep === 1 && !formData.title.trim()) {
-      Alert.alert('Error', 'Please enter a bill title');
+    if (currentStep === 1) {
+      if (!formData.title.trim()) {
+        Alert.alert('Error', 'Please enter a title');
       return;
     }
-    if (currentStep === 2 && !formData.amount.trim() && formData.bill_type !== 'recurring_variable') {
-      Alert.alert('Error', 'Please enter an amount');
+      if (!formData.nature) {
+        Alert.alert('Error', 'Please select a type');
       return;
     }
-    if (currentStep === 3 && !formData.due_date) {
-      Alert.alert('Error', 'Please select a due date');
+    }
+    
+    if (currentStep === 2) {
+      if (!formData.start_date) {
+        Alert.alert('Error', 'Please select a start date');
       return;
     }
+      if (formData.frequency === 'custom') {
+        const num = parseInt(formData.custom_frequency_number);
+        if (isNaN(num) || num <= 0) {
+          Alert.alert('Error', 'Please enter a valid custom frequency number');
+          return;
+        }
+      }
+      const intervalNum = parseInt(formData.interval);
+      if (isNaN(intervalNum) || intervalNum <= 0) {
+        Alert.alert('Error', 'Please enter a valid interval');
+        return;
+      }
+    }
+    
     setCurrentStep(prev => prev + 1);
   };
 
@@ -101,28 +148,212 @@ export default function AddBillModal() {
   };
 
   const handleSubmit = async () => {
-    try {
-      setLoading(true);
-      
-      const billData = {
-        ...formData,
-        amount: formData.amount ? parseFloat(formData.amount) : null,
-        recurrence_interval: parseInt(formData.recurrence_interval.toString()),
-        reminder_days: formData.reminder_days,
-        category_id: formData.category_id || null,
-        goal_id: formData.goal_id || null,
-        linked_account_id: formData.linked_account_id || null,
-        recurrence_end_date: formData.recurrence_end_date || null,
-        metadata: {},
-        is_active: true,
-        is_deleted: false,
-      };
+    if (!user) {
+      Alert.alert('Error', 'User not authenticated');
+      return;
+    }
 
-      await createBill(billData);
-      router.back();
-    } catch (error) {
+    // Validate required fields
+    if (!formData.title.trim()) {
+      Alert.alert('Error', 'Please enter a title');
+      return;
+    }
+
+    if (!formData.nature) {
+      Alert.alert('Error', 'Please select a type');
+      return;
+    }
+
+    if (!formData.start_date) {
+      Alert.alert('Error', 'Please select a start date');
+      return;
+    }
+
+    if (!formData.all_accounts && formData.account_ids.length === 0) {
+      Alert.alert('Error', 'Please select at least one account or select "All Accounts"');
+      return;
+    }
+
+    // Validate amount for fixed bills
+    if (formData.amount_type === 'fixed' && (!formData.amount || parseFloat(formData.amount) <= 0)) {
+      Alert.alert('Error', 'Please enter a valid amount');
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      // Map formData to CreateBillData
+      const natureDef = RECURRING_TRANSACTION_TYPES[formData.nature];
+      const amountValue = formData.amount ? parseFloat(formData.amount) : undefined;
+      
+      // Determine end_type and dates
+      let endType: 'never' | 'on_date' | 'after_count' = 'never';
+      let recurrenceEndDate: string | undefined = undefined;
+      
+      if (formData.end_date) {
+        endType = 'on_date';
+        recurrenceEndDate = formData.end_date.toISOString().split('T')[0];
+      }
+
+      // Handle custom frequency
+      let frequency: RecurringFrequency = formData.frequency;
+      let customPattern: any = undefined;
+      
+      if (formData.frequency === 'custom') {
+        // For custom, we'll use the closest standard frequency and adjust interval
+        const customNum = parseInt(formData.custom_frequency_number) || 1;
+        const customUnit = formData.custom_frequency_unit;
+        
+        // Map custom units to frequencies
+        switch (customUnit) {
+          case 'days':
+            frequency = 'daily';
+            break;
+          case 'weeks':
+            frequency = 'weekly';
+            break;
+          case 'months':
+            frequency = 'monthly';
+            break;
+          case 'years':
+            frequency = 'yearly';
+            break;
+          default:
+            frequency = 'monthly';
+        }
+        
+        // Store custom pattern in metadata
+        customPattern = {
+          type: 'specific_days',
+          interval: customNum,
+          unit: customUnit,
+        };
+      }
+
+      // Calculate day_of_month for monthly frequency
+      const dayOfMonth = formData.frequency === 'monthly' && formData.day_of_month 
+        ? parseInt(formData.day_of_month) 
+        : undefined;
+
+      // Determine bill_type from nature and amount_type
+      let billType: 'one_time' | 'recurring_fixed' | 'recurring_variable' | 'goal_linked' | 'liability_linked' = 'recurring_fixed';
+      if (formData.amount_type === 'variable') {
+        billType = 'recurring_variable';
+      } else if (formData.nature === 'payment') {
+        billType = 'liability_linked';
+      } else if (formData.nature === 'income' || formData.nature === 'subscription' || formData.nature === 'bill') {
+        billType = 'recurring_fixed';
+      }
+
+      // Determine which accounts to create bills for
+      const accountsToUse = formData.all_accounts ? accounts : accounts.filter(a => formData.account_ids.includes(a.id));
+      
+      if (accountsToUse.length === 0) {
+        Alert.alert('Error', 'No accounts available');
+        return;
+      }
+
+      // Create bills for each selected account
+      let billsCreated = 0;
+      const errors: string[] = [];
+
+      for (const account of accountsToUse) {
+        try {
+          const billData = {
+            title: formData.title.trim(),
+            description: formData.description.trim() || undefined,
+            amount: amountValue,
+            currency: currency,
+            category_id: formData.category_id || undefined,
+            linked_account_id: account.id,
+            bill_type: billType,
+            
+            // Recurring transaction fields
+            direction: formData.direction,
+            nature: formData.nature,
+            amount_type: formData.amount_type,
+            estimated_amount: formData.amount_type === 'variable' ? amountValue : undefined,
+            frequency: frequency,
+            custom_pattern: customPattern,
+            recurrence_interval: parseInt(formData.interval) || 1,
+            day_of_month: dayOfMonth,
+            due_date: formData.start_date.toISOString().split('T')[0],
+            end_type: endType,
+            recurrence_end_date: recurrenceEndDate,
+            
+            // Visual
+            color: natureDef?.color || '#F59E0B',
+            icon: natureDef?.icon || 'receipt',
+            
+            // Subscription details (if applicable)
+            is_subscription: formData.nature === 'subscription',
+            
+            // Reminder settings
+            remind_before: true,
+            auto_create: true,
+            auto_create_days_before: 3,
+            reminder_days: [3, 1],
+            
+            // Metadata to track if this is part of a multi-account bill
+            metadata: {
+              ...(formData.all_accounts && { all_accounts: true }),
+              ...(accountsToUse.length > 1 && { 
+                multi_account: true,
+                account_count: accountsToUse.length 
+              }),
+            },
+          };
+
+          await createBill(billData);
+          billsCreated++;
+        } catch (error: any) {
+          errors.push(`Failed to create bill for ${account.name}: ${error.message}`);
+        }
+      }
+      
+      // Global refresh to update all data
+      await globalRefresh();
+      
+      if (errors.length > 0) {
+        Alert.alert(
+          'Partial Success',
+          `Created ${billsCreated} bill(s), but ${errors.length} failed:\n${errors.slice(0, 3).join('\n')}`
+        );
+      } else {
+        Alert.alert(
+          'Success',
+          billsCreated > 1
+            ? `Successfully created ${billsCreated} bills!`
+            : 'Bill created successfully!'
+        );
+      }
+      
+      // Reset form but keep modal open
+      setFormData({
+        direction: 'expense',
+        nature: null,
+        title: '',
+        description: '',
+        amount: '',
+        amount_type: 'fixed',
+        category_id: '',
+        account_ids: [],
+        all_accounts: false,
+        frequency: 'monthly',
+        custom_frequency_number: '45',
+        custom_frequency_unit: 'days',
+        interval: '1',
+        start_date: null,
+        end_date: null,
+        day_of_month: '1',
+      });
+      setCurrentStep(1);
+      
+      // Modal stays open - user can add another bill
+    } catch (error: any) {
       console.error('Error creating bill:', error);
-      Alert.alert('Error', 'Failed to create bill. Please try again.');
+      Alert.alert('Error', error.message || 'Failed to create bill. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -130,419 +361,696 @@ export default function AddBillModal() {
 
   const getStepTitle = () => {
     switch (currentStep) {
-      case 1: return 'Bill Type & Basic Info';
-      case 2: return 'Amount & Category';
-      case 3: return 'Due Date & Recurrence';
-      case 4: return 'Additional Settings';
-      default: return 'Add Bill';
+      case 1: return 'Basics';
+      case 2: return 'Schedule';
+      case 3: return 'Review & Create';
+      default: return 'Create Bill';
     }
   };
 
+  const natureTypes = getAllRecurringTypeDefinitions();
+
+  // Render Step 1: Basics
   const renderStep1 = () => (
+    <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
     <View style={styles.stepContent}>
-      <Text style={styles.stepDescription}>Choose the type of bill you want to add</Text>
+        <Text style={styles.stepDescription}>Choose direction and type of recurring transaction</Text>
       
-      {billTypes.map((type) => (
-        <TouchableOpacity
-          key={type.key}
-          style={[
-            styles.billTypeCard,
-            formData.bill_type === type.key && styles.selectedBillTypeCard
-          ]}
-          onPress={() => handleInputChange('bill_type', type.key)}
-        >
-          <View style={styles.billTypeIcon}>
-            <Ionicons 
-              name={type.icon as any} 
-              size={24} 
-              color={formData.bill_type === type.key ? '#10B981' : '#6B7280'} 
-            />
-          </View>
-          <View style={styles.billTypeInfo}>
-            <Text style={[
-              styles.billTypeLabel,
-              formData.bill_type === type.key && styles.selectedBillTypeLabel
-            ]}>
-              {type.label}
-            </Text>
-            <Text style={styles.billTypeDescription}>{type.description}</Text>
-          </View>
-          {formData.bill_type === type.key && (
-            <Ionicons name="checkmark-circle" size={24} color="#10B981" />
-          )}
-        </TouchableOpacity>
-      ))}
-
-      <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>Bill Title *</Text>
-        <TextInput
-          style={styles.textInput}
-          value={formData.title}
-          onChangeText={(value) => handleInputChange('title', value)}
-          placeholder="e.g., Electricity Bill"
-          placeholderTextColor="#9CA3AF"
-        />
-      </View>
-
-      <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>Description (Optional)</Text>
-        <TextInput
-          style={[styles.textInput, styles.textArea]}
-          value={formData.description}
-          onChangeText={(value) => handleInputChange('description', value)}
-          placeholder="Add a description..."
-          placeholderTextColor="#9CA3AF"
-          multiline
-          numberOfLines={3}
-        />
-      </View>
-    </View>
-  );
-
-  const renderStep2 = () => (
-    <View style={styles.stepContent}>
-      <Text style={styles.stepDescription}>Set the amount and categorize your bill</Text>
-      
-      {formData.bill_type !== 'recurring_variable' && (
+        {/* Direction Toggle */}
         <View style={styles.inputGroup}>
-          <Text style={styles.inputLabel}>Amount *</Text>
-          <View style={styles.amountInputContainer}>
-            <Text style={styles.currencySymbol}>{formatCurrencyAmount(0, currency).charAt(0)}</Text>
-            <TextInput
-              style={styles.amountInput}
-              value={formData.amount}
-              onChangeText={(value) => handleInputChange('amount', value)}
-              placeholder="0.00"
-              placeholderTextColor="#9CA3AF"
-              keyboardType="numeric"
+          <Text style={styles.inputLabel}>Direction *</Text>
+          <View style={styles.optionButtons}>
+        <TouchableOpacity
+          style={[
+                styles.optionButton,
+                formData.direction === 'expense' && styles.optionButtonSelected,
+          ]}
+              onPress={() => handleInputChange('direction', 'expense')}
+        >
+            <Ionicons 
+                name={formData.direction === 'expense' ? 'radio-button-on' : 'radio-button-off'}
+                size={20}
+                color={formData.direction === 'expense' ? '#000000' : 'rgba(0, 0, 0, 0.4)'}
             />
-          </View>
-        </View>
-      )}
-
-      {formData.bill_type === 'recurring_variable' && (
-        <View style={styles.variableAmountInfo}>
-          <Ionicons name="information-circle" size={20} color="#3B82F6" />
-          <Text style={styles.variableAmountText}>
-            Variable amount bills don't require a fixed amount. You can enter the amount when marking as paid.
-          </Text>
-        </View>
-      )}
-
-      <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>Category</Text>
-        <CategoryPicker
-          selectedCategoryId={formData.category_id}
-          onCategorySelect={(category) => handleInputChange('category_id', category?.id)}
-          activityType="bill"
-          placeholder="Select a category"
-        />
-      </View>
-
-      <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>Icon & Color</Text>
-        <View style={styles.iconColorContainer}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.iconScroll}>
-            {icons.map((icon) => (
+            <Text style={[
+                styles.optionButtonText,
+                formData.direction === 'expense' && styles.optionButtonTextSelected
+            ]}>
+                Expense
+            </Text>
+        </TouchableOpacity>
               <TouchableOpacity
-                key={icon}
                 style={[
-                  styles.iconOption,
-                  formData.icon === icon && styles.selectedIconOption
+                styles.optionButton,
+                formData.direction === 'income' && styles.optionButtonSelected,
                 ]}
-                onPress={() => handleInputChange('icon', icon)}
+              onPress={() => handleInputChange('direction', 'income')}
               >
                 <Ionicons 
-                  name={icon as any} 
+                name={formData.direction === 'income' ? 'radio-button-on' : 'radio-button-off'}
                   size={20} 
-                  color={formData.icon === icon ? 'white' : '#6B7280'} 
+                color={formData.direction === 'income' ? '#000000' : 'rgba(0, 0, 0, 0.4)'}
                 />
+              <Text style={[
+                styles.optionButtonText,
+                formData.direction === 'income' && styles.optionButtonTextSelected
+              ]}>
+                Income
+              </Text>
               </TouchableOpacity>
-            ))}
-          </ScrollView>
-          
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.colorScroll}>
-            {colors.map((color) => (
-              <TouchableOpacity
-                key={color}
-                style={[
-                  styles.colorOption,
-                  { backgroundColor: color },
-                  formData.color === color && styles.selectedColorOption
-                ]}
-                onPress={() => handleInputChange('color', color)}
-              >
-                {formData.color === color && (
-                  <Ionicons name="checkmark" size={16} color="white" />
-                )}
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
         </View>
       </View>
-    </View>
-  );
 
-  const renderStep3 = () => (
-    <View style={styles.stepContent}>
-      <Text style={styles.stepDescription}>Set due date and recurrence pattern</Text>
-      
+        {/* Nature Selection */}
       <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>Due Date *</Text>
-        <TouchableOpacity 
-          style={styles.dateButton}
-          onPress={() => {
-            setDatePickerMode('due_date');
-            setShowDatePicker(true);
-          }}
-        >
-          <Text style={styles.dateButtonText}>
-            {formData.due_date ? new Date(formData.due_date).toLocaleDateString() : 'Select Date'}
-          </Text>
-          <Ionicons name="calendar" size={20} color="#6B7280" />
-        </TouchableOpacity>
-      </View>
-
-      {formData.bill_type !== 'one_time' && (
-        <>
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Recurrence Pattern</Text>
-            <View style={styles.recurrenceContainer}>
-              {recurrencePatterns.map((pattern) => (
+          <Text style={styles.inputLabel}>Type *</Text>
+          {natureTypes.map((typeDef) => {
+            const isSelected = formData.nature === typeDef.nature;
+            const shouldShow = formData.direction === typeDef.defaultType;
+            
+            if (!shouldShow && !isSelected) return null;
+            
+            return (
                 <TouchableOpacity
-                  key={pattern.key}
+                key={typeDef.nature}
                   style={[
-                    styles.recurrenceOption,
-                    formData.recurrence_pattern === pattern.key && styles.selectedRecurrenceOption
+                  styles.natureCard,
+                  isSelected && styles.natureCardSelected,
+                  { borderLeftColor: typeDef.color },
                   ]}
-                  onPress={() => handleInputChange('recurrence_pattern', pattern.key)}
+                onPress={() => handleInputChange('nature', typeDef.nature)}
                 >
+                <View style={[styles.natureIcon, { backgroundColor: typeDef.color + '20' }]}>
+                  <Ionicons name={typeDef.icon as any} size={24} color={typeDef.color} />
+                </View>
+                <View style={styles.natureInfo}>
                   <Text style={[
-                    styles.recurrenceText,
-                    formData.recurrence_pattern === pattern.key && styles.selectedRecurrenceText
+                    styles.natureLabel,
+                    isSelected && styles.natureLabelSelected
                   ]}>
-                    {pattern.label}
+                    {typeDef.label}
                   </Text>
+                  <Text style={styles.natureDescription}>{typeDef.description}</Text>
+                </View>
+                {isSelected && (
+                  <Ionicons name="checkmark-circle" size={24} color={typeDef.color} />
+                )}
                 </TouchableOpacity>
-              ))}
-            </View>
+            );
+          })}
           </View>
 
+        {/* Title */}
           <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Every</Text>
-            <View style={styles.intervalContainer}>
+          <Text style={styles.inputLabel}>Title *</Text>
               <TextInput
-                style={styles.intervalInput}
-                value={formData.recurrence_interval.toString()}
-                onChangeText={(value) => handleInputChange('recurrence_interval', parseInt(value) || 1)}
-                keyboardType="numeric"
+            style={styles.textInput}
+            placeholder="e.g., Netflix Subscription"
+            placeholderTextColor="rgba(0, 0, 0, 0.4)"
+            value={formData.title}
+            onChangeText={(value) => handleInputChange('title', value)}
               />
-              <Text style={styles.intervalText}>
-                {formData.recurrence_pattern}(s)
-              </Text>
-            </View>
           </View>
 
+        {/* Amount - Visually Locked */}
           <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>End Date (Optional)</Text>
+          <Text style={styles.inputLabel}>Amount</Text>
+          <View style={[
+            styles.amountInputContainer,
+            amountLocked && styles.lockedField,
+            !amountLocked && styles.unlockedField,
+          ]}>
+            <Text style={styles.currencySymbol}>
+              {formatCurrencyAmount(0, currency).charAt(0)}
+            </Text>
+            <TextInput
+              style={styles.amountInput}
+              placeholder="0.00"
+              placeholderTextColor="rgba(0, 0, 0, 0.4)"
+              keyboardType="decimal-pad"
+              value={formData.amount}
+              onChangeText={(value) => handleInputChange('amount', value)}
+              onFocus={() => setAmountLocked(false)}
+              onBlur={() => setAmountLocked(true)}
+            />
             <TouchableOpacity 
-              style={styles.dateButton}
               onPress={() => {
-                setDatePickerMode('end_date');
-                setShowEndDatePicker(true);
+                setAmountLocked(!amountLocked);
               }}
+              style={styles.lockButton}
             >
-              <Text style={styles.dateButtonText}>
-                {formData.recurrence_end_date ? new Date(formData.recurrence_end_date).toLocaleDateString() : 'No end date'}
-              </Text>
-              <Ionicons name="calendar" size={20} color="#6B7280" />
+              <Ionicons
+                name={amountLocked ? 'lock-closed' : 'lock-open'}
+                size={16}
+                color="rgba(0, 0, 0, 0.4)"
+              />
             </TouchableOpacity>
           </View>
-        </>
+          {amountLocked && (
+            <Text style={styles.helperText}>Tap to edit amount</Text>
       )}
     </View>
-  );
 
-  const renderStep4 = () => (
-    <View style={styles.stepContent}>
-      <Text style={styles.stepDescription}>Configure additional settings and reminders</Text>
-      
-      {formData.bill_type === 'goal_linked' && (
+        {/* Amount Type */}
+        {formData.nature && RECURRING_TRANSACTION_TYPES[formData.nature]?.characteristics.amountPattern === 'both' && (
         <View style={styles.inputGroup}>
-          <Text style={styles.inputLabel}>Linked Goal</Text>
+            <Text style={styles.inputLabel}>Amount Pattern</Text>
+            <View style={styles.optionButtons}>
           <TouchableOpacity 
-            style={styles.pickerButton}
-            onPress={() => setShowGoalPicker(!showGoalPicker)}
+                style={[
+                  styles.optionButton,
+                  formData.amount_type === 'fixed' && styles.optionButtonSelected,
+                ]}
+                onPress={() => handleInputChange('amount_type', 'fixed')}
           >
-            <Text style={styles.pickerButtonText}>
-              {formData.goal_id ? goals.find(g => g.id === formData.goal_id)?.title : 'Select Goal'}
+                <Text style={[
+                  styles.optionButtonText,
+                  formData.amount_type === 'fixed' && styles.optionButtonTextSelected
+                ]}>
+                  Fixed
             </Text>
-            <Ionicons name={showGoalPicker ? "chevron-up" : "chevron-down"} size={20} color="#6B7280" />
           </TouchableOpacity>
-          
-          {showGoalPicker && (
-            <View style={styles.pickerContainer}>
-              <ScrollView style={styles.pickerScroll} showsVerticalScrollIndicator={false}>
-                {goals.map((goal) => (
                   <TouchableOpacity
-                    key={goal.id}
                     style={[
-                      styles.pickerOption,
-                      formData.goal_id === goal.id && styles.selectedPickerOption
+                  styles.optionButton,
+                  formData.amount_type === 'variable' && styles.optionButtonSelected,
                     ]}
-                    onPress={() => {
-                      handleInputChange('goal_id', goal.id);
-                      setShowGoalPicker(false);
-                    }}
+                onPress={() => handleInputChange('amount_type', 'variable')}
                   >
-                    <View style={styles.pickerOptionInfo}>
                       <Text style={[
-                        styles.pickerOptionName,
-                        formData.goal_id === goal.id && styles.selectedPickerOptionText
+                  styles.optionButtonText,
+                  formData.amount_type === 'variable' && styles.optionButtonTextSelected
                       ]}>
-                        {goal.title}
+                  Variable
                       </Text>
-                      <Text style={[
-                        styles.pickerOptionDescription,
-                        formData.goal_id === goal.id && styles.selectedPickerOptionText
-                      ]}>
-                        {formatCurrencyAmount(goal.current_amount, currency)} / {formatCurrencyAmount(goal.target_amount, currency)}
-                      </Text>
-                    </View>
-                    {formData.goal_id === goal.id && (
-                      <Ionicons name="checkmark-circle" size={20} color="#10B981" />
-                    )}
                   </TouchableOpacity>
-                ))}
-              </ScrollView>
             </View>
-          )}
         </View>
       )}
 
+        {/* Category */}
       <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>Linked Account (Optional)</Text>
+          <Text style={styles.inputLabel}>Category</Text>
+          <CategoryPicker
+            selectedCategoryId={formData.category_id}
+            onCategorySelect={(category) => handleInputChange('category_id', category?.id || '')}
+            activityType={formData.direction}
+            placeholder="Select a category"
+          />
+        </View>
+
+        {/* Description */}
+        <View style={styles.inputGroup}>
+          <Text style={styles.inputLabel}>Description (Optional)</Text>
+          <TextInput
+            style={[styles.textInput, styles.textArea]}
+            placeholder="Add a description..."
+            placeholderTextColor="rgba(0, 0, 0, 0.4)"
+            multiline
+            numberOfLines={3}
+            value={formData.description}
+            onChangeText={(value) => handleInputChange('description', value)}
+          />
+        </View>
+
+        {/* Account Selection */}
+        <View style={styles.inputGroup}>
+          <Text style={styles.inputLabel}>Account(s) *</Text>
         <TouchableOpacity 
           style={styles.pickerButton}
           onPress={() => setShowAccountPicker(!showAccountPicker)}
         >
           <Text style={styles.pickerButtonText}>
-            {formData.linked_account_id ? accounts.find(a => a.id === formData.linked_account_id)?.name : 'Select account'}
+              {formData.all_accounts
+                ? 'All Accounts'
+                : formData.account_ids.length === 0
+                ? 'Select account(s)'
+                : formData.account_ids.length === 1
+                ? accounts.find(a => a.id === formData.account_ids[0])?.name
+                : `${formData.account_ids.length} accounts selected`}
           </Text>
-          <Ionicons name={showAccountPicker ? "chevron-up" : "chevron-down"} size={20} color="#6B7280" />
+            <Ionicons
+              name={showAccountPicker ? 'chevron-up' : 'chevron-down'}
+              size={20}
+              color="rgba(0, 0, 0, 0.4)"
+            />
         </TouchableOpacity>
         
         {showAccountPicker && (
           <View style={styles.pickerContainer}>
             <ScrollView style={styles.pickerScroll} showsVerticalScrollIndicator={false}>
+              {/* All Accounts Option */}
               <TouchableOpacity
                 style={[
                   styles.pickerOption,
-                  !formData.linked_account_id && styles.selectedPickerOption
+                  formData.all_accounts && styles.selectedPickerOption
                 ]}
                 onPress={() => {
-                  handleInputChange('linked_account_id', '');
+                  handleInputChange('all_accounts', true);
+                  handleInputChange('account_ids', []);
                   setShowAccountPicker(false);
                 }}
               >
                 <View style={styles.pickerOptionInfo}>
                   <Text style={[
                     styles.pickerOptionName,
-                    !formData.linked_account_id && styles.selectedPickerOptionText
+                    formData.all_accounts && styles.selectedPickerOptionText
                   ]}>
-                    No account linked
+                    All Accounts
+                  </Text>
+                  <Text style={styles.pickerOptionDescription}>
+                    Apply to all your accounts
                   </Text>
                 </View>
-                {!formData.linked_account_id && (
-                  <Ionicons name="checkmark-circle" size={20} color="#10B981" />
+                {formData.all_accounts && (
+                  <Ionicons name="checkmark-circle" size={20} color="#000000" />
                 )}
               </TouchableOpacity>
-              {accounts.map((account) => (
+              
+              {/* Individual Accounts */}
+              {accounts.map((account) => {
+                const isSelected = formData.account_ids.includes(account.id);
+                return (
+                  <TouchableOpacity
+                    key={account.id}
+                    style={[
+                      styles.pickerOption,
+                      isSelected && styles.selectedPickerOption
+                    ]}
+                    onPress={() => {
+                      if (formData.all_accounts) {
+                        // If "All Accounts" is selected, unselect it and select this account
+                        handleInputChange('all_accounts', false);
+                        handleInputChange('account_ids', [account.id]);
+                      } else {
+                        // Toggle account selection
+                        const newAccountIds = isSelected
+                          ? formData.account_ids.filter(id => id !== account.id)
+                          : [...formData.account_ids, account.id];
+                        handleInputChange('account_ids', newAccountIds);
+                      }
+                      // Don't close picker to allow multiple selections
+                    }}
+                  >
+                    <View style={styles.pickerOptionInfo}>
+                      <Text style={[
+                        styles.pickerOptionName,
+                        isSelected && styles.selectedPickerOptionText
+                      ]}>
+                        {account.name}
+                      </Text>
+                      <Text style={styles.pickerOptionDescription}>
+                        {formatCurrencyAmount(account.balance, currency)}
+                      </Text>
+                    </View>
+                    {isSelected && (
+                      <Ionicons name="checkmark-circle" size={20} color="#000000" />
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+              
+              {/* Done Button */}
+              {!formData.all_accounts && (
                 <TouchableOpacity
-                  key={account.id}
-                  style={[
-                    styles.pickerOption,
-                    formData.linked_account_id === account.id && styles.selectedPickerOption
-                  ]}
-                  onPress={() => {
-                    handleInputChange('linked_account_id', account.id);
-                    setShowAccountPicker(false);
-                  }}
+                  style={styles.doneButton}
+                  onPress={() => setShowAccountPicker(false)}
                 >
-                  <View style={styles.pickerOptionInfo}>
-                    <Text style={[
-                      styles.pickerOptionName,
-                      formData.linked_account_id === account.id && styles.selectedPickerOptionText
-                    ]}>
-                      {account.name}
-                    </Text>
-                    <Text style={[
-                      styles.pickerOptionDescription,
-                      formData.linked_account_id === account.id && styles.selectedPickerOptionText
-                    ]}>
-                      {formatCurrencyAmount(account.balance, currency)}
-                    </Text>
-                  </View>
-                  {formData.linked_account_id === account.id && (
-                    <Ionicons name="checkmark-circle" size={20} color="#10B981" />
-                  )}
+                  <Text style={styles.doneButtonText}>Done</Text>
                 </TouchableOpacity>
-              ))}
+              )}
             </ScrollView>
           </View>
         )}
       </View>
+      </View>
+    </ScrollView>
+  );
 
+  // Render Step 2: Schedule
+  const renderStep2 = () => {
+    const frequencyOptions: RecurringFrequency[] = ['daily', 'weekly', 'monthly', 'yearly', 'custom'];
+    
+    return (
+      <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
+        <View style={styles.stepContent}>
+          <Text style={styles.stepDescription}>Set frequency and schedule</Text>
+          
+          {/* Frequency - Visually Locked */}
       <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>Reminder Days</Text>
-        <Text style={styles.reminderDescription}>Get notified before the due date</Text>
-        <View style={styles.reminderContainer}>
-          {[1, 3, 7, 14, 30].map((day) => (
+            <Text style={styles.inputLabel}>Frequency *</Text>
+            <View style={styles.frequencyContainer}>
+              {frequencyOptions.map((freq) => (
             <TouchableOpacity
-              key={day}
+                  key={freq}
               style={[
-                styles.reminderOption,
-                formData.reminder_days.includes(day) && styles.selectedReminderOption
+                    styles.frequencyOption,
+                    formData.frequency === freq && styles.selectedFrequencyOption,
               ]}
               onPress={() => {
-                const newDays = formData.reminder_days.includes(day)
-                  ? formData.reminder_days.filter(d => d !== day)
-                  : [...formData.reminder_days, day];
-                handleInputChange('reminder_days', newDays);
+                    handleInputChange('frequency', freq);
+                    setFrequencyLocked(true);
               }}
             >
               <Text style={[
-                styles.reminderText,
-                formData.reminder_days.includes(day) && styles.selectedReminderText
+                    styles.frequencyText,
+                    formData.frequency === freq && styles.selectedFrequencyText
               ]}>
-                {day}d
+                    {FREQUENCY_LABELS[freq]}
               </Text>
             </TouchableOpacity>
           ))}
         </View>
+            
+            {formData.frequency === 'custom' && (
+              <View style={styles.customFrequencyContainer}>
+                <View style={[
+                  styles.customFrequencyInput,
+                  frequencyLocked && styles.lockedField,
+                  !frequencyLocked && styles.unlockedField,
+                ]}>
+                  <TextInput
+                    style={styles.customFrequencyNumberInput}
+                    placeholder="45"
+                    placeholderTextColor="rgba(0, 0, 0, 0.4)"
+                    keyboardType="numeric"
+                    value={formData.custom_frequency_number}
+                    onChangeText={(value) => handleInputChange('custom_frequency_number', value)}
+                    onFocus={() => setFrequencyLocked(false)}
+                    onBlur={() => setFrequencyLocked(true)}
+                  />
+                  <TouchableOpacity
+                    style={styles.customFrequencyUnitButton}
+                    onPress={() => {
+                      // Cycle through units or show dropdown
+                      const units: CustomFrequencyUnit[] = ['days', 'weeks', 'months', 'years'];
+                      const currentIndex = units.indexOf(formData.custom_frequency_unit);
+                      const nextIndex = (currentIndex + 1) % units.length;
+                      handleInputChange('custom_frequency_unit', units[nextIndex]);
+                    }}
+                  >
+                    <Text style={styles.customFrequencyUnitText}>
+                      {formData.custom_frequency_unit.charAt(0).toUpperCase() + formData.custom_frequency_unit.slice(1)}
+                    </Text>
+                    <Ionicons name="chevron-down" size={16} color="rgba(0, 0, 0, 0.4)" />
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => setFrequencyLocked(!frequencyLocked)}
+                    style={styles.lockButton}
+                  >
+                    <Ionicons
+                      name={frequencyLocked ? 'lock-closed' : 'lock-open'}
+                      size={16}
+                      color="rgba(0, 0, 0, 0.4)"
+                    />
+                  </TouchableOpacity>
+                </View>
+                {frequencyLocked && (
+                  <Text style={styles.helperText}>Tap to edit custom frequency</Text>
+                )}
+              </View>
+            )}
       </View>
 
+          {/* Interval - Visually Locked */}
       <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>Notes (Optional)</Text>
+            <Text style={styles.inputLabel}>Repeat Every</Text>
+            <View style={[
+              styles.intervalContainer,
+              intervalLocked && styles.lockedField,
+              !intervalLocked && styles.unlockedField,
+            ]}>
         <TextInput
-          style={[styles.textInput, styles.textArea]}
-          value={formData.notes}
-          onChangeText={(value) => handleInputChange('notes', value)}
-          placeholder="Add any additional notes..."
-          placeholderTextColor="#9CA3AF"
-          multiline
-          numberOfLines={3}
-        />
+                style={styles.intervalInput}
+                placeholder="1"
+                placeholderTextColor="rgba(0, 0, 0, 0.4)"
+                keyboardType="numeric"
+                value={formData.interval}
+                onChangeText={(value) => handleInputChange('interval', value)}
+                onFocus={() => setIntervalLocked(false)}
+                onBlur={() => setIntervalLocked(true)}
+              />
+              <Text style={styles.intervalText}>
+                {formData.frequency === 'custom'
+                  ? formData.custom_frequency_unit
+                  : formData.frequency === 'daily' ? 'day(s)'
+                  : formData.frequency === 'weekly' ? 'week(s)'
+                  : formData.frequency === 'monthly' ? 'month(s)'
+                  : formData.frequency === 'yearly' ? 'year(s)'
+                  : 'period(s)'}
+              </Text>
+              <TouchableOpacity
+                onPress={() => setIntervalLocked(!intervalLocked)}
+                style={styles.lockButton}
+              >
+                <Ionicons
+                  name={intervalLocked ? 'lock-closed' : 'lock-open'}
+                  size={16}
+                  color="rgba(0, 0, 0, 0.4)"
+                />
+              </TouchableOpacity>
       </View>
+            {intervalLocked && (
+              <Text style={styles.helperText}>Tap to edit interval</Text>
+            )}
     </View>
-  );
+
+          {/* Day of Month (for monthly) */}
+          {formData.frequency === 'monthly' && (
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Day of Month *</Text>
+              <View style={styles.dayOfMonthContainer}>
+                {Array.from({ length: 31 }, (_, i) => i + 1).map((day) => (
+                  <TouchableOpacity
+                    key={day}
+                    style={[
+                      styles.dayOfMonthOption,
+                      formData.day_of_month === day.toString() && styles.selectedDayOfMonthOption,
+                    ]}
+                    onPress={() => handleInputChange('day_of_month', day.toString())}
+                  >
+                    <Text style={[
+                      styles.dayOfMonthText,
+                      formData.day_of_month === day.toString() && styles.selectedDayOfMonthText
+                    ]}>
+                      {day}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {/* Start Date */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Start Date *</Text>
+            <TouchableOpacity
+              style={styles.dateButton}
+              onPress={() => setShowStartDatePicker(true)}
+            >
+              <Ionicons name="calendar-outline" size={20} color="rgba(0, 0, 0, 0.6)" />
+              <Text style={styles.dateButtonText}>
+                {formData.start_date
+                  ? formData.start_date.toLocaleDateString('en-US', {
+                      year: 'numeric',
+                      month: 'short',
+                      day: 'numeric',
+                    })
+                  : 'Select start date'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* End Date (Optional) */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>End Date (Optional)</Text>
+            <TouchableOpacity
+              style={styles.dateButton}
+              onPress={() => setShowEndDatePicker(true)}
+            >
+              <Ionicons name="calendar-outline" size={20} color="rgba(0, 0, 0, 0.6)" />
+              <Text style={styles.dateButtonText}>
+                {formData.end_date
+                  ? formData.end_date.toLocaleDateString('en-US', {
+                      year: 'numeric',
+                      month: 'short',
+                      day: 'numeric',
+                    })
+                  : 'No end date'}
+              </Text>
+            </TouchableOpacity>
+            {formData.end_date && (
+              <Text style={styles.helperText}>
+                Payment dates cannot go beyond this date
+              </Text>
+            )}
+          </View>
+        </View>
+      </ScrollView>
+    );
+  };
+
+  // Render Step 3: Review & Create
+  const renderStep3 = () => {
+    // Calculate bill count (simplified - will be more sophisticated later)
+    const calculateBillCount = () => {
+      if (!formData.start_date) return 0;
+      if (formData.end_date && formData.end_date < formData.start_date) return 0;
+      
+      // Simplified calculation - actual implementation will consider frequency and interval
+      return 12; // Placeholder
+    };
+
+    const billCount = calculateBillCount();
+    const selectedNature = formData.nature ? RECURRING_TRANSACTION_TYPES[formData.nature] : null;
+    const selectedCategory = categories.find(c => c.id === formData.category_id);
+    
+    // Get selected accounts for display
+    const selectedAccounts = formData.all_accounts 
+      ? accounts 
+      : accounts.filter(a => formData.account_ids.includes(a.id));
+    const accountCount = selectedAccounts.length;
 
   return (
-    <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
-      <SafeAreaView style={styles.safeArea}>
+      <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
+        <View style={styles.stepContent}>
+          <Text style={styles.stepDescription}>Review your recurring transaction</Text>
+          
+          <GlassCard padding={20} marginVertical={12}>
+            <View style={styles.summaryRow}>
+              <Text style={styles.summaryLabel}>Type</Text>
+              <View style={styles.summaryValueContainer}>
+                {selectedNature && (
+                  <View style={[styles.summaryBadge, { backgroundColor: selectedNature.color + '20' }]}>
+                    <Ionicons name={selectedNature.icon as any} size={16} color={selectedNature.color} />
+                    <Text style={[styles.summaryBadgeText, { color: selectedNature.color }]}>
+                      {selectedNature.label}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            </View>
+
+            <View style={styles.summaryRow}>
+              <Text style={styles.summaryLabel}>Direction</Text>
+              <Text style={styles.summaryValue}>
+                {formData.direction === 'income' ? 'Income' : 'Expense'}
+              </Text>
+            </View>
+
+            <View style={styles.summaryRow}>
+              <Text style={styles.summaryLabel}>Title</Text>
+              <Text style={styles.summaryValue}>{formData.title}</Text>
+            </View>
+
+            {formData.amount && (
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Amount</Text>
+                <Text style={styles.summaryValue}>
+                  {formatCurrencyAmount(parseFloat(formData.amount) || 0, currency)}
+                  {formData.amount_type === 'variable' && ' (variable)'}
+                </Text>
+              </View>
+            )}
+
+            {selectedCategory && (
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Category</Text>
+                <Text style={styles.summaryValue}>{selectedCategory.name}</Text>
+              </View>
+            )}
+
+            <View style={styles.summaryRow}>
+              <Text style={styles.summaryLabel}>Frequency</Text>
+              <Text style={styles.summaryValue}>
+                {formData.frequency === 'custom'
+                  ? `Every ${formData.custom_frequency_number} ${formData.custom_frequency_unit}`
+                  : FREQUENCY_LABELS[formData.frequency]}
+              </Text>
+            </View>
+
+            {formData.start_date && (
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Start Date</Text>
+                <Text style={styles.summaryValue}>
+                  {formData.start_date.toLocaleDateString('en-US', {
+                    year: 'numeric',
+                    month: 'short',
+                    day: 'numeric',
+                  })}
+                </Text>
+              </View>
+            )}
+
+            {formData.end_date && (
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>End Date</Text>
+                <Text style={styles.summaryValue}>
+                  {formData.end_date.toLocaleDateString('en-US', {
+                    year: 'numeric',
+                    month: 'short',
+                    day: 'numeric',
+                  })}
+                </Text>
+              </View>
+            )}
+
+            <View style={styles.summaryRow}>
+              <Text style={styles.summaryLabel}>Account{accountCount > 1 ? 's' : ''}</Text>
+              <View style={styles.summaryValueContainer}>
+                {formData.all_accounts ? (
+                  <Text style={styles.summaryValue}>All Accounts ({accountCount})</Text>
+                ) : accountCount === 1 ? (
+                  <Text style={styles.summaryValue}>{selectedAccounts[0]?.name}</Text>
+                ) : accountCount > 1 ? (
+                  <View>
+                    <Text style={styles.summaryValue}>{accountCount} accounts selected:</Text>
+                    {selectedAccounts.slice(0, 3).map((account) => (
+                      <Text key={account.id} style={[styles.summaryValue, { fontSize: 12, marginTop: 4 }]}>
+                        • {account.name}
+                      </Text>
+                    ))}
+                    {accountCount > 3 && (
+                      <Text style={[styles.summaryValue, { fontSize: 12, marginTop: 4, fontStyle: 'italic' }]}>
+                        ...and {accountCount - 3} more
+                      </Text>
+                    )}
+                  </View>
+                ) : null}
+              </View>
+            </View>
+          </GlassCard>
+
+          <GlassCard padding={20} marginVertical={12}>
+            <Text style={styles.previewTitle}>Preview</Text>
+            <Text style={styles.previewText}>
+              Will create {accountCount > 1 ? `${accountCount} bills (one per account)` : '1 bill'} with approximately {billCount} occurrences per bill from{' '}
+              {formData.start_date
+                ? formData.start_date.toLocaleDateString('en-US', {
+                    month: 'short',
+                    year: 'numeric',
+                  })
+                : 'start date'}{' '}
+              {formData.end_date
+                ? `to ${formData.end_date.toLocaleDateString('en-US', {
+                    month: 'short',
+                    year: 'numeric',
+                  })}`
+                : 'indefinitely'}
+              {'\n\n'}
+              {accountCount > 1 && `Total: ${accountCount * billCount} bill occurrences across all accounts`}
+            </Text>
+          </GlassCard>
+        </View>
+      </ScrollView>
+    );
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
         <View style={styles.header}>
-          <TouchableOpacity style={styles.closeButton} onPress={() => router.back()}>
-            <Ionicons name="close" size={24} color="white" />
+        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+          <Ionicons name="arrow-back" size={24} color="#000000" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>{getStepTitle()}</Text>
           <View style={styles.placeholder} />
@@ -553,19 +1061,16 @@ export default function AddBillModal() {
             <View 
               style={[
                 styles.progressFill, 
-                { width: `${(currentStep / 4) * 100}%` }
+              { width: `${(currentStep / 3) * 100}%` }
               ]} 
             />
           </View>
-          <Text style={styles.progressText}>Step {currentStep} of 4</Text>
+        <Text style={styles.progressText}>Step {currentStep} of 3</Text>
         </View>
 
-        <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
           {currentStep === 1 && renderStep1()}
           {currentStep === 2 && renderStep2()}
           {currentStep === 3 && renderStep3()}
-          {currentStep === 4 && renderStep4()}
-        </ScrollView>
 
         <View style={styles.footer}>
           <View style={styles.buttonContainer}>
@@ -575,10 +1080,10 @@ export default function AddBillModal() {
               </TouchableOpacity>
             )}
             
-            {currentStep < 4 ? (
+          {currentStep < 3 ? (
               <TouchableOpacity style={styles.primaryButton} onPress={handleNext}>
                 <Text style={styles.primaryButtonText}>Next</Text>
-                <Ionicons name="arrow-forward" size={20} color="white" />
+              <Ionicons name="arrow-forward" size={20} color="#FFFFFF" />
               </TouchableOpacity>
             ) : (
               <TouchableOpacity 
@@ -586,361 +1091,272 @@ export default function AddBillModal() {
                 onPress={handleSubmit}
                 disabled={loading}
               >
-                <Text style={styles.primaryButtonText}>
-                  {loading ? 'Creating...' : 'Create Bill'}
-                </Text>
-                <Ionicons name="checkmark" size={20} color="white" />
+              {loading ? (
+                <ActivityIndicator color="#FFFFFF" />
+              ) : (
+                <>
+                  <Text style={styles.primaryButtonText}>Create</Text>
+                  <Ionicons name="checkmark" size={20} color="#FFFFFF" />
+                </>
+              )}
               </TouchableOpacity>
             )}
           </View>
         </View>
-      </SafeAreaView>
 
-      {/* Date Picker for Due Date */}
-      {showDatePicker && (
+      {/* Date Pickers */}
+      {showStartDatePicker && (
         <DateTimePicker
-          value={formData.due_date ? new Date(formData.due_date) : new Date()}
+          value={formData.start_date || new Date()}
           mode="date"
           display="default"
           onChange={(event, selectedDate) => {
-            setShowDatePicker(false);
-            if (selectedDate) {
-              handleInputChange('due_date', selectedDate.toISOString().split('T')[0]);
+            setShowStartDatePicker(Platform.OS === 'ios');
+            if (selectedDate && (Platform.OS === 'ios' || event.type === 'set')) {
+              handleInputChange('start_date', selectedDate);
+              if (Platform.OS === 'ios') {
+                setShowStartDatePicker(false);
+              }
             }
           }}
         />
       )}
 
-      {/* Date Picker for End Date */}
       {showEndDatePicker && (
         <DateTimePicker
-          value={formData.recurrence_end_date ? new Date(formData.recurrence_end_date) : new Date()}
+          value={formData.end_date || new Date()}
           mode="date"
           display="default"
+          minimumDate={formData.start_date || undefined}
           onChange={(event, selectedDate) => {
+            setShowEndDatePicker(Platform.OS === 'ios');
+            if (selectedDate && (Platform.OS === 'ios' || event.type === 'set')) {
+              handleInputChange('end_date', selectedDate);
+              if (Platform.OS === 'ios') {
             setShowEndDatePicker(false);
-            if (selectedDate) {
-              handleInputChange('recurrence_end_date', selectedDate.toISOString().split('T')[0]);
+              }
             }
           }}
         />
       )}
-    </LinearGradient>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-  },
-  safeArea: {
-    flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 20,
+    padding: 20,
+    paddingTop: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0, 0, 0, 0.1)',
   },
-  closeButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 12,
+  backButton: {
+    padding: 5,
   },
   headerTitle: {
-    fontSize: 18,
-    color: 'white',
+    fontSize: 22,
+    fontFamily: 'HelveticaNeue-Bold',
     fontWeight: 'bold',
+    color: '#000000',
   },
   placeholder: {
-    width: 48,
+    width: 34,
   },
   progressContainer: {
     paddingHorizontal: 20,
-    marginBottom: 20,
+    paddingVertical: 16,
   },
   progressBar: {
     height: 4,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    backgroundColor: 'rgba(0, 0, 0, 0.1)',
     borderRadius: 2,
     marginBottom: 8,
   },
   progressFill: {
     height: '100%',
-    backgroundColor: '#10B981',
+    backgroundColor: '#000000',
     borderRadius: 2,
   },
   progressText: {
-    color: 'rgba(255, 255, 255, 0.7)',
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
     textAlign: 'center',
   },
   scrollView: {
     flex: 1,
-    paddingHorizontal: 20,
   },
   stepContent: {
+    padding: 20,
     paddingBottom: 20,
   },
   stepDescription: {
-    color: 'rgba(255, 255, 255, 0.8)',
     fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.7)',
     marginBottom: 24,
     textAlign: 'center',
   },
-  billTypeCard: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  selectedBillTypeCard: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    borderWidth: 1,
-    borderColor: '#10B981',
-  },
-  billTypeIcon: {
-    marginRight: 12,
-  },
-  billTypeInfo: {
-    flex: 1,
-  },
-  billTypeLabel: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-  selectedBillTypeLabel: {
-    color: '#10B981',
-  },
-  billTypeDescription: {
-    color: 'rgba(255, 255, 255, 0.7)',
-    fontSize: 14,
-  },
   inputGroup: {
-    marginBottom: 20,
+    marginBottom: 24,
   },
   inputLabel: {
-    color: 'white',
-    fontSize: 16,
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.7)',
     marginBottom: 8,
   },
   textInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
     borderRadius: 12,
     padding: 16,
-    color: 'white',
     fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#000000',
+    backgroundColor: '#FFFFFF',
   },
   textArea: {
     height: 80,
     textAlignVertical: 'top',
   },
+  optionButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  optionButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    backgroundColor: '#FFFFFF',
+  },
+  optionButtonSelected: {
+    borderColor: '#000000',
+    borderWidth: 2,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  optionButtonText: {
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  optionButtonTextSelected: {
+    color: '#000000',
+  },
+  natureCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 16,
+    marginBottom: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    borderLeftWidth: 4,
+    backgroundColor: '#FFFFFF',
+  },
+  natureCardSelected: {
+    borderColor: '#000000',
+    borderWidth: 2,
+    borderLeftWidth: 4,
+    backgroundColor: 'rgba(0, 0, 0, 0.03)',
+  },
+  natureIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  natureInfo: {
+    flex: 1,
+  },
+  natureLabel: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.7)',
+    marginBottom: 4,
+  },
+  natureLabelSelected: {
+    color: '#000000',
+  },
+  natureDescription: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
   amountInputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
     borderRadius: 12,
-    paddingHorizontal: 16,
+    backgroundColor: '#FFFFFF',
+    paddingLeft: 16,
+  },
+  lockedField: {
+    backgroundColor: 'rgba(0, 0, 0, 0.03)',
+  },
+  unlockedField: {
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
   },
   currencySymbol: {
-    color: 'white',
     fontSize: 20,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.6)',
     marginRight: 8,
   },
   amountInput: {
     flex: 1,
-    color: 'white',
+    paddingVertical: 16,
     fontSize: 20,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
-    paddingVertical: 16,
+    color: '#000000',
   },
-  variableAmountInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(59, 130, 246, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 20,
+  lockButton: {
+    padding: 12,
   },
-  variableAmountText: {
-    color: '#3B82F6',
-    fontSize: 14,
-    marginLeft: 8,
-    flex: 1,
-  },
-  iconColorContainer: {
-    gap: 16,
-  },
-  iconScroll: {
-    maxHeight: 60,
-  },
-  iconOption: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 12,
-  },
-  selectedIconOption: {
-    backgroundColor: '#10B981',
-  },
-  colorScroll: {
-    maxHeight: 40,
-  },
-  colorOption: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    marginRight: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  selectedColorOption: {
-    borderWidth: 2,
-    borderColor: 'white',
-  },
-  dateButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  dateButtonText: {
-    color: 'white',
-    fontSize: 16,
-  },
-  recurrenceContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  recurrenceOption: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  selectedRecurrenceOption: {
-    backgroundColor: '#10B981',
-  },
-  recurrenceText: {
-    color: 'white',
-    fontSize: 14,
-  },
-  selectedRecurrenceText: {
-    color: 'white',
-    fontWeight: '600',
-  },
-  intervalContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-  },
-  intervalInput: {
-    color: 'white',
-    fontSize: 16,
-    paddingVertical: 16,
-    minWidth: 60,
-  },
-  intervalText: {
-    color: 'rgba(255, 255, 255, 0.7)',
-    fontSize: 16,
-    marginLeft: 8,
+  helperText: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginTop: 6,
   },
   pickerButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
     borderRadius: 12,
     padding: 16,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
   },
   pickerButtonText: {
-    color: 'white',
     fontSize: 16,
-  },
-  reminderDescription: {
-    color: 'rgba(255, 255, 255, 0.7)',
-    fontSize: 12,
-    marginBottom: 12,
-  },
-  reminderContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  reminderOption: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  selectedReminderOption: {
-    backgroundColor: '#10B981',
-  },
-  reminderText: {
-    color: 'white',
-    fontSize: 14,
-  },
-  selectedReminderText: {
-    color: 'white',
-    fontWeight: '600',
-  },
-  footer: {
-    paddingHorizontal: 20,
-    paddingVertical: 20,
-  },
-  buttonContainer: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  primaryButton: {
-    flex: 1,
-    backgroundColor: '#10B981',
-    borderRadius: 12,
-    padding: 16,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 8,
-  },
-  secondaryButton: {
-    flex: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  primaryButtonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  secondaryButtonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  disabledButton: {
-    opacity: 0.6,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#000000',
   },
   pickerContainer: {
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    backgroundColor: 'rgba(0, 0, 0, 0.03)',
     borderRadius: 12,
     marginTop: 8,
     maxHeight: 200,
@@ -951,27 +1367,274 @@ const styles = StyleSheet.create({
   pickerOption: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     padding: 16,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
   },
   selectedPickerOption: {
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
   },
   pickerOptionInfo: {
     flex: 1,
   },
   pickerOptionName: {
-    color: 'white',
     fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.7)',
     marginBottom: 4,
   },
   selectedPickerOptionText: {
-    color: '#10B981',
+    color: '#000000',
   },
   pickerOptionDescription: {
-    color: 'rgba(255, 255, 255, 0.7)',
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  doneButton: {
+    marginTop: 8,
+    marginHorizontal: 16,
+    marginBottom: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: '#000000',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  doneButtonText: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  frequencyContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  frequencyOption: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    backgroundColor: '#FFFFFF',
+  },
+  selectedFrequencyOption: {
+    borderColor: '#000000',
+    borderWidth: 2,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  frequencyText: {
     fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.7)',
+  },
+  selectedFrequencyText: {
+    color: '#000000',
+  },
+  customFrequencyContainer: {
+    marginTop: 12,
+  },
+  customFrequencyInput: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+  },
+  customFrequencyNumberInput: {
+    flex: 1,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  customFrequencyUnitButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderLeftWidth: 1,
+    borderLeftColor: 'rgba(0, 0, 0, 0.1)',
+  },
+  customFrequencyUnitText: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  intervalContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+    paddingLeft: 16,
+  },
+  intervalInput: {
+    minWidth: 60,
+    paddingVertical: 16,
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  intervalText: {
+    flex: 1,
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.7)',
+    marginLeft: 8,
+  },
+  dayOfMonthContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    maxHeight: 200,
+  },
+  dayOfMonthOption: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  selectedDayOfMonthOption: {
+    borderColor: '#000000',
+    borderWidth: 2,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  dayOfMonthText: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.7)',
+  },
+  selectedDayOfMonthText: {
+    color: '#000000',
+  },
+  dateButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    borderRadius: 12,
+    padding: 16,
+    backgroundColor: '#FFFFFF',
+  },
+  dateButtonText: {
+    flex: 1,
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#000000',
+  },
+  footer: {
+    flexDirection: 'row',
+    padding: 20,
+    gap: 12,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0, 0, 0, 0.1)',
+    backgroundColor: '#FFFFFF',
+  },
+  buttonContainer: {
+    flexDirection: 'row',
+    gap: 12,
+    flex: 1,
+  },
+  primaryButton: {
+    flex: 1,
+    backgroundColor: '#000000',
+    borderRadius: 12,
+    padding: 16,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 8,
+  },
+  secondaryButton: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    padding: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  primaryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+  },
+  secondaryButtonText: {
+    color: '#000000',
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+  },
+  disabledButton: {
+    opacity: 0.6,
+  },
+  summaryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  summaryLabel: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  summaryValue: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
+    textAlign: 'right',
+    flex: 1,
+    marginLeft: 16,
+  },
+  summaryValueContainer: {
+    flex: 1,
+    alignItems: 'flex-end',
+  },
+  summaryBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  summaryBadgeText: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+  },
+  previewTitle: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 12,
+  },
+  previewText: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.7)',
+    lineHeight: 20,
   },
 });

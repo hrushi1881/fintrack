@@ -63,7 +63,7 @@ export default function TransferFundsModal({
       (acc.is_active === true || acc.is_active === undefined || acc.is_active === null)
   );
 
-  // Reset form when modal opens
+  // Reset form when modal opens and refresh account funds
   useEffect(() => {
     if (visible) {
       setAmount('');
@@ -75,8 +75,10 @@ export default function TransferFundsModal({
       setToFundBucket(null);
       setShowFromFundPicker(false);
       setShowToFundPicker(false);
+      // Refresh account funds to ensure latest data
+      refreshAccountFunds();
     }
-  }, [visible, preselectedAccountId]);
+  }, [visible, preselectedAccountId, refreshAccountFunds]);
 
   // Auto-show fund picker when account is selected
   useEffect(() => {
@@ -146,12 +148,12 @@ export default function TransferFundsModal({
       return false;
     }
 
-    // Validate fund selection rules
-    // Goal funds can only be transferred to Personal (withdrawal)
-    if (fromFundBucket.type === 'goal' && toFundBucket.type !== 'personal') {
+    // Goal funds cannot participate in normal transfers
+    // Users must use the dedicated goal withdrawal flow
+    if (fromFundBucket.type === 'goal') {
       Alert.alert(
-        'Invalid Transfer',
-        'Goal funds can only be transferred to Personal Fund. This is a withdrawal from the goal.'
+        'Goal Funds Locked',
+        'Goal funds cannot be transferred through normal transfers. Please use the "Withdraw from Goal" feature in the goal details screen.'
       );
       return false;
     }
@@ -534,7 +536,7 @@ export default function TransferFundsModal({
                 <View style={styles.infoItem}>
                   <Ionicons name="lock-closed-outline" size={16} color="#EF4444" />
                   <Text style={styles.infoText}>
-                    Goal funds can only be transferred to Personal Fund (withdrawal)
+                    Goal funds cannot participate in normal transfers. Use the "Withdraw from Goal" feature instead.
                   </Text>
                 </View>
               </View>
@@ -568,13 +570,13 @@ export default function TransferFundsModal({
           onClose={() => setShowFromFundPicker(false)}
           accountId={fromAccountId}
           onSelect={(bucket) => {
-            // Goal funds can only be transferred to Personal
-            // But we allow selection here, validation happens on submit
+            // Goal funds are excluded from normal transfers
+            // Users must use the dedicated goal withdrawal flow
             setFromFundBucket(bucket);
             setShowFromFundPicker(false);
           }}
           amount={parseFloat(amount) || 0}
-          excludeGoalFunds={false} // Allow selecting goal funds for withdrawal
+          excludeGoalFunds={true} // Goal funds cannot participate in normal transfers - use goal withdrawal flow instead
         />
       )}
 
@@ -593,11 +595,12 @@ export default function TransferFundsModal({
               );
               return;
             }
-            // If source is goal fund, only allow Personal
-            if (fromFundBucket?.type === 'goal' && bucket.type !== 'personal') {
+            // Goal funds cannot participate in normal transfers
+            // This should not happen since excludeGoalFunds={true}, but adding safety check
+            if (fromFundBucket?.type === 'goal') {
               Alert.alert(
-                'Invalid Selection',
-                'Goal funds can only be transferred to Personal Fund (withdrawal).'
+                'Goal Funds Locked',
+                'Goal funds cannot be transferred through normal transfers. Please use the "Withdraw from Goal" feature.'
               );
               return;
             }

@@ -8,6 +8,7 @@ import { useNotification } from '@/contexts/NotificationContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { createGoal, CreateGoalData } from '@/utils/goals';
 import CalendarDatePicker from '@/components/CalendarDatePicker';
+import InlineAccountSelector from '@/components/InlineAccountSelector';
 import { formatCurrencyAmount } from '@/utils/currency';
 
 interface AddGoalModalProps {
@@ -50,7 +51,7 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
   const { user } = useAuth();
   const { currency } = useSettings();
   const { showNotification } = useNotification();
-  const { globalRefresh } = useRealtimeData();
+  const { accounts, globalRefresh } = useRealtimeData();
   
   const [formData, setFormData] = useState<CreateGoalData>({
     title: '',
@@ -65,6 +66,7 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
   const [loading, setLoading] = useState(false);
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
+  const [linkedAccountIds, setLinkedAccountIds] = useState<string[]>([]);
 
   const handleInputChange = (field: keyof CreateGoalData, value: string | number) => {
     setFormData(prev => ({ ...prev, [field]: value }));
@@ -159,15 +161,32 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
       Alert.alert('Error', 'Please select a category');
       return false;
     }
+    if (linkedAccountIds.length === 0) {
+      Alert.alert('Error', 'Please select at least one account to store goal funds');
+      return false;
+    }
     return true;
   };
+
+  // Filter accounts for linking (exclude liability and goals_savings, match currency from settings)
+  const linkableAccounts = accounts?.filter(
+    (account) => 
+      account.type !== 'liability' && 
+      account.type !== 'goals_savings' &&
+      (account.is_active === true || account.is_active === undefined || account.is_active === null) &&
+      (!currency || account.currency === currency) // Use currency from settings, not formData.currency
+  ) || [];
 
   const handleSubmit = async () => {
     if (!user || !validateForm()) return;
 
     setLoading(true);
     try {
-      const goal = await createGoal(user.id, formData);
+      const goalDataWithAccounts: CreateGoalData = {
+        ...formData,
+        linked_account_ids: linkedAccountIds,
+      };
+      const goal = await createGoal(user.id, goalDataWithAccounts);
       
       showNotification({
         type: 'success',
@@ -179,9 +198,8 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
       await globalRefresh();
 
       onSuccess?.();
-      onClose();
       
-      // Reset form
+      // Reset form but keep modal open
       setFormData({
         title: '',
         description: '',
@@ -192,6 +210,9 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
         icon: 'flag',
         currency: currency,
       });
+      setLinkedAccountIds([]);
+      
+      // Modal stays open - user can add another goal
     } catch (error) {
       console.error('Error creating goal:', error);
       Alert.alert('Error', 'Failed to create goal. Please try again.');
@@ -360,6 +381,71 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
                     </TouchableOpacity>
                   ))}
                 </View>
+              </View>
+
+              {/* Account Linking */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Link Accounts</Text>
+                <Text style={styles.inputSubLabel}>
+                  Select accounts where goal funds will be stored
+                </Text>
+                {linkableAccounts.length > 0 ? (
+                  <>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.accountsScroll}>
+                      {linkableAccounts.map((account) => {
+                        const isSelected = linkedAccountIds.includes(account.id);
+                        return (
+                          <TouchableOpacity
+                            key={account.id}
+                            style={[
+                              styles.accountChip,
+                              isSelected && styles.accountChipSelected,
+                            ]}
+                            onPress={() => {
+                              // Toggle account selection
+                              if (linkedAccountIds.includes(account.id)) {
+                                setLinkedAccountIds(linkedAccountIds.filter(id => id !== account.id));
+                              } else {
+                                setLinkedAccountIds([...linkedAccountIds, account.id]);
+                              }
+                            }}
+                            activeOpacity={0.7}
+                          >
+                            <Ionicons
+                              name={isSelected ? 'checkmark-circle' : 'ellipse-outline'}
+                              size={20}
+                              color={isSelected ? 'white' : 'rgba(255, 255, 255, 0.7)'}
+                              style={styles.accountChipIcon}
+                            />
+                              <View style={styles.accountChipInfo}>
+                              <Text style={[styles.accountChipName, isSelected && styles.accountChipNameSelected]}>
+                                {account.name}
+                              </Text>
+                              <Text style={[styles.accountChipBalance, isSelected && styles.accountChipBalanceSelected]}>
+                                {formatCurrency(account.balance)}
+                              </Text>
+                            </View>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </ScrollView>
+                    {linkedAccountIds.length > 0 && (
+                      <View style={styles.linkedAccountsInfo}>
+                        <Ionicons name="checkmark-circle" size={16} color="white" />
+                        <Text style={styles.linkedAccountsText}>
+                          {linkedAccountIds.length} account{linkedAccountIds.length !== 1 ? 's' : ''} selected
+                        </Text>
+                      </View>
+                    )}
+                  </>
+                ) : (
+                  <View style={styles.noAccountsBanner}>
+                    <Ionicons name="information-circle-outline" size={20} color="rgba(255, 255, 255, 0.7)" />
+                    <Text style={styles.noAccountsText}>
+                      No accounts available. Please create an account first.
+                    </Text>
+                  </View>
+                )}
               </View>
             </View>
           </ScrollView>
@@ -892,5 +978,83 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     textAlign: 'center',
+  },
+  accountsScroll: {
+    marginTop: 8,
+  },
+  accountChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginRight: 12,
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    minWidth: 120,
+  },
+  accountChipSelected: {
+    backgroundColor: 'rgba(16, 185, 129, 0.3)',
+    borderColor: '#10B981',
+  },
+  accountChipIcon: {
+    marginRight: 8,
+  },
+  accountChipInfo: {
+    flex: 1,
+  },
+  accountChipName: {
+    fontSize: 14,
+    color: 'white',
+    fontWeight: '600',
+    marginBottom: 2,
+  },
+  accountChipNameSelected: {
+    color: '#10B981',
+  },
+  accountChipBalance: {
+    fontSize: 12,
+    color: 'rgba(255, 255, 255, 0.7)',
+  },
+  accountChipBalanceSelected: {
+    color: 'rgba(16, 185, 129, 0.9)',
+  },
+  linkedAccountsInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 12,
+    padding: 12,
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.3)',
+  },
+  linkedAccountsText: {
+    fontSize: 14,
+    color: 'white',
+    fontWeight: '500',
+    marginLeft: 8,
+  },
+  noAccountsBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    gap: 12,
+  },
+  noAccountsText: {
+    flex: 1,
+    fontSize: 14,
+    color: 'rgba(255, 255, 255, 0.7)',
+  },
+  inputSubLabel: {
+    fontSize: 13,
+    color: 'rgba(255, 255, 255, 0.7)',
+    marginTop: 4,
+    marginBottom: 8,
   },
 });

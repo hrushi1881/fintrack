@@ -10,8 +10,10 @@ interface UserProfile {
   default_currency: string;
   age?: number;
   profession?: string;
-  region?: string;
+  country?: string;
+  region?: string; // Deprecated, use country instead
   base_currency: string;
+  onboarding_completed?: boolean;
   created_at: string;
   updated_at: string;
 }

@@ -1,6 +1,19 @@
 import { supabase } from '@/lib/supabase';
 import { Budget, BudgetAccount, BudgetTransaction, BudgetEvent, Transaction, Account, Goal, BudgetPeriodSummary, RenewalDecision } from '@/types';
 import { formatCurrencyAmount } from '@/utils/currency';
+import { 
+  RecurrenceDefinition,
+  calculateNextOccurrence,
+  generateSchedule,
+  calculateStatus as calculateRecurrenceStatus
+} from '@/utils/recurrence';
+import {
+  calculateNextBudgetPeriod,
+  generateBudgetPeriods,
+  calculateBudgetPeriodStatus,
+  isBudgetPeriodEndingSoon,
+  getCurrentBudgetPeriod
+} from '@/utils/budgetRecurrence';
 
 /**
  * Create a new budget with account associations

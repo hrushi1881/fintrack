@@ -16,7 +16,8 @@ import { useNotification } from '@/contexts/NotificationContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { Goal, Account } from '@/types';
 import { formatCurrencyAmount } from '@/utils/currency';
-import { updateGoal, transferGoalFunds, getGoalAccounts } from '@/utils/goals';
+import { updateGoal, transferGoalFunds, getGoalAccounts, getLinkedAccountsForGoal, linkAccountsToGoal } from '@/utils/goals';
+import InlineAccountSelector from '@/components/InlineAccountSelector';
 import CalendarDatePicker from '@/components/CalendarDatePicker';
 
 interface EditGoalModalProps {
@@ -85,25 +86,13 @@ export default function EditGoalModal({
   // Account management
   const [goalAccounts, setGoalAccounts] = useState<Array<{ account: Account; balance: number }>>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
+  const [linkedAccounts, setLinkedAccounts] = useState<Account[]>([]);
+  const [linkedAccountIds, setLinkedAccountIds] = useState<string[]>([]);
+  const [loadingLinkedAccounts, setLoadingLinkedAccounts] = useState(false);
   const [transferFromAccount, setTransferFromAccount] = useState<string | null>(null);
   const [transferToAccount, setTransferToAccount] = useState<string | null>(null);
   const [transferAmount, setTransferAmount] = useState('');
   const [showTransferModal, setShowTransferModal] = useState(false);
-
-  // Load goal data when modal opens
-  useEffect(() => {
-    if (visible && goal) {
-      setTitle(goal.title || '');
-      setDescription(goal.description || '');
-      setTargetAmount(goal.target_amount.toString());
-      setTargetDate(goal.target_date || '');
-      setSelectedCategory(goal.category || '');
-      setSelectedColor(goal.color || '#10B981');
-      setSelectedIcon(goal.icon || 'flag');
-      setActiveTab(initialTab);
-      loadGoalAccounts();
-    }
-  }, [visible, goal, initialTab]);
 
   const loadGoalAccounts = async () => {
     if (!goal) return;
@@ -123,6 +112,76 @@ export default function EditGoalModal({
       setLoadingAccounts(false);
     }
   };
+
+  const loadLinkedAccounts = async () => {
+    if (!goal || !user) return;
+
+    setLoadingLinkedAccounts(true);
+    try {
+      const linked = await getLinkedAccountsForGoal(goal.id);
+      setLinkedAccounts(linked);
+      setLinkedAccountIds(linked.map(acc => acc.id));
+    } catch (error: any) {
+      console.error('Error loading linked accounts:', error);
+    } finally {
+      setLoadingLinkedAccounts(false);
+    }
+  };
+
+  // Load goal data when modal opens
+  useEffect(() => {
+    if (visible && goal) {
+      setTitle(goal.title || '');
+      setDescription(goal.description || '');
+      setTargetAmount(goal.target_amount.toString());
+      setTargetDate(goal.target_date || '');
+      setSelectedCategory(goal.category || '');
+      setSelectedColor(goal.color || '#10B981');
+      setSelectedIcon(goal.icon || 'flag');
+      setActiveTab(initialTab);
+      loadGoalAccounts();
+      loadLinkedAccounts();
+    }
+  }, [visible, goal, initialTab]);
+
+  const handleSaveLinkedAccounts = async () => {
+    if (!goal || !user) return;
+
+    try {
+      setLoadingLinkedAccounts(true);
+      await linkAccountsToGoal(goal.id, linkedAccountIds, user.id);
+      
+      showNotification({
+        type: 'success',
+        title: 'Success',
+        description: 'Linked accounts updated successfully',
+      });
+
+      await loadLinkedAccounts();
+      await globalRefresh();
+    } catch (error: any) {
+      console.error('Error updating linked accounts:', error);
+      showNotification({
+        type: 'error',
+        title: 'Error',
+        description: error.message || 'Failed to update linked accounts',
+      });
+    } finally {
+      setLoadingLinkedAccounts(false);
+    }
+  };
+
+  // Filter accounts for linking (exclude liability and goals_savings, match currency from settings)
+  const linkableAccounts = accounts?.filter(
+    (account) => 
+      account.type !== 'liability' && 
+      account.type !== 'goals_savings' &&
+      (account.is_active === true || account.is_active === undefined || account.is_active === null) &&
+      (!currency || account.currency === currency) // Match currency from settings
+  ) || [];
+
+  // Accounts that have goal funds (cannot be removed)
+  const accountsWithFunds = new Set(goalAccounts.map(ga => ga.account.id));
 
   const handleUpdate = async () => {
     if (!goal || !user) return;
@@ -243,13 +302,13 @@ export default function EditGoalModal({
     setShowDatePicker(false);
   };
 
-  // Filter accounts by goal currency
+  // Filter accounts by currency from settings (not goal currency)
   const availableAccounts = accounts.filter(
-    account => account.currency === goal?.currency && (account.is_active || account.is_active === null)
+    account => 
+      (!currency || account.currency === currency) && 
+      (account.is_active === true || account.is_active === undefined || account.is_active === null)
   );
 
-  // Accounts that have goal funds
-  const accountsWithFunds = goalAccounts.map(ga => ga.account.id);
   // Accounts available for transfer (all accounts with matching currency)
   const accountsForTransfer = availableAccounts.filter(acc => acc.id !== transferFromAccount);
 
@@ -335,10 +394,10 @@ export default function EditGoalModal({
 
               {/* Target Amount */}
               <View style={styles.formGroup}>
-                <Text style={styles.label}>Target Amount ({goal.currency})</Text>
+                <Text style={styles.label}>Target Amount ({currency || goal.currency})</Text>
                 <View style={styles.amountInputContainer}>
                   <Text style={styles.amountPrefix}>
-                    {goal.currency === 'USD' ? '$' : goal.currency === 'INR' ? '₹' : goal.currency}
+                    {currency === 'USD' ? '$' : currency === 'INR' ? '₹' : currency || goal.currency}
                   </Text>
                   <TextInput
                     style={styles.amountInput}
@@ -445,9 +504,114 @@ export default function EditGoalModal({
 
           {activeTab === 'accounts' && (
             <View style={styles.tabContent}>
+              {/* Linked Accounts Management */}
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Linked Accounts</Text>
+                <Text style={styles.sectionSubtitle}>
+                  Accounts where goal funds can be stored. Accounts with funds cannot be removed.
+                </Text>
+                {loadingLinkedAccounts ? (
+                  <Text style={styles.emptyText}>Loading linked accounts...</Text>
+                ) : linkableAccounts.length === 0 ? (
+                  <View style={styles.emptyState}>
+                    <Ionicons name="information-circle-outline" size={48} color="#D1D5DB" />
+                    <Text style={styles.emptyText}>
+                      No accounts available for linking.
+                    </Text>
+                    <Text style={styles.emptySubtext}>
+                      Please create an account first.
+                    </Text>
+                  </View>
+                ) : (
+                  <>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.accountsScroll}>
+                      {linkableAccounts.map((account) => {
+                        const isSelected = linkedAccountIds.includes(account.id);
+                        const hasFunds = accountsWithFunds.has(account.id);
+                        const cannotRemove = hasFunds && isSelected;
+                        
+                        return (
+                          <TouchableOpacity
+                            key={account.id}
+                            style={[
+                              styles.linkedAccountChip,
+                              isSelected && styles.linkedAccountChipSelected,
+                              cannotRemove && styles.linkedAccountChipLocked,
+                            ]}
+                            onPress={() => {
+                              if (cannotRemove) {
+                                Alert.alert(
+                                  'Cannot Remove Account',
+                                  'This account has goal funds and cannot be unlinked. Withdraw all funds first.',
+                                );
+                                return;
+                              }
+                              
+                              // Toggle account selection
+                              if (linkedAccountIds.includes(account.id)) {
+                                setLinkedAccountIds(linkedAccountIds.filter(id => id !== account.id));
+                              } else {
+                                setLinkedAccountIds([...linkedAccountIds, account.id]);
+                              }
+                            }}
+                            activeOpacity={0.7}
+                          >
+                            {cannotRemove && (
+                              <Ionicons name="lock-closed" size={16} color="#F59E0B" style={styles.lockedIcon} />
+                            )}
+                            <View style={[styles.accountChipIcon, { backgroundColor: account.color }]}>
+                              <Ionicons name={account.icon as any} size={24} color="white" />
+                            </View>
+                            <View style={styles.accountChipInfo}>
+                              <Text style={[styles.accountChipName, isSelected && styles.accountChipNameSelected]}>
+                                {account.name}
+                              </Text>
+                              {hasFunds && (
+                                <Text style={styles.accountChipBalance}>
+                                  {formatCurrencyAmount(goalAccounts.find(ga => ga.account.id === account.id)?.balance || 0, currency)}
+                                </Text>
+                              )}
+                            </View>
+                            <Ionicons
+                              name={isSelected ? 'checkmark-circle' : 'ellipse-outline'}
+                              size={20}
+                              color={isSelected ? (cannotRemove ? '#F59E0B' : '#10B981') : '#9CA3AF'}
+                            />
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </ScrollView>
+                    {linkedAccountIds.length > 0 && (
+                      <View style={styles.linkedAccountsInfo}>
+                        <Ionicons name="information-circle-outline" size={16} color="#4F6F3E" />
+                        <Text style={styles.linkedAccountsText}>
+                          {linkedAccountIds.length} account{linkedAccountIds.length !== 1 ? 's' : ''} linked
+                          {goalAccounts.length > 0 && ` • ${goalAccounts.length} account${goalAccounts.length !== 1 ? 's' : ''} with funds`}
+                        </Text>
+                      </View>
+                    )}
+                    <TouchableOpacity
+                      style={[
+                        styles.saveLinkedButton,
+                        loadingLinkedAccounts && styles.saveLinkedButtonDisabled
+                      ]}
+                      onPress={handleSaveLinkedAccounts}
+                      disabled={loadingLinkedAccounts}
+                    >
+                      <Text style={styles.saveLinkedButtonText}>
+                        {loadingLinkedAccounts ? 'Saving...' : 'Save Linked Accounts'}
+                      </Text>
+                    </TouchableOpacity>
+                  </>
+                )}
+              </View>
+
               {/* Accounts with Goal Funds */}
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>Accounts Holding Goal Funds</Text>
+                <Text style={styles.sectionSubtitle}>
+                  Accounts that currently have goal funds. You can link these accounts to the goal.
+                </Text>
                 {loadingAccounts ? (
                   <Text style={styles.emptyText}>Loading accounts...</Text>
                 ) : goalAccounts.length === 0 ? (
@@ -462,28 +626,75 @@ export default function EditGoalModal({
                   </View>
                 ) : (
                   <View style={styles.accountList}>
-                    {goalAccounts.map(({ account, balance }) => (
-                      <View key={account.id} style={styles.accountCard}>
-                        <View style={[styles.accountIcon, { backgroundColor: account.color }]}>
-                          <Ionicons name={account.icon as any} size={24} color="white" />
+                    {goalAccounts.map(({ account, balance }) => {
+                      const isLinked = linkedAccountIds.includes(account.id);
+                      const shouldShowAddButton = !isLinked;
+                      
+                      return (
+                        <View key={account.id} style={styles.accountCard}>
+                          <View style={[styles.accountIcon, { backgroundColor: account.color }]}>
+                            <Ionicons name={account.icon as any} size={24} color="white" />
+                          </View>
+                          <View style={styles.accountInfo}>
+                            <View style={styles.accountHeader}>
+                              <Text style={styles.accountName}>{account.name}</Text>
+                              {isLinked && (
+                                <View style={styles.linkedBadge}>
+                                  <Ionicons name="checkmark-circle" size={14} color="#10B981" />
+                                  <Text style={styles.linkedBadgeText}>Linked</Text>
+                                </View>
+                              )}
+                            </View>
+                            <Text style={styles.accountBalance}>
+                              {formatCurrencyAmount(balance, currency || goal.currency)}
+                            </Text>
+                          </View>
+                          <View style={styles.accountActions}>
+                            {shouldShowAddButton && (
+                              <TouchableOpacity
+                                style={styles.addToGoalButton}
+                                onPress={async () => {
+                                  // Add account to linked accounts
+                                  const newLinkedIds = [...linkedAccountIds, account.id];
+                                  setLinkedAccountIds(newLinkedIds);
+                                  // Auto-save
+                                  try {
+                                    await linkAccountsToGoal(goal.id, newLinkedIds, user.id);
+                                    await loadLinkedAccounts();
+                                    await globalRefresh();
+                                    showNotification({
+                                      type: 'success',
+                                      title: 'Success',
+                                      description: `${account.name} added to linked accounts`,
+                                    });
+                                  } catch (error: any) {
+                                    // Revert on error
+                                    setLinkedAccountIds(linkedAccountIds);
+                                    showNotification({
+                                      type: 'error',
+                                      title: 'Error',
+                                      description: error.message || 'Failed to link account',
+                                    });
+                                  }
+                                }}
+                              >
+                                <Ionicons name="add-circle-outline" size={20} color="#10B981" />
+                                <Text style={styles.addToGoalText}>Link</Text>
+                              </TouchableOpacity>
+                            )}
+                            <TouchableOpacity
+                              style={styles.transferButton}
+                              onPress={() => {
+                                setTransferFromAccount(account.id);
+                                setShowTransferModal(true);
+                              }}
+                            >
+                              <Ionicons name="swap-horizontal-outline" size={20} color="#10B981" />
+                            </TouchableOpacity>
+                          </View>
                         </View>
-                        <View style={styles.accountInfo}>
-                          <Text style={styles.accountName}>{account.name}</Text>
-                          <Text style={styles.accountBalance}>
-                            {formatCurrencyAmount(balance, goal.currency)}
-                          </Text>
-                        </View>
-                        <TouchableOpacity
-                          style={styles.transferButton}
-                          onPress={() => {
-                            setTransferFromAccount(account.id);
-                            setShowTransferModal(true);
-                          }}
-                        >
-                          <Ionicons name="swap-horizontal-outline" size={20} color="#10B981" />
-                        </TouchableOpacity>
-                      </View>
-                    ))}
+                      );
+                    })}
                   </View>
                 )}
               </View>
@@ -533,7 +744,7 @@ export default function EditGoalModal({
                             <View style={styles.accountInfo}>
                               <Text style={styles.accountName}>{account.name}</Text>
                               <Text style={styles.accountBalance}>
-                                {formatCurrencyAmount(account.balance, goal.currency)}
+                                {formatCurrencyAmount(account.balance, currency || goal.currency)}
                               </Text>
                             </View>
                             {transferToAccount === account.id && (
@@ -550,10 +761,10 @@ export default function EditGoalModal({
                     </View>
 
                     <View style={styles.formGroup}>
-                      <Text style={styles.label}>Amount ({goal.currency})</Text>
+                      <Text style={styles.label}>Amount ({currency || goal.currency})</Text>
                       <View style={styles.amountInputContainer}>
                         <Text style={styles.amountPrefix}>
-                          {goal.currency === 'USD' ? '$' : goal.currency === 'INR' ? '₹' : goal.currency}
+                          {currency === 'USD' ? '$' : currency === 'INR' ? '₹' : currency || goal.currency}
                         </Text>
                         <TextInput
                           style={styles.amountInput}
@@ -568,7 +779,7 @@ export default function EditGoalModal({
                         <Text style={styles.helperText}>
                           Available: {formatCurrencyAmount(
                             goalAccounts.find(ga => ga.account.id === transferFromAccount)?.balance || 0,
-                            goal.currency
+                            currency || goal.currency
                           )}
                         </Text>
                       )}
@@ -951,6 +1162,143 @@ const styles = StyleSheet.create({
     color: '#9CA3AF',
     textAlign: 'center',
     marginTop: 4,
+  },
+  sectionSubtitle: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    fontWeight: '400',
+    color: '#6B7280',
+    marginBottom: 16,
+  },
+  accountsScroll: {
+    marginTop: 8,
+  },
+  linkedAccountChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginRight: 12,
+    borderWidth: 2,
+    borderColor: '#E5E7EB',
+    minWidth: 140,
+    gap: 8,
+  },
+  linkedAccountChipSelected: {
+    backgroundColor: '#ECFDF5',
+    borderColor: '#10B981',
+  },
+  linkedAccountChipLocked: {
+    backgroundColor: '#FFFBEB',
+    borderColor: '#F59E0B',
+  },
+  lockedIcon: {
+    marginRight: -4,
+  },
+  accountChipIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  accountChipInfo: {
+    flex: 1,
+  },
+  accountChipName: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    fontWeight: '400',
+    color: '#1F3A24',
+    marginBottom: 2,
+  },
+  accountChipNameSelected: {
+    color: '#10B981',
+    fontWeight: '600',
+  },
+  accountChipBalance: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    fontWeight: '400',
+    color: '#637050',
+  },
+  linkedAccountsInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 12,
+    padding: 12,
+    backgroundColor: '#F7F9F2',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    gap: 8,
+  },
+  linkedAccountsText: {
+    flex: 1,
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    fontWeight: '400',
+    color: '#637050',
+  },
+  saveLinkedButton: {
+    backgroundColor: '#10B981',
+    borderRadius: 8,
+    padding: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 16,
+  },
+  saveLinkedButtonDisabled: {
+    backgroundColor: '#D1D5DB',
+  },
+  saveLinkedButtonText: {
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  accountHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 4,
+  },
+  linkedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ECFDF5',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    gap: 4,
+  },
+  linkedBadgeText: {
+    fontSize: 10,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#10B981',
+  },
+  accountActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  addToGoalButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ECFDF5',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    gap: 4,
+  },
+  addToGoalText: {
+    fontSize: 12,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#10B981',
   },
   footer: {
     paddingHorizontal: 20,

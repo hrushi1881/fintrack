@@ -1,0 +1,72 @@
+// Comprehensive country list for dropdowns
+export interface Country {
+  label: string;
+  value: string;
+  icon?: string;
+}
+
+export const COUNTRIES: Country[] = [
+  { label: 'United States', value: 'US' },
+  { label: 'United Kingdom', value: 'GB' },
+  { label: 'Canada', value: 'CA' },
+  { label: 'Australia', value: 'AU' },
+  { label: 'India', value: 'IN' },
+  { label: 'Germany', value: 'DE' },
+  { label: 'France', value: 'FR' },
+  { label: 'Japan', value: 'JP' },
+  { label: 'China', value: 'CN' },
+  { label: 'Brazil', value: 'BR' },
+  { label: 'Mexico', value: 'MX' },
+  { label: 'Spain', value: 'ES' },
+  { label: 'Italy', value: 'IT' },
+  { label: 'Russia', value: 'RU' },
+  { label: 'South Korea', value: 'KR' },
+  { label: 'Netherlands', value: 'NL' },
+  { label: 'Sweden', value: 'SE' },
+  { label: 'Switzerland', value: 'CH' },
+  { label: 'Belgium', value: 'BE' },
+  { label: 'Poland', value: 'PL' },
+  { label: 'Argentina', value: 'AR' },
+  { label: 'South Africa', value: 'ZA' },
+  { label: 'Turkey', value: 'TR' },
+  { label: 'Saudi Arabia', value: 'SA' },
+  { label: 'United Arab Emirates', value: 'AE' },
+  { label: 'Singapore', value: 'SG' },
+  { label: 'Hong Kong', value: 'HK' },
+  { label: 'Malaysia', value: 'MY' },
+  { label: 'Indonesia', value: 'ID' },
+  { label: 'Thailand', value: 'TH' },
+  { label: 'Philippines', value: 'PH' },
+  { label: 'Vietnam', value: 'VN' },
+  { label: 'New Zealand', value: 'NZ' },
+  { label: 'Ireland', value: 'IE' },
+  { label: 'Portugal', value: 'PT' },
+  { label: 'Greece', value: 'GR' },
+  { label: 'Denmark', value: 'DK' },
+  { label: 'Norway', value: 'NO' },
+  { label: 'Finland', value: 'FI' },
+  { label: 'Austria', value: 'AT' },
+  { label: 'Czech Republic', value: 'CZ' },
+  { label: 'Israel', value: 'IL' },
+  { label: 'Chile', value: 'CL' },
+  { label: 'Colombia', value: 'CO' },
+  { label: 'Peru', value: 'PE' },
+  { label: 'Nigeria', value: 'NG' },
+  { label: 'Egypt', value: 'EG' },
+  { label: 'Bangladesh', value: 'BD' },
+  { label: 'Pakistan', value: 'PK' },
+  { label: 'Other', value: 'OTHER' },
+];
+
+export const PROFESSIONS: Country[] = [
+  { label: 'Student', value: 'student' },
+  { label: 'Employee', value: 'employee' },
+  { label: 'Business', value: 'business' },
+  { label: 'Homemaker', value: 'homemaker' },
+  { label: 'Freelancer', value: 'freelancer' },
+  { label: 'Self-Employed/Professional', value: 'self_employed' },
+  { label: 'Creator', value: 'creator' },
+  { label: 'Retired', value: 'retired' },
+  { label: 'Other', value: 'other' },
+];
+

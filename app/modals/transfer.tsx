@@ -359,10 +359,7 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
       // Trigger success callback to update parent UI
       onSuccess?.();
       
-      // Small delay to allow UI to update with new balances
-      await new Promise(resolve => setTimeout(resolve, 300));
-      
-      // Reset form
+      // Reset form but keep modal open
       setAmount('');
       setDescription('');
       setFromAccount('');
@@ -377,7 +374,7 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
       setConversionAmount('');
       setConversionNotes('');
       
-      onClose();
+      // Modal stays open - user can add another transfer
 
     } catch (error: any) {
       console.error('Error:', error);

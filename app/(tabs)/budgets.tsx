@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, StatusBar, RefreshControl } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, StatusBar, RefreshControl, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { formatCurrencyAmount } from '@/utils/currency';
@@ -7,12 +7,19 @@ import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { BudgetCard } from '@/components/BudgetCard';
 import { useSettings } from '@/contexts/SettingsContext';
 import { AddBudgetModal } from '@/app/modals/add-budget';
+import ActionSheet, { ActionSheetItem } from '@/components/ActionSheet';
+import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/contexts/AuthContext';
+import { Budget } from '@/types';
 
 export default function BudgetsScreen() {
+  const { user } = useAuth();
   const [activeTab, setActiveTab] = useState('active');
   const [showAddBudget, setShowAddBudget] = useState(false);
   const { budgets, loading, refreshBudgets } = useRealtimeData();
   const { currency } = useSettings();
+  const [selectedBudget, setSelectedBudget] = useState<Budget | null>(null);
+  const [showActionSheet, setShowActionSheet] = useState(false);
 
   // Filter budgets based on active tab
   const activeBudgets = budgets.filter(budget => budget.is_active);
@@ -24,6 +31,153 @@ export default function BudgetsScreen() {
 
   const handleBudgetPress = (budget: any) => {
     router.push(`/budget/${budget.id}` as any);
+  };
+
+  const handleMoreOptions = (budget: Budget, event: any) => {
+    event?.stopPropagation?.();
+    setSelectedBudget(budget);
+    setShowActionSheet(true);
+  };
+
+  const handleEdit = () => {
+    if (!selectedBudget) return;
+    router.push(`/budget/${selectedBudget.id}?action=edit` as any);
+    setShowActionSheet(false);
+  };
+
+  const handleArchive = async () => {
+    if (!selectedBudget) return;
+    
+    Alert.alert(
+      'Archive Budget',
+      `Archive "${selectedBudget.name}"? Archived budgets won't appear in your active list.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Archive',
+          onPress: async () => {
+            try {
+              const { error } = await supabase
+                .from('budgets')
+                .update({ is_active: false })
+                .eq('id', selectedBudget.id)
+                .eq('user_id', user?.id);
+              
+              if (error) throw error;
+              await refreshBudgets();
+              setShowActionSheet(false);
+              Alert.alert('Success', 'Budget archived successfully!');
+            } catch (error) {
+              console.error('Error archiving budget:', error);
+              Alert.alert('Error', 'Failed to archive budget. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleUnarchive = async () => {
+    if (!selectedBudget) return;
+    
+    try {
+      const { error } = await supabase
+        .from('budgets')
+        .update({ is_active: true })
+        .eq('id', selectedBudget.id)
+        .eq('user_id', user?.id);
+      
+      if (error) throw error;
+      await globalRefresh();
+      setShowActionSheet(false);
+    } catch (error) {
+      console.error('Error unarchiving budget:', error);
+      Alert.alert('Error', 'Failed to unarchive budget. Please try again.');
+    }
+  };
+
+  const handleDelete = () => {
+    if (!selectedBudget) return;
+    
+    Alert.alert(
+      'Delete Budget',
+      `Are you sure you want to delete "${selectedBudget.name}"? This action cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const { error } = await supabase
+                .from('budgets')
+                .update({ 
+                  is_deleted: true,
+                  is_active: false,
+                  deleted_at: new Date().toISOString(),
+                })
+                .eq('id', selectedBudget.id)
+                .eq('user_id', user?.id);
+              
+              if (error) throw error;
+              await refreshBudgets();
+              setShowActionSheet(false);
+            } catch (error) {
+              console.error('Error deleting budget:', error);
+              Alert.alert('Error', 'Failed to delete budget. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const getActionSheetItems = (budget: Budget): ActionSheetItem[] => {
+    const isArchived = !budget.is_active;
+    
+    const items: ActionSheetItem[] = [
+      {
+        id: 'edit',
+        label: 'Edit',
+        icon: 'create-outline',
+        onPress: handleEdit,
+      },
+    ];
+
+    items.push({
+      id: 'separator',
+      label: '',
+      icon: 'ellipsis-horizontal',
+      onPress: () => {},
+      separator: true,
+      disabled: true,
+    });
+
+    if (isArchived) {
+      items.push({
+        id: 'unarchive',
+        label: 'Unarchive',
+        icon: 'archive-outline',
+        onPress: handleUnarchive,
+      });
+    } else {
+      items.push({
+        id: 'archive',
+        label: 'Archive',
+        icon: 'archive-outline',
+        onPress: handleArchive,
+      });
+    }
+
+    items.push({
+      id: 'delete',
+      label: 'Delete',
+      icon: 'trash-outline',
+      onPress: handleDelete,
+      destructive: true,
+    });
+
+    return items;
   };
 
   const renderEmptyState = (type: 'active' | 'completed') => {
@@ -121,6 +275,7 @@ export default function BudgetsScreen() {
                     key={budget.id}
                     budget={budget}
                     onPress={() => handleBudgetPress(budget)}
+                    onMoreOptions={handleMoreOptions}
                   />
                 ))
               ) : (
@@ -133,6 +288,7 @@ export default function BudgetsScreen() {
                     key={budget.id}
                     budget={budget}
                     onPress={() => handleBudgetPress(budget)}
+                    onMoreOptions={handleMoreOptions}
                   />
                 ))
               ) : (
@@ -154,6 +310,17 @@ export default function BudgetsScreen() {
       <AddBudgetModal
         visible={showAddBudget}
         onClose={() => setShowAddBudget(false)}
+      />
+
+      {/* Action Sheet */}
+      <ActionSheet
+        visible={showActionSheet}
+        onClose={() => {
+          setShowActionSheet(false);
+          setSelectedBudget(null);
+        }}
+        items={selectedBudget ? getActionSheetItems(selectedBudget) : []}
+        title={selectedBudget?.name}
       />
     </View>
   );

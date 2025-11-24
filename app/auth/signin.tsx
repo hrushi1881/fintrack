@@ -1,12 +1,12 @@
 import React, { useState } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, TextInput, SafeAreaView, StatusBar, Alert, KeyboardAvoidingView, Platform, ScrollView } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
+import { supabase } from '@/lib/supabase';
 
 export default function SignInScreen() {
-  const { signIn, resetPassword } = useAuth();
+  const { signIn, resetPassword, user } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -34,8 +34,29 @@ export default function SignInScreen() {
         console.error('Sign in error:', error);
         Alert.alert('Sign In Failed', error.message || 'Unable to sign in. Please check your credentials and try again.');
       } else {
-        // Navigation will be handled by auth state change
-        router.replace('/(tabs)');
+        // Check onboarding status after successful sign in
+        try {
+          const { data: { user: currentUser } } = await supabase.auth.getUser();
+          if (currentUser) {
+            const { data: profile } = await supabase
+              .from('users_profile')
+              .select('onboarding_completed')
+              .eq('user_id', currentUser.id)
+              .single();
+
+            if (profile?.onboarding_completed) {
+              router.replace('/(tabs)');
+            } else {
+              router.replace('/onboarding');
+            }
+          } else {
+            router.replace('/onboarding');
+          }
+        } catch (profileError) {
+          console.error('Error checking onboarding status:', profileError);
+          // On error, go to onboarding to be safe
+          router.replace('/onboarding');
+        }
       }
     } catch (error: any) {
       console.error('Unexpected sign in error:', error);
@@ -68,63 +89,52 @@ export default function SignInScreen() {
   };
 
   return (
-    <LinearGradient
-      colors={['#99D795', '#99D795', '#99D795']}
-      style={styles.container}
-    >
-      <StatusBar barStyle="light-content" backgroundColor="#99D795" />
+    <View style={styles.container}>
+      <StatusBar barStyle="dark-content" backgroundColor="#FFF0F0" />
       <SafeAreaView style={styles.safeArea}>
         <KeyboardAvoidingView 
           style={styles.keyboardView}
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         >
           <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
-            {/* Header */}
+            {/* Header with back button */}
             <View style={styles.header}>
               <TouchableOpacity 
                 style={styles.backButton}
                 onPress={() => router.back()}
               >
-                <Ionicons name="arrow-back" size={24} color="white" />
+                <Ionicons name="chevron-back" size={20} color="#000000" />
               </TouchableOpacity>
             </View>
 
-            {/* Logo and Welcome */}
-            <View style={styles.logoSection}>
-              <View style={styles.logoContainer}>
-                <Ionicons name="wallet" size={40} color="white" />
-              </View>
-              <Text style={styles.welcomeTitle}>Welcome Back</Text>
-              <Text style={styles.welcomeSubtitle}>Sign in to your account</Text>
+            {/* Title */}
+            <View style={styles.titleSection}>
+              <Text style={styles.mainTitle}>WELCOME TO FINTRACK</Text>
             </View>
 
             {/* Sign In Form */}
             <View style={styles.formContainer}>
               <View style={styles.inputContainer}>
-                <Text style={styles.inputLabel}>Email Address</Text>
-                <View style={styles.inputWrapper}>
-                  <Ionicons name="mail" size={20} color="#9CA3AF" style={styles.inputIcon} />
-                  <TextInput
-                    style={styles.textInput}
-                    placeholder="Enter your email"
-                    placeholderTextColor="#9CA3AF"
-                    value={email}
-                    onChangeText={setEmail}
-                    keyboardType="email-address"
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                  />
-                </View>
+                <Text style={styles.inputLabel}>EMAIL</Text>
+                <TextInput
+                  style={styles.textInput}
+                  placeholder="Enter your email"
+                  placeholderTextColor="#666666"
+                  value={email}
+                  onChangeText={setEmail}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
               </View>
 
               <View style={styles.inputContainer}>
-                <Text style={styles.inputLabel}>Password</Text>
-                <View style={styles.inputWrapper}>
-                  <Ionicons name="lock-closed" size={20} color="#9CA3AF" style={styles.inputIcon} />
+                <Text style={styles.inputLabel}>PASSWORD</Text>
+                <View style={styles.passwordWrapper}>
                   <TextInput
-                    style={styles.textInput}
+                    style={styles.passwordInput}
                     placeholder="Enter your password"
-                    placeholderTextColor="#9CA3AF"
+                    placeholderTextColor="#666666"
                     value={password}
                     onChangeText={setPassword}
                     secureTextEntry={!showPassword}
@@ -136,7 +146,7 @@ export default function SignInScreen() {
                     <Ionicons 
                       name={showPassword ? "eye-off" : "eye"} 
                       size={20} 
-                      color="#9CA3AF" 
+                      color="#666666" 
                     />
                   </TouchableOpacity>
                 </View>
@@ -154,37 +164,10 @@ export default function SignInScreen() {
                 onPress={handleSignIn}
                 disabled={isLoading}
               >
-                {isLoading ? (
-                  <Text style={styles.signInButtonText}>Signing In...</Text>
-                ) : (
-                  <Text style={styles.signInButtonText}>Sign In</Text>
-                )}
-              </TouchableOpacity>
-            </View>
-
-            {/* Divider */}
-            <View style={styles.dividerContainer}>
-              <View style={styles.dividerLine} />
-              <Text style={styles.dividerText}>or continue with</Text>
-              <View style={styles.dividerLine} />
-            </View>
-
-            {/* Social Sign In */}
-            <View style={styles.socialContainer}>
-              <TouchableOpacity 
-                style={styles.socialButton}
-                onPress={() => handleSocialSignIn('Google')}
-              >
-                <Ionicons name="logo-google" size={24} color="#DB4437" />
-                <Text style={styles.socialButtonText}>Google</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity 
-                style={styles.socialButton}
-                onPress={() => handleSocialSignIn('Apple')}
-              >
-                <Ionicons name="logo-apple" size={24} color="white" />
-                <Text style={styles.socialButtonText}>Apple</Text>
+                <Text style={styles.signInButtonText}>
+                  {isLoading ? 'Signing In...' : 'Sign In'}
+                </Text>
+                <Ionicons name="chevron-forward" size={20} color="#FFFFFF" style={styles.buttonChevron} />
               </TouchableOpacity>
             </View>
 
@@ -198,13 +181,14 @@ export default function SignInScreen() {
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
-    </LinearGradient>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#FFF0F0',
   },
   safeArea: {
     flex: 1,
@@ -219,154 +203,120 @@ const styles = StyleSheet.create({
   header: {
     paddingTop: 20,
     paddingBottom: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#000000',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  logoSection: {
-    alignItems: 'center',
+  titleSection: {
     marginBottom: 40,
-  },
-  logoContainer: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 24,
   },
-  welcomeTitle: {
+  mainTitle: {
     fontSize: 28,
-    fontWeight: 'bold',
-    color: 'white',
-    marginBottom: 8,
-  },
-  welcomeSubtitle: {
-    fontSize: 16,
-    color: 'rgba(255, 255, 255, 0.8)',
-    textAlign: 'center',
+    fontWeight: '900',
+    color: '#000000',
+    fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+    letterSpacing: -0.5,
   },
   formContainer: {
     marginBottom: 32,
   },
   inputContainer: {
-    marginBottom: 20,
+    marginBottom: 24,
   },
   inputLabel: {
     fontSize: 14,
     fontWeight: '600',
-    color: 'white',
+    color: '#000000',
     marginBottom: 8,
+    fontFamily: 'Poppins-SemiBold',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
-  inputWrapper: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  textInput: {
+    backgroundColor: '#2E2E2E',
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    fontSize: 16,
+    color: '#FFFFFF',
+    fontFamily: 'InstrumentSerif-Regular',
+    minHeight: 52,
   },
-  inputIcon: {
-    marginRight: 12,
+  passwordWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#2E2E2E',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    minHeight: 52,
   },
-  textInput: {
+  passwordInput: {
     flex: 1,
     fontSize: 16,
-    color: 'white',
+    color: '#FFFFFF',
+    fontFamily: 'InstrumentSerif-Regular',
+    paddingVertical: 16,
   },
   eyeButton: {
     padding: 4,
   },
   forgotPasswordButton: {
     alignSelf: 'flex-end',
-    marginBottom: 24,
+    marginBottom: 32,
   },
   forgotPasswordText: {
     fontSize: 14,
-    color: '#10B981',
-    fontWeight: '600',
+    color: '#000000',
+    fontFamily: 'Poppins-SemiBold',
   },
   signInButton: {
-    backgroundColor: '#10B981',
-    borderRadius: 12,
+    backgroundColor: '#000000',
+    borderRadius: 50,
     paddingVertical: 16,
+    paddingHorizontal: 24,
+    flexDirection: 'row',
     alignItems: 'center',
-    shadowColor: '#10B981',
-    shadowOffset: {
-      width: 0,
-      height: 4,
-    },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 8,
+    justifyContent: 'center',
+    minHeight: 56,
   },
   signInButtonDisabled: {
-    backgroundColor: 'rgba(16, 185, 129, 0.6)',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
   },
   signInButtonText: {
     fontSize: 16,
     fontWeight: 'bold',
-    color: 'white',
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-Bold',
+    marginRight: 8,
   },
-  dividerContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 32,
-  },
-  dividerLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-  },
-  dividerText: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.6)',
-    marginHorizontal: 16,
-  },
-  socialContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 32,
-  },
-  socialButton: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    paddingVertical: 16,
-    marginHorizontal: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
-  },
-  socialButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginLeft: 8,
+  buttonChevron: {
+    marginLeft: 4,
   },
   signUpContainer: {
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
+    marginTop: 32,
     marginBottom: 40,
   },
   signUpText: {
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.8)',
+    color: '#000000',
+    fontFamily: 'InstrumentSerif-Regular',
   },
   signUpLink: {
     fontSize: 14,
-    color: '#10B981',
+    color: '#000000',
     fontWeight: 'bold',
+    fontFamily: 'Poppins-Bold',
+    textDecorationLine: 'underline',
   },
 });

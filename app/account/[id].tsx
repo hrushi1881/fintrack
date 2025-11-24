@@ -39,18 +39,72 @@ export default function AccountDetailScreen() {
   const [transferModalVisible, setTransferModalVisible] = useState(false);
   const [transferFundsModalVisible, setTransferFundsModalVisible] = useState(false);
   const [addBudgetModalVisible, setAddBudgetModalVisible] = useState(false);
+  const [selectedFundFilter, setSelectedFundFilter] = useState<'all' | 'personal' | 'goal' | 'borrowed'>('all');
   
   const account = useMemo(
     () => accounts.find((item) => item.id === accountId),
     [accounts, accountId]
   );
 
+  // Helper function to get fund type from transaction metadata
+  const getTransactionFundType = useCallback((tx: any): 'personal' | 'goal' | 'borrowed' | null => {
+    const metadata = tx.metadata || {};
+    const bucketType = metadata.bucket_type || metadata.bucket;
+    
+    if (!bucketType || bucketType === 'personal') {
+      return 'personal';
+    }
+    
+    // Map 'liability' to 'borrowed' for consistency
+    if (bucketType === 'liability' || bucketType === 'borrowed') {
+      return 'borrowed';
+    }
+    
+    if (bucketType === 'goal') {
+      return 'goal';
+    }
+    
+    return null; // Unknown type, default to personal
+  }, []);
+
   const accountTransactions = useMemo(() => {
     if (!accountId) return [];
-    return transactions
-      .filter((tx) => tx.account_id === accountId)
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [transactions, accountId]);
+    let filtered = transactions
+      .filter((tx) => tx.account_id === accountId);
+    
+    // Filter by fund type if not 'all'
+    if (selectedFundFilter !== 'all') {
+      filtered = filtered.filter((tx) => {
+        const fundType = getTransactionFundType(tx);
+        return fundType === selectedFundFilter;
+      });
+    }
+    
+    return filtered.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [transactions, accountId, selectedFundFilter, getTransactionFundType]);
+
+  // Get transaction counts by fund type for tabs
+  const transactionCounts = useMemo(() => {
+    if (!accountId) return { all: 0, personal: 0, goal: 0, borrowed: 0 };
+    
+    const accountTxs = transactions.filter((tx) => tx.account_id === accountId);
+    
+    const counts = {
+      all: accountTxs.length,
+      personal: 0,
+      goal: 0,
+      borrowed: 0,
+    };
+    
+    accountTxs.forEach((tx) => {
+      const fundType = getTransactionFundType(tx);
+      if (fundType === 'personal') counts.personal++;
+      else if (fundType === 'goal') counts.goal++;
+      else if (fundType === 'borrowed') counts.borrowed++;
+    });
+    
+    return counts;
+  }, [transactions, accountId, getTransactionFundType]);
 
   const fundsForAccount = useMemo<AccountFund[]>(() => {
     if (!accountId) return [];
@@ -66,13 +120,44 @@ export default function AccountDetailScreen() {
   }, [accountId, getFundSummary]);
 
   // Check if account has multiple fund types (to determine if Personal Fund label should be shown)
+  // Per documentation: Only show Personal Fund label when OTHER funds exist alongside it
   const hasMultipleFundTypes = useMemo(() => {
     if (!accountId) return false;
     const funds = fundsForAccount.filter((f) => (f.balance ?? 0) > 0);
     const fundTypes = new Set(funds.map((f) => f.fund_type));
+    
     // Only show Personal Fund label if there are other fund types (borrowed or goal)
-    return fundTypes.size > 1 || (fundTypes.size === 1 && !fundTypes.has('personal'));
+    // If only personal fund exists, don't show breakdown
+    const hasNonPersonalFunds = funds.some((f) => f.fund_type !== 'personal' && (f.balance ?? 0) > 0);
+    return hasNonPersonalFunds && fundTypes.size > 0;
   }, [fundsForAccount, accountId]);
+
+  // Get Personal Fund balance (available to spend)
+  // Personal Fund = Account Balance - (Sum of Liability Funds) - (Sum of Goal Funds)
+  // Personal Fund is NOT stored in account_funds - it's implicit
+  const personalFundBalance = useMemo(() => {
+    if (!accountId || !account) return 0;
+    const accountBalance = toNumber(account.balance);
+    const totalLiability = fundSummary.borrowed || 0;
+    const totalGoal = fundSummary.goal || 0;
+    // Personal Fund is what's left after subtracting liability and goal funds
+    const personalFund = Math.max(0, accountBalance - totalLiability - totalGoal);
+    return personalFund;
+  }, [accountId, account, fundSummary.borrowed, fundSummary.goal]);
+
+  // Get Liability Funds (only show if balance > 0)
+  const liabilityFunds = useMemo(() => {
+    return fundsForAccount.filter(
+      (f) => f.fund_type === 'borrowed' && (f.balance ?? 0) > 0
+    );
+  }, [fundsForAccount]);
+
+  // Get Goal Funds (only show if balance > 0)
+  const goalFunds = useMemo(() => {
+    return fundsForAccount.filter(
+      (f) => f.fund_type === 'goal' && (f.balance ?? 0) > 0
+    );
+  }, [fundsForAccount]);
 
   const linkedGoals = useMemo(
     () => {
@@ -95,6 +180,29 @@ export default function AccountDetailScreen() {
       accountId && budget?.budget_accounts?.some((link: any) => link.account_id === accountId)
     );
   }, [budgets, accountId]);
+
+  // Helper function to get fund name from transaction (goal or liability name)
+  const getTransactionFundName = useCallback((tx: any, fundType: 'personal' | 'goal' | 'borrowed' | null): string | null => {
+    if (!fundType || fundType === 'personal') return null;
+    
+    const metadata = tx.metadata || {};
+    const bucketId = metadata.bucket_id;
+    
+    if (!bucketId) return null;
+    
+    if (fundType === 'goal') {
+      const goal = goals.find((g) => g.id === bucketId);
+      return goal ? goal.title : null;
+    }
+    
+    if (fundType === 'borrowed') {
+      // Note: liabilities are not in the useRealtimeData hook, so we'd need to fetch them
+      // For now, return null and show "Borrowed Fund" in the UI
+      return null;
+    }
+    
+    return null;
+  }, [goals]);
 
   const formatCurrency = (value: number) => formatCurrencyAmount(value, currency);
 
@@ -212,7 +320,7 @@ export default function AccountDetailScreen() {
                   <View style={styles.availableBalanceSection}>
                     <Text style={styles.availableBalanceLabel}>Available to Spend</Text>
                     <Text style={styles.availableBalanceValue}>
-                      {formatCurrency(fundSummary.spendable)}
+                      {formatCurrency(personalFundBalance + (fundSummary.spendable || 0))}
                     </Text>
                     <Text style={styles.availableBalanceSubtext}>
                       Personal Fund - Your true available balance
@@ -368,121 +476,236 @@ export default function AccountDetailScreen() {
                     </TouchableOpacity>
                   </View>
                   
-                  {/* Personal Fund - Primary Display */}
-                  <View style={styles.personalFundCard}>
-                    <View style={styles.personalFundHeader}>
-                      <View style={styles.personalFundIcon}>
-                        <Ionicons name="wallet" size={24} color="#10B981" />
-                      </View>
-                      <View style={styles.personalFundInfo}>
-                        <Text style={styles.personalFundLabel}>Personal Fund</Text>
-                        <Text style={styles.personalFundAmount}>
-                          {formatCurrency(fundSummary.spendable)}
-                        </Text>
-                        <Text style={styles.personalFundSubtext}>
-                          Available to spend on anything
-                        </Text>
-                      </View>
-                    </View>
-                  </View>
-
-                {/* Liability Funds */}
-                {fundSummary.borrowed > 0 && (
-                  <View style={styles.fundTypeSection}>
-                    <Text style={styles.fundTypeTitle}>Liability Funds</Text>
-                    <Text style={styles.fundTypeSubtitle}>
-                      Reserved for debt payments
+                  {/* Tree-structured fund display */}
+                  <View style={styles.fundsTreeContainer}>
+                    {/* Account name and total */}
+                    <Text style={styles.accountTotalText}>
+                      {account?.name}: {formatCurrency(toNumber(account?.balance))}
                     </Text>
-                    {fundsForAccount
-                      .filter((f) => f.fund_type === 'borrowed' && (f.balance ?? 0) > 0)
-                      .map((fund) => (
-                        <View key={fund.id} style={styles.fundItem}>
-                          <View style={styles.fundItemLeft}>
-                            <View style={[styles.fundItemIcon, { backgroundColor: 'rgba(239, 68, 68, 0.1)' }]}>
+                    
+                    {/* All funds with tree structure */}
+                    {personalFundBalance > 0 && (
+                      <View style={styles.fundTreeRow}>
+                        <Text style={styles.treeLine}>
+                          {liabilityFunds.length > 0 || goalFunds.length > 0 ? '├─' : '└─'}
+                        </Text>
+                        <View style={styles.fundTreeContent}>
+                          <View style={[styles.fundTreeIcon, { backgroundColor: 'rgba(16, 185, 129, 0.1)' }]}>
+                            <Ionicons name="wallet-outline" size={18} color="#10B981" />
+                          </View>
+                          <View style={styles.fundTreeInfo}>
+                            <Text style={styles.fundTreeLabel}>Personal Fund</Text>
+                            <Text style={[styles.fundTreeAmount, { color: '#10B981' }]}>
+                              {formatCurrency(personalFundBalance)}
+                            </Text>
+                          </View>
+                        </View>
+                      </View>
+                    )}
+
+                    {/* Liability Funds - Multiple shown separately */}
+                    {liabilityFunds.map((fund, index) => {
+                      const isLastLiability = index === liabilityFunds.length - 1;
+                      const hasGoals = goalFunds.length > 0;
+                      const treeChar = isLastLiability && !hasGoals ? '└─' : '├─';
+                      
+                      return (
+                        <View key={fund.id} style={styles.fundTreeRow}>
+                          <Text style={styles.treeLine}>{treeChar}</Text>
+                          <TouchableOpacity
+                            style={styles.fundTreeContent}
+                            onPress={() => handleFundAction(fund)}
+                            activeOpacity={0.7}
+                          >
+                            <View style={[styles.fundTreeIcon, { backgroundColor: 'rgba(239, 68, 68, 0.1)' }]}>
                               <Ionicons name="card-outline" size={18} color="#EF4444" />
                             </View>
-                            <View style={styles.fundItemInfo}>
-                              <Text style={styles.fundItemName}>{fund.name}</Text>
-                              <Text style={styles.fundItemAmount}>
+                            <View style={styles.fundTreeInfo}>
+                              <Text style={styles.fundTreeLabel}>{fund.name}</Text>
+                              <Text style={[styles.fundTreeAmount, { color: '#EF4444' }]}>
                                 {formatCurrency(fund.balance ?? 0)}
                               </Text>
                             </View>
-                          </View>
-                          <TouchableOpacity
-                            onPress={() => handleFundAction(fund)}
-                            style={styles.fundItemAction}
-                          >
-                            <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
                           </TouchableOpacity>
                         </View>
-                      ))}
-                  </View>
-                )}
+                      );
+                    })}
 
-                {/* Goal Funds */}
-                {fundSummary.goal > 0 && (
-                  <View style={styles.fundTypeSection}>
-                    <Text style={styles.fundTypeTitle}>Goal Funds</Text>
-                    <Text style={styles.fundTypeSubtitle}>
-                      Locked savings - cannot be spent directly
-                    </Text>
-                    {fundsForAccount
-                      .filter((f) => f.fund_type === 'goal' && (f.balance ?? 0) > 0)
-                      .map((fund) => (
-                        <View key={fund.id} style={styles.fundItem}>
-                          <View style={styles.fundItemLeft}>
-                            <View style={[styles.fundItemIcon, { backgroundColor: 'rgba(245, 158, 11, 0.1)' }]}>
-                              <Ionicons name="lock-closed-outline" size={18} color="#F59E0B" />
+                    {/* Goal Funds - Multiple shown separately */}
+                    {goalFunds.map((fund, index) => {
+                      const isLastGoal = index === goalFunds.length - 1;
+                      const treeChar = '└─';
+                      
+                      return (
+                        <View key={fund.id} style={styles.fundTreeRow}>
+                          <Text style={styles.treeLine}>{treeChar}</Text>
+                          <TouchableOpacity
+                            style={styles.fundTreeContent}
+                            onPress={() => handleFundAction(fund)}
+                            activeOpacity={0.7}
+                          >
+                            <View style={[styles.fundTreeIcon, { backgroundColor: 'rgba(59, 130, 246, 0.1)' }]}>
+                              <Ionicons name="flag-outline" size={18} color="#3B82F6" />
                             </View>
-                            <View style={styles.fundItemInfo}>
-                              <Text style={styles.fundItemName}>{fund.name}</Text>
-                              <Text style={styles.fundItemAmount}>
+                            <View style={styles.fundTreeInfo}>
+                              <Text style={styles.fundTreeLabel}>{fund.name}</Text>
+                              <Text style={[styles.fundTreeAmount, { color: '#3B82F6' }]}>
                                 {formatCurrency(fund.balance ?? 0)}
                               </Text>
                             </View>
-                          </View>
-                          <TouchableOpacity
-                            onPress={() => handleFundAction(fund)}
-                            style={styles.fundItemAction}
-                          >
-                            <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
                           </TouchableOpacity>
                         </View>
-                      ))}
+                      );
+                    })}
                   </View>
-                )}
-
-                {/* Empty State */}
-                {fundsForAccount.length === 0 && (
-                  <View style={styles.emptyState}>
-                    <Ionicons name="layers-outline" size={36} color="#8BA17B" />
-                    <Text style={styles.emptyStateText}>
-                      All funds are in Personal Fund. Create liabilities or goals to allocate funds.
-                    </Text>
-                  </View>
-                )}
                 </View>
               )}
 
               <View style={styles.transactionsCard}>
-                <Text style={styles.sectionTitle}>Recent Transactions</Text>
+                <View style={styles.transactionsHeader}>
+                  <Text style={styles.sectionTitle}>Transactions</Text>
+                </View>
+                
+                {/* Fund Type Filter Tabs */}
+                {hasMultipleFundTypes && (
+                  <View style={styles.fundFilterTabs}>
+                    <TouchableOpacity
+                      style={[
+                        styles.fundFilterTab,
+                        selectedFundFilter === 'all' && styles.fundFilterTabActive,
+                      ]}
+                      onPress={() => setSelectedFundFilter('all')}
+                    >
+                      <Text
+                        style={[
+                          styles.fundFilterTabText,
+                          selectedFundFilter === 'all' && styles.fundFilterTabTextActive,
+                        ]}
+                      >
+                        All
+                      </Text>
+                      {transactionCounts.all > 0 && (
+                        <Text
+                          style={[
+                            styles.fundFilterTabCount,
+                            selectedFundFilter === 'all' && styles.fundFilterTabCountActive,
+                          ]}
+                        >
+                          {transactionCounts.all}
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                    
+                    <TouchableOpacity
+                      style={[
+                        styles.fundFilterTab,
+                        selectedFundFilter === 'personal' && styles.fundFilterTabActive,
+                      ]}
+                      onPress={() => setSelectedFundFilter('personal')}
+                    >
+                      <Text
+                        style={[
+                          styles.fundFilterTabText,
+                          selectedFundFilter === 'personal' && styles.fundFilterTabTextActive,
+                        ]}
+                      >
+                        Personal
+                      </Text>
+                      {transactionCounts.personal > 0 && (
+                        <Text
+                          style={[
+                            styles.fundFilterTabCount,
+                            selectedFundFilter === 'personal' && styles.fundFilterTabCountActive,
+                          ]}
+                        >
+                          {transactionCounts.personal}
+                        </Text>
+                      )}
+                    </TouchableOpacity>
+                    
+                    {transactionCounts.goal > 0 && (
+                      <TouchableOpacity
+                        style={[
+                          styles.fundFilterTab,
+                          selectedFundFilter === 'goal' && styles.fundFilterTabActive,
+                        ]}
+                        onPress={() => setSelectedFundFilter('goal')}
+                      >
+                        <Text
+                          style={[
+                            styles.fundFilterTabText,
+                            selectedFundFilter === 'goal' && styles.fundFilterTabTextActive,
+                          ]}
+                        >
+                          Goal
+                        </Text>
+                        <Text
+                          style={[
+                            styles.fundFilterTabCount,
+                            selectedFundFilter === 'goal' && styles.fundFilterTabCountActive,
+                          ]}
+                        >
+                          {transactionCounts.goal}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+                    
+                    {transactionCounts.borrowed > 0 && (
+                      <TouchableOpacity
+                        style={[
+                          styles.fundFilterTab,
+                          selectedFundFilter === 'borrowed' && styles.fundFilterTabActive,
+                        ]}
+                        onPress={() => setSelectedFundFilter('borrowed')}
+                      >
+                        <Text
+                          style={[
+                            styles.fundFilterTabText,
+                            selectedFundFilter === 'borrowed' && styles.fundFilterTabTextActive,
+                          ]}
+                        >
+                          Borrowed
+                        </Text>
+                        <Text
+                          style={[
+                            styles.fundFilterTabCount,
+                            selectedFundFilter === 'borrowed' && styles.fundFilterTabCountActive,
+                          ]}
+                        >
+                          {transactionCounts.borrowed}
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                )}
+                
                 {accountTransactions.length === 0 ? (
                   <View style={styles.emptyState}>
                     <Ionicons name="receipt-outline" size={36} color="#8BA17B" />
-                    <Text style={styles.emptyStateText}>No transactions yet. Start by adding one.</Text>
+                    <Text style={styles.emptyStateText}>
+                      {selectedFundFilter === 'all'
+                        ? 'No transactions yet. Start by adding one.'
+                        : `No ${selectedFundFilter} transactions found.`}
+                    </Text>
                   </View>
                 ) : (
-                  accountTransactions.slice(0, MAX_RECENT_TRANSACTIONS).map((tx) => (
-                    <RecentTransactionRow
-                      key={tx.id}
-                      name={tx.description || tx.category?.name || 'Transaction'}
-                      amount={tx.amount}
-                      type={tx.type}
-                      date={tx.date}
-                      onPress={() => router.push(`/transaction/${tx.id}`)}
-                      formatter={formatCurrency}
-                    />
-                  ))
+                  accountTransactions.slice(0, MAX_RECENT_TRANSACTIONS).map((tx) => {
+                    const fundType = getTransactionFundType(tx);
+                    const fundName = getTransactionFundName(tx, fundType);
+                    return (
+                      <RecentTransactionRow
+                        key={tx.id}
+                        name={tx.description || tx.category?.name || 'Transaction'}
+                        amount={tx.amount}
+                        type={tx.type}
+                        date={tx.date}
+                        fundType={fundType}
+                        fundName={fundName}
+                        onPress={() => router.push(`/transaction/${tx.id}`)}
+                        formatter={formatCurrency}
+                      />
+                    );
+                  })
                 )}
                 {accountTransactions.length > MAX_RECENT_TRANSACTIONS && (
           <TouchableOpacity 
@@ -674,6 +897,8 @@ interface RecentTransactionRowProps {
   amount: number;
   type: string;
   date: string;
+  fundType?: 'personal' | 'goal' | 'borrowed' | null;
+  fundName?: string | null;
   onPress: () => void;
   formatter: (value: number) => string;
 }
@@ -683,6 +908,8 @@ const RecentTransactionRow: React.FC<RecentTransactionRowProps> = ({
   amount,
   type,
   date,
+  fundType,
+  fundName,
   onPress,
   formatter,
 }) => {
@@ -690,13 +917,44 @@ const RecentTransactionRow: React.FC<RecentTransactionRowProps> = ({
   const isIncome = type === 'income';
   const amountColor = isIncome ? '#2B8A3E' : isExpense ? '#B83228' : '#1F3A24';
 
-    return (
+  // Fund type badge colors
+  const getFundBadgeStyle = () => {
+    if (!fundType || fundType === 'personal') return null;
+    
+    if (fundType === 'goal') {
+      return { backgroundColor: 'rgba(59, 130, 246, 0.1)', color: '#3B82F6' };
+    }
+    
+    if (fundType === 'borrowed') {
+      return { backgroundColor: 'rgba(239, 68, 68, 0.1)', color: '#EF4444' };
+    }
+    
+    return null;
+  };
+
+  const fundBadgeStyle = getFundBadgeStyle();
+
+  return (
     <TouchableOpacity style={styles.transactionRow} onPress={onPress}>
       <View style={styles.transactionIcon}>
         <Ionicons name="receipt-outline" size={20} color="#4F6F3E" />
       </View>
       <View style={styles.transactionInfo}>
-        <Text style={styles.transactionName}>{name}</Text>
+        <View style={styles.transactionNameRow}>
+          <Text style={styles.transactionName}>{name}</Text>
+          {fundBadgeStyle && (
+            <View style={[styles.fundBadge, { backgroundColor: fundBadgeStyle.backgroundColor }]}>
+              <Ionicons
+                name={fundType === 'goal' ? 'flag-outline' : 'card-outline'}
+                size={10}
+                color={fundBadgeStyle.color}
+              />
+              <Text style={[styles.fundBadgeText, { color: fundBadgeStyle.color }]}>
+                {fundName || (fundType === 'goal' ? 'Goal' : 'Borrowed')}
+              </Text>
+            </View>
+          )}
+        </View>
         <Text style={styles.transactionDate}>
           {new Date(date).toLocaleDateString()}
         </Text>
@@ -1025,6 +1283,61 @@ const styles = StyleSheet.create({
   fundItemAction: {
     padding: 4,
   },
+  fundsTreeContainer: {
+    marginTop: 8,
+  },
+  accountTotalText: {
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 12,
+  },
+  fundTreeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+    paddingLeft: 0,
+  },
+  treeLine: {
+    fontSize: 16,
+    fontFamily: 'Courier New',
+    color: 'rgba(0, 0, 0, 0.4)',
+    width: 24,
+    textAlign: 'left',
+  },
+  fundTreeContent: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: '#F9FAF7',
+  },
+  fundTreeIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fundTreeInfo: {
+    flex: 1,
+  },
+  fundTreeLabel: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 2,
+  },
+  fundTreeAmount: {
+    fontSize: 15,
+    fontFamily: 'InstrumentSerif-Regular',
+    fontWeight: '600',
+  },
   lockedHelperText: {
     marginTop: 12,
     fontSize: 12,
@@ -1118,6 +1431,54 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#EDF1E7',
   },
+  transactionsHeader: {
+    marginBottom: 16,
+  },
+  fundFilterTabs: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 16,
+    flexWrap: 'wrap',
+  },
+  fundFilterTab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '#F5F8F0',
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    gap: 6,
+  },
+  fundFilterTabActive: {
+    backgroundColor: '#4F6F3E',
+    borderColor: '#4F6F3E',
+  },
+  fundFilterTabText: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
+  },
+  fundFilterTabTextActive: {
+    color: '#FFFFFF',
+    fontFamily: 'InstrumentSerif-Regular',
+  },
+  fundFilterTabCount: {
+    fontSize: 11,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#637050',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 10,
+    minWidth: 20,
+    textAlign: 'center',
+  },
+  fundFilterTabCountActive: {
+    color: '#FFFFFF',
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+  },
   transactionRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1137,10 +1498,30 @@ const styles = StyleSheet.create({
   transactionInfo: {
     flex: 1,
   },
+  transactionNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
   transactionName: {
     fontSize: 14,
     fontFamily: 'InstrumentSerif-Regular',
     color: '#1F3A24',
+    flexShrink: 1,
+  },
+  fundBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  fundBadgeText: {
+    fontSize: 10,
+    fontFamily: 'InstrumentSerif-Regular',
+    fontWeight: '600',
   },
   transactionDate: {
     marginTop: 2,

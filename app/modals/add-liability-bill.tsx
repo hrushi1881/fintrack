@@ -20,6 +20,7 @@ import GlassCard from '@/components/GlassCard';
 import { formatCurrencyAmount, formatCurrencySymbol } from '@/utils/currency';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
+import { router } from 'expo-router';
 
 interface AddLiabilityBillModalProps {
   visible: boolean;
@@ -29,6 +30,10 @@ interface AddLiabilityBillModalProps {
   liabilityStartDate: string;
   liabilityEndDate?: string;
   onSuccess?: () => void;
+  // Pre-fill data from cycle
+  prefillAmount?: number;
+  prefillDueDate?: string;
+  prefillCycleNumber?: number;
 }
 
 export default function AddLiabilityBillModal({
@@ -39,26 +44,13 @@ export default function AddLiabilityBillModal({
   liabilityStartDate,
   liabilityEndDate,
   onSuccess,
+  prefillAmount,
+  prefillDueDate,
+  prefillCycleNumber,
 }: AddLiabilityBillModalProps) {
   const { user } = useAuth();
   const { currency } = useSettings();
   const { accounts, refreshTransactions, getFundSummary, refreshAccountFunds } = useRealtimeData();
-
-  const [amount, setAmount] = useState('');
-  const [interestAmount, setInterestAmount] = useState('');
-  const [interestIncluded, setInterestIncluded] = useState(false);
-  const [linkedAccountId, setLinkedAccountId] = useState<string>('');
-  const [saving, setSaving] = useState(false);
-  const [dueDate, setDueDate] = useState(new Date());
-  const [showDatePicker, setShowDatePicker] = useState(false);
-
-  const formatCurrency = (value: number) => {
-    return formatCurrencyAmount(value, currency);
-  };
-
-  const formatDateForInput = (date: Date) => {
-    return date.toISOString().split('T')[0];
-  };
 
   // Get default due date (today or liability start date, whichever is later)
   const getDefaultDueDate = (): Date => {
@@ -69,6 +61,25 @@ export default function AddLiabilityBillModal({
     
     // Use today if it's after start date, otherwise use start date
     return today >= startDate ? today : startDate;
+  };
+
+  // Initialize with prefill data if provided
+  const [amount, setAmount] = useState(prefillAmount ? prefillAmount.toString() : '');
+  const [interestAmount, setInterestAmount] = useState('');
+  const [interestIncluded, setInterestIncluded] = useState(false);
+  const [linkedAccountId, setLinkedAccountId] = useState<string>('');
+  const [saving, setSaving] = useState(false);
+  const [dueDate, setDueDate] = useState(
+    prefillDueDate ? new Date(prefillDueDate) : getDefaultDueDate()
+  );
+  const [showDatePicker, setShowDatePicker] = useState(false);
+
+  const formatCurrency = (value: number) => {
+    return formatCurrencyAmount(value, currency);
+  };
+
+  const formatDateForInput = (date: Date) => {
+    return date.toISOString().split('T')[0];
   };
 
   // Filter out goals_savings and liability accounts - these shouldn't be used for bill payments
@@ -113,31 +124,31 @@ export default function AddLiabilityBillModal({
     }
   };
 
-  const handleSave = async () => {
-    if (!user) return;
+  const handleSave = async (): Promise<string | null> => {
+    if (!user) return null;
 
     const amountValue = parseFloat(amount);
     if (isNaN(amountValue) || amountValue <= 0) {
       Alert.alert('Error', 'Please enter a valid payment amount');
-      return;
+      return null;
     }
 
     const interestValue = parseFloat(interestAmount || '0');
     if (interestAmount && (isNaN(interestValue) || interestValue < 0)) {
       Alert.alert('Error', 'Please enter a valid interest amount');
-      return;
+      return null;
     }
 
     if (!linkedAccountId) {
       Alert.alert('Error', 'Please select an account');
-      return;
+      return null;
     }
 
     try {
       setSaving(true);
 
-      // Calculate payment number
-      const paymentNumber = await calculatePaymentNumber();
+      // Calculate payment number (use prefill if provided, otherwise calculate)
+      const paymentNumber = prefillCycleNumber || await calculatePaymentNumber();
 
       // Calculate total amount and principal
       // If interest is included: total = amount (already includes interest), principal = amount - interest
@@ -164,38 +175,147 @@ export default function AddLiabilityBillModal({
       // Format due date
       const dueDateString = dueDate.toISOString().split('T')[0];
 
+      // Get recurrence_pattern from liability (required for non-one_time bills)
+      // The constraint requires: if parent_bill_id IS NULL AND bill_type != 'one_time', then recurrence_pattern IS NOT NULL
+      // IMPORTANT: The database only allows: 'daily', 'weekly', 'monthly', 'yearly', 'custom'
+      // Map other frequencies to these allowed values
+      let recurrencePattern: 'daily' | 'weekly' | 'monthly' | 'yearly' | 'custom' = 'monthly';
+      try {
+        const { data: liabilityData, error: liabilityError } = await supabase
+          .from('liabilities')
+          .select('periodical_frequency')
+          .eq('id', liabilityId)
+          .eq('user_id', user.id)
+          .single();
+
+        if (!liabilityError && liabilityData?.periodical_frequency) {
+          const freq = String(liabilityData.periodical_frequency).toLowerCase().trim();
+          // Map to allowed values only
+          if (freq === 'daily') recurrencePattern = 'daily';
+          else if (freq === 'weekly') recurrencePattern = 'weekly';
+          else if (freq === 'biweekly' || freq === 'bi-weekly') {
+            // biweekly not directly supported, use 'custom' or map to 'weekly' with interval
+            recurrencePattern = 'custom'; // Or could use 'weekly' with interval=2
+          }
+          else if (freq === 'monthly') recurrencePattern = 'monthly';
+          else if (freq === 'bimonthly' || freq === 'bi-monthly') {
+            // bimonthly not directly supported, use 'custom' or map to 'monthly' with interval
+            recurrencePattern = 'custom'; // Or could use 'monthly' with interval=2
+          }
+          else if (freq === 'quarterly') {
+            // quarterly = every 3 months, use 'custom' or map to 'monthly' with interval
+            recurrencePattern = 'custom'; // Or could use 'monthly' with interval=3
+          }
+          else if (freq === 'halfyearly' || freq === 'half-yearly') {
+            // half-yearly = every 6 months, use 'custom' or map to 'monthly' with interval
+            recurrencePattern = 'custom'; // Or could use 'monthly' with interval=6
+          }
+          else if (freq === 'yearly') recurrencePattern = 'yearly';
+          // Default to 'monthly' if unknown
+        }
+      } catch (error) {
+        console.error('Error fetching liability frequency:', error);
+        // Use default 'monthly' - this is required by the constraint
+      }
+
+      // Ensure recurrence_pattern is never null/undefined (required by constraint)
+      // And ensure it's one of the allowed values
+      if (!recurrencePattern || !['daily', 'weekly', 'monthly', 'yearly', 'custom'].includes(recurrencePattern)) {
+        recurrencePattern = 'monthly';
+      }
+
+      // Map periodical_frequency to frequency field (required for non-one_time bills)
+      let frequency: 'daily' | 'weekly' | 'biweekly' | 'monthly' | 'bimonthly' | 'quarterly' | 'halfyearly' | 'yearly' | 'custom' = 'monthly';
+      try {
+        const { data: liabilityData } = await supabase
+          .from('liabilities')
+          .select('periodical_frequency')
+          .eq('id', liabilityId)
+          .eq('user_id', user.id)
+          .single();
+
+        if (liabilityData?.periodical_frequency) {
+          const freq = liabilityData.periodical_frequency.toLowerCase();
+          if (freq === 'daily') frequency = 'daily';
+          else if (freq === 'weekly') frequency = 'weekly';
+          else if (freq === 'biweekly' || freq === 'bi-weekly') frequency = 'biweekly';
+          else if (freq === 'monthly') frequency = 'monthly';
+          else if (freq === 'bimonthly' || freq === 'bi-monthly') frequency = 'bimonthly';
+          else if (freq === 'quarterly') frequency = 'quarterly';
+          else if (freq === 'halfyearly' || freq === 'half-yearly') frequency = 'halfyearly';
+          else if (freq === 'yearly') frequency = 'yearly';
+          else frequency = 'monthly'; // Default
+        }
+      } catch (error) {
+        console.error('Error fetching liability frequency for frequency field:', error);
+        // Use default 'monthly'
+      }
+
       // Create bill with all required fields
+      // IMPORTANT: For bill_type != 'one_time' with parent_bill_id IS NULL, recurrence_pattern is REQUIRED
+      // ALSO REQUIRED: frequency and nature fields for non-one_time bills
+      //
+      // Database structure matches modal:
+      // - amount: Payment Amount (base payment, principal if interest not included, or total if interest included)
+      // - interest_amount: Interest Amount (optional, shown separately in modal)
+      // - interest_included: Whether interest is included in the amount field
+      // - total_amount: Calculated total (amount if included, or amount + interest_amount if not included)
+      // - principal_amount: Principal portion (amount if not included, or amount - interest_amount if included)
+      const billData = {
+        user_id: user.id,
+        title: `${liabilityName} - Payment #${paymentNumber}`,
+        description: null,
+        amount: interestIncluded ? totalAmount : amountValue, // If interest included, amount = total. Otherwise, amount = base payment
+        currency: currency,
+        due_date: dueDateString,
+        original_due_date: dueDateString, // Store original due date
+        status: 'upcoming',
+        bill_type: 'liability_linked' as const,
+        recurrence_pattern: recurrencePattern, // REQUIRED: Must be NOT NULL for non-one_time bills
+        recurrence_interval: 1, // Default interval
+        frequency: frequency, // REQUIRED: Must be NOT NULL for non-one_time bills (constraint: check_recurring_bill_frequency)
+        nature: 'payment' as const, // REQUIRED: Must be NOT NULL for non-one_time bills (constraint: check_recurring_bill_nature)
+        liability_id: liabilityId,
+        linked_account_id: linkedAccountId,
+        interest_amount: interestValue > 0 ? interestValue : null, // Store interest amount (null if 0 or not provided)
+        principal_amount: principalAmount, // Principal portion
+        total_amount: totalAmount, // Total amount to pay (calculated)
+        payment_number: paymentNumber,
+        interest_included: interestIncluded,
+        color: '#10B981', // Green for liability bills
+        icon: 'receipt-outline', // Receipt icon
+        reminder_days: [1, 3, 7], // Default reminder days
+        metadata: {
+          source_type: 'liability',
+          payment_amount: amountValue, // Store original payment amount from modal
+          total_amount: totalAmount,
+          interest_included: interestIncluded,
+          created_manually: true,
+        },
+        is_active: true,
+        is_deleted: false,
+        // Explicitly set parent_bill_id to NULL to ensure constraint logic works correctly
+        parent_bill_id: null,
+      };
+
+      // Validate required fields before insert
+      if (!billData.recurrence_pattern) {
+        console.error('recurrence_pattern is missing! This will violate the constraint.');
+        Alert.alert('Error', 'Unable to determine payment frequency. Please try again.');
+        return null;
+      }
+
+      // Debug: Log the bill data being inserted
+      console.log('Creating bill with data:', {
+        bill_type: billData.bill_type,
+        recurrence_pattern: billData.recurrence_pattern,
+        parent_bill_id: billData.parent_bill_id,
+        due_date: billData.due_date,
+      });
+
       const { error: billError } = await supabase
         .from('bills')
-        .insert({
-          user_id: user.id,
-          title: `${liabilityName} - Payment #${paymentNumber}`,
-          description: null,
-          amount: totalAmount, // Total bill amount (payment + interest if not included)
-          currency: currency,
-          due_date: dueDateString,
-          original_due_date: dueDateString, // Store original due date
-          status: 'upcoming',
-          bill_type: 'liability_linked',
-          liability_id: liabilityId,
-          linked_account_id: linkedAccountId,
-          interest_amount: interestValue || 0,
-          principal_amount: principalAmount,
-          payment_number: paymentNumber,
-          interest_included: interestIncluded,
-          color: '#10B981', // Green for liability bills
-          icon: 'receipt-outline', // Receipt icon
-          reminder_days: [1, 3, 7], // Default reminder days
-          metadata: {
-            source_type: 'liability',
-            payment_amount: amountValue, // Store original payment amount
-            total_amount: totalAmount,
-            interest_included: interestIncluded,
-            created_manually: true,
-          },
-          is_active: true,
-          is_deleted: false,
-        });
+        .insert(billData);
 
       if (billError) throw billError;
 
@@ -208,18 +328,54 @@ export default function AddLiabilityBillModal({
         refreshAccountFunds(),
       ]);
 
-      Alert.alert('Success', 'Bill created successfully', [
-        {
-          text: 'OK',
-          onPress: () => {
-            onSuccess?.();
-            handleClose();
-          },
-        },
-      ]);
+      // Get the created bill ID
+      const { data: createdBill } = await supabase
+        .from('bills')
+        .select('id')
+        .eq('liability_id', liabilityId)
+        .eq('payment_number', paymentNumber)
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single();
+
+      if (createdBill) {
+        // Return the bill ID so we can pay it
+        return createdBill.id;
+      }
+      
+      return null;
     } catch (error: any) {
       console.error('Error creating bill:', error);
       Alert.alert('Error', error.message || 'Failed to create bill');
+      throw error;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handlePayNow = async () => {
+    if (!user) return;
+
+    try {
+      setSaving(true);
+      
+      // Create the bill first
+      const billId = await handleSave();
+      
+      if (billId) {
+        // Close this modal
+        handleClose();
+        
+        // Navigate to unified payment modal with the bill
+        router.push(`/modals/unified-payment-modal?bill_id=${billId}&liability_id=${liabilityId}` as any);
+        
+        // Call onSuccess to refresh parent
+        onSuccess?.();
+      }
+    } catch (error: any) {
+      console.error('Error in pay now:', error);
+      // Error already shown in handleSave
     } finally {
       setSaving(false);
     }
@@ -231,11 +387,49 @@ export default function AddLiabilityBillModal({
       // Refresh account funds to ensure we have latest data
       refreshAccountFunds();
       
-      // Set default due date to today or liability start date (whichever is later)
-      const defaultDueDate = getDefaultDueDate();
-      setDueDate(defaultDueDate);
+      // Set prefill data if provided
+      if (prefillAmount !== undefined) {
+        setAmount(prefillAmount.toString());
+      }
       
-      // Set first available account as default if no account selected
+      if (prefillDueDate) {
+        setDueDate(new Date(prefillDueDate));
+      } else {
+        // Set default due date to today or liability start date (whichever is later)
+        const defaultDueDate = getDefaultDueDate();
+        setDueDate(defaultDueDate);
+      }
+      
+      // Fetch liability to get linked_account_id
+      const fetchLiability = async () => {
+        if (!user) return;
+        try {
+          const { data: liabilityData } = await supabase
+            .from('liabilities')
+            .select('linked_account_id')
+            .eq('id', liabilityId)
+            .eq('user_id', user.id)
+            .single();
+          
+          // Set linked account if available
+          if (liabilityData?.linked_account_id && availableAccounts.some(acc => acc.id === liabilityData.linked_account_id)) {
+            setLinkedAccountId(liabilityData.linked_account_id);
+          } else if (availableAccounts.length > 0 && !linkedAccountId) {
+            // Set first available account as default if no account selected
+            setLinkedAccountId(availableAccounts[0].id);
+          }
+        } catch (error) {
+          console.error('Error fetching liability:', error);
+          // Fallback to first available account
+          if (availableAccounts.length > 0 && !linkedAccountId) {
+            setLinkedAccountId(availableAccounts[0].id);
+          }
+        }
+      };
+      
+      fetchLiability();
+      
+      // Set first available account as default if no account selected and no liability account
       if (availableAccounts.length > 0 && !linkedAccountId) {
         setLinkedAccountId(availableAccounts[0].id);
       } else if (availableAccounts.length === 0 && linkedAccountId) {
@@ -370,12 +564,16 @@ export default function AddLiabilityBillModal({
                     onChange={(event, selectedDate) => {
                       if (Platform.OS === 'android') {
                         setShowDatePicker(false);
-                      }
-                      if (selectedDate) {
-                        setDueDate(selectedDate);
-                        if (Platform.OS === 'ios') {
-                          setShowDatePicker(false);
+                        // On Android, only update if user actually selected a date (not cancelled)
+                        if (event.type === 'set' && selectedDate) {
+                          setDueDate(selectedDate);
                         }
+                      } else {
+                        // On iOS
+                        if (selectedDate) {
+                          setDueDate(selectedDate);
+                        }
+                        setShowDatePicker(false);
                       }
                     }}
                   />
@@ -393,9 +591,10 @@ export default function AddLiabilityBillModal({
                   <View style={styles.accountList}>
                     {availableAccounts.map((account) => {
                         const fundSummary = getFundSummary(account.id);
-                        // Personal funds = spendable funds minus borrowed (liability) funds
-                        // Since borrowed funds are spendable, we subtract them to get personal funds
-                        const personalFunds = Math.max(0, fundSummary.spendable - (fundSummary.borrowed || 0));
+                        // Personal funds = Account Balance - (Sum of Borrowed Funds) - (Sum of Goal Funds)
+                        // Personal funds are NOT stored in account_funds - they're calculated
+                        const accountBalance = typeof account.balance === 'string' ? parseFloat(account.balance) : account.balance ?? 0;
+                        const personalFunds = Math.max(0, accountBalance - (fundSummary.borrowed || 0) - (fundSummary.goal || 0));
                         const hasLiabilityFunds = (fundSummary.borrowed || 0) > 0;
                         
                         return (
@@ -512,13 +711,28 @@ export default function AddLiabilityBillModal({
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.createButton, (saving || !amount || !linkedAccountId) && styles.createButtonDisabled]}
-                onPress={handleSave}
+                onPress={async () => {
+                  try {
+                    await handleSave();
+                    Alert.alert('Success', 'Bill created successfully', [
+                      {
+                        text: 'OK',
+                        onPress: () => {
+                          onSuccess?.();
+                          handleClose();
+                        },
+                      },
+                    ]);
+                  } catch (error) {
+                    // Error already handled in handleSave
+                  }
+                }}
                 disabled={saving || !amount || !linkedAccountId}
               >
                 {saving ? (
                   <ActivityIndicator color="#FFFFFF" />
                 ) : (
-                  <Text style={styles.createButtonText}>Save Bill</Text>
+                  <Text style={styles.createButtonText}>Create Bill</Text>
                 )}
               </TouchableOpacity>
             </View>
@@ -748,7 +962,7 @@ const styles = StyleSheet.create({
     color: '#000000',
   },
   createButton: {
-    flex: 2,
+    flex: 1,
     paddingVertical: 16,
     borderRadius: 12,
     backgroundColor: '#10B981',
@@ -759,6 +973,22 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
   createButtonText: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  payNowButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 16,
+    borderRadius: 12,
+    backgroundColor: '#000000',
+  },
+  payNowButtonText: {
     fontSize: 16,
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',

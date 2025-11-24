@@ -235,7 +235,30 @@ export const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible, onClose
         description: `${formData.name} budget has been created successfully`,
       });
 
-      handleClose();
+      // Reset form but keep modal open
+      // Note: handleClose resets form, but we want to keep modal open
+      // So we'll reset manually without closing
+      setCurrentStep(1);
+      setBudgetType(null);
+      setFormData({
+        name: '',
+        amount: '',
+        startDate: '',
+        endDate: '',
+        categoryId: '',
+        goalId: '',
+        accountIds: [],
+        recurringBudget: false,
+        recurrencePattern: 'monthly',
+        budgetMode: 'spend_cap',
+        goalSubtype: '',
+        alertThresholds: [50, 75, 90],
+        paceAlerts: false,
+        progressAlerts: false,
+        endOfPeriodAlerts: false,
+      });
+      
+      // Modal stays open - user can add another budget
     } catch (error) {
       console.error('Error creating budget:', error);
       showNotification({

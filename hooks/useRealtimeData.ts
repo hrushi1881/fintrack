@@ -312,43 +312,49 @@ export const useRealtimeData = () => {
         return;
       }
 
-      const normalized = (fundsData || []).map((fund: any) => {
-        const fundType = normalizeFundType(fund?.fund_type ?? fund?.type);
-        const balance = parseNumeric(fund?.balance);
-        const derivedName = deriveFundName(fundType, fund);
-        const currency =
-          fund?.currency ??
-          fund?.metadata?.currency ??
-          fund?.account?.currency ??
-          null;
-        const referenceId = fund?.reference_id ?? null;
-        const linkedGoalId =
-          fund?.linked_goal_id ??
-          (fundType === 'goal' ? referenceId ?? fund?.metadata?.goal_id ?? null : null);
-        const linkedLiabilityId =
-          fund?.linked_liability_id ??
-          (fundType === 'borrowed'
-            ? referenceId ?? fund?.metadata?.liability_id ?? null
-            : null);
+      const normalized = (fundsData || [])
+        .filter((fund: any) => {
+          // Filter out personal funds - they are calculated dynamically, not stored
+          const fundType = normalizeFundType(fund?.fund_type ?? fund?.type);
+          return fundType !== 'personal';
+        })
+        .map((fund: any) => {
+          const fundType = normalizeFundType(fund?.fund_type ?? fund?.type);
+          const balance = parseNumeric(fund?.balance);
+          const derivedName = deriveFundName(fundType, fund);
+          const currency =
+            fund?.currency ??
+            fund?.metadata?.currency ??
+            fund?.account?.currency ??
+            null;
+          const referenceId = fund?.reference_id ?? null;
+          const linkedGoalId =
+            fund?.linked_goal_id ??
+            (fundType === 'goal' ? referenceId ?? fund?.metadata?.goal_id ?? null : null);
+          const linkedLiabilityId =
+            fund?.linked_liability_id ??
+            (fundType === 'borrowed'
+              ? referenceId ?? fund?.metadata?.liability_id ?? null
+              : null);
 
-        return {
-          id: fund.id,
-          account_id: fund.account_id,
-          fund_type: fundType,
-          type: fund?.type,
-          name: derivedName,
-          display_name: fund?.display_name ?? derivedName,
-          balance,
-          currency,
-          spendable: deriveSpendable(fundType, fund),
-          reference_id: referenceId,
-          linked_goal_id: linkedGoalId,
-          linked_liability_id: linkedLiabilityId,
-          metadata: fund?.metadata ?? null,
-          created_at: fund?.created_at,
-          updated_at: fund?.updated_at,
-        } as AccountFund;
-      });
+          return {
+            id: fund.id,
+            account_id: fund.account_id,
+            fund_type: fundType,
+            type: fund?.type,
+            name: derivedName,
+            display_name: fund?.display_name ?? derivedName,
+            balance,
+            currency,
+            spendable: deriveSpendable(fundType, fund),
+            reference_id: referenceId,
+            linked_goal_id: linkedGoalId,
+            linked_liability_id: linkedLiabilityId,
+            metadata: fund?.metadata ?? null,
+            created_at: fund?.created_at,
+            updated_at: fund?.updated_at,
+          } as AccountFund;
+        });
 
       setAccountFunds(normalized);
     } catch (error) {

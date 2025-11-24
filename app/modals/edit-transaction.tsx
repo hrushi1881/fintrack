@@ -257,14 +257,13 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
 
       if (error) throw error;
 
-      Alert.alert('Success', 'Transaction updated successfully!', [
-        { text: 'OK', onPress: async () => {
           // Global refresh to update all data
           await globalRefresh();
           onSuccess();
-          onClose();
-        }}
-      ]);
+      
+      Alert.alert('Success', 'Transaction updated successfully!');
+      
+      // Modal stays open - user can continue editing if needed
 
     } catch (error) {
       console.error('Error updating transaction:', error);
@@ -295,14 +294,13 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
 
               if (error) throw error;
 
-              Alert.alert('Success', 'Transaction deleted successfully!', [
-                { text: 'OK', onPress: async () => {
                   // Global refresh to update all data
                   await globalRefresh();
                   onSuccess();
-                  onClose();
-                }}
-              ]);
+              
+              Alert.alert('Success', 'Transaction deleted successfully!');
+              
+              // Modal stays open - user can continue if needed
             } catch (error) {
               console.error('Error deleting transaction:', error);
               Alert.alert('Error', 'Failed to delete transaction. Please try again.');

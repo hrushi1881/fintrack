@@ -54,6 +54,7 @@ export default function RootLayout() {
                       <Stack.Screen name="modals/add-liability" options={{ headerShown: false }} />
                       <Stack.Screen name="modals/add-goal" options={{ headerShown: false }} />
                       <Stack.Screen name="modals/add-bill" options={{ headerShown: false }} />
+                      <Stack.Screen name="modals/add-recurring-transaction" options={{ headerShown: false }} />
                       <Stack.Screen name="modals/add-account" options={{ headerShown: false }} />
                       <Stack.Screen name="modals/add-budget" options={{ headerShown: false }} />
                       <Stack.Screen name="modals/add-category" options={{ headerShown: false }} />

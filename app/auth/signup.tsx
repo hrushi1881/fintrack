@@ -1,19 +1,18 @@
 import React, { useState } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, TextInput, SafeAreaView, StatusBar, Alert, KeyboardAvoidingView, Platform, ScrollView } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
 
 export default function SignUpScreen() {
   const { signUp } = useAuth();
+  const [selectedProvider, setSelectedProvider] = useState<'email' | 'google' | 'gmail' | null>(null);
   const [formData, setFormData] = useState({
     firstName: '',
     lastName: '',
     email: '',
     password: '',
     confirmPassword: '',
-    phone: '',
   });
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
@@ -25,7 +24,7 @@ export default function SignUpScreen() {
   };
 
   const validateForm = () => {
-    const { firstName, lastName, email, password, confirmPassword, phone } = formData;
+    const { firstName, lastName, email, password, confirmPassword } = formData;
     
     if (!firstName || !lastName || !email || !password || !confirmPassword) {
       Alert.alert('Error', 'Please fill in all required fields');
@@ -66,15 +65,14 @@ export default function SignUpScreen() {
       const { error } = await signUp(formData.email, formData.password, {
         firstName: formData.firstName,
         lastName: formData.lastName,
-        phone: formData.phone,
       });
       
       if (error) {
         console.error('Sign up error:', error);
         Alert.alert('Sign Up Failed', error.message || 'Unable to create account. Please try again.');
       } else {
-        // Navigate directly to account setup
-        router.replace('/account-setup');
+        // Navigate to onboarding
+        router.replace('/onboarding');
       }
     } catch (error: any) {
       console.error('Unexpected sign up error:', error);
@@ -84,16 +82,86 @@ export default function SignUpScreen() {
     }
   };
 
-  const handleSocialSignUp = (provider: string) => {
-    Alert.alert('Social Sign Up', `${provider} sign-up would be implemented here`);
+  const handleSocialSignUp = (provider: 'google' | 'gmail') => {
+    setSelectedProvider(provider);
+    Alert.alert('Social Sign Up', `${provider === 'google' ? 'Google' : 'Gmail'} sign-up would be implemented here`);
+    // TODO: Implement Google/Gmail OAuth
   };
 
+  // Show provider selection screen if not selected
+  if (!selectedProvider && !formData.email) {
+    return (
+      <View style={styles.container}>
+        <StatusBar barStyle="dark-content" backgroundColor="#FFF0F0" />
+        <SafeAreaView style={styles.safeArea}>
+          <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
+            {/* Header */}
+            <View style={styles.header}>
+              <TouchableOpacity 
+                style={styles.backButton}
+                onPress={() => router.back()}
+              >
+                <Ionicons name="chevron-back" size={20} color="#FFFFFF" />
+              </TouchableOpacity>
+            </View>
+
+            {/* Title */}
+            <View style={styles.titleSection}>
+              <Text style={styles.mainTitle}>WELCOME TO FINTRACK</Text>
+            </View>
+
+            {/* Provider Selection */}
+            <View style={styles.providerSection}>
+              <Text style={styles.providerLabel}>Choose sign up method</Text>
+              
+              <TouchableOpacity 
+                style={styles.providerButton}
+                onPress={() => handleSocialSignUp('google')}
+              >
+                <Text style={styles.providerButtonText}>Google</Text>
+                <Ionicons name="chevron-forward" size={20} color="#FFFFFF" />
+              </TouchableOpacity>
+
+              <TouchableOpacity 
+                style={styles.providerButton}
+                onPress={() => handleSocialSignUp('gmail')}
+              >
+                <Text style={styles.providerButtonText}>Gmail</Text>
+                <Ionicons name="chevron-forward" size={20} color="#FFFFFF" />
+              </TouchableOpacity>
+
+              <View style={styles.dividerContainer}>
+                <View style={styles.dividerLine} />
+                <Text style={styles.dividerText}>or</Text>
+                <View style={styles.dividerLine} />
+              </View>
+
+              <TouchableOpacity 
+                style={styles.providerButton}
+                onPress={() => setSelectedProvider('email')}
+              >
+                <Text style={styles.providerButtonText}>Continue with Email</Text>
+                <Ionicons name="chevron-forward" size={20} color="#FFFFFF" />
+              </TouchableOpacity>
+            </View>
+
+            {/* Sign In Link */}
+            <View style={styles.signInContainer}>
+              <Text style={styles.signInText}>Already have an account? </Text>
+              <TouchableOpacity onPress={() => router.push('/auth/signin')}>
+                <Text style={styles.signInLink}>Sign In</Text>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
+        </SafeAreaView>
+      </View>
+    );
+  }
+
+  // Show email sign up form
   return (
-    <LinearGradient
-      colors={['#99D795', '#99D795', '#99D795']}
-      style={styles.container}
-    >
-      <StatusBar barStyle="light-content" backgroundColor="#99D795" />
+    <View style={styles.container}>
+      <StatusBar barStyle="dark-content" backgroundColor="#FFF0F0" />
       <SafeAreaView style={styles.safeArea}>
         <KeyboardAvoidingView 
           style={styles.keyboardView}
@@ -104,19 +172,18 @@ export default function SignUpScreen() {
             <View style={styles.header}>
               <TouchableOpacity 
                 style={styles.backButton}
-                onPress={() => router.back()}
+                onPress={() => {
+                  setSelectedProvider(null);
+                  setFormData({ firstName: '', lastName: '', email: '', password: '', confirmPassword: '' });
+                }}
               >
-                <Ionicons name="arrow-back" size={24} color="white" />
+                <Ionicons name="chevron-back" size={20} color="#FFFFFF" />
               </TouchableOpacity>
             </View>
 
-            {/* Logo and Welcome */}
-            <View style={styles.logoSection}>
-              <View style={styles.logoContainer}>
-                <Ionicons name="wallet" size={40} color="white" />
-              </View>
-              <Text style={styles.welcomeTitle}>Create Account</Text>
-              <Text style={styles.welcomeSubtitle}>Join FinTrack and take control of your finances</Text>
+            {/* Title */}
+            <View style={styles.titleSection}>
+              <Text style={styles.mainTitle}>CREATE ACCOUNT</Text>
             </View>
 
             {/* Sign Up Form */}
@@ -124,79 +191,53 @@ export default function SignUpScreen() {
               {/* Name Fields */}
               <View style={styles.nameRow}>
                 <View style={styles.nameField}>
-                  <Text style={styles.inputLabel}>First Name</Text>
-                  <View style={styles.inputWrapper}>
-                    <Ionicons name="person" size={20} color="#9CA3AF" style={styles.inputIcon} />
-                    <TextInput
-                      style={styles.textInput}
-                      placeholder="First name"
-                      placeholderTextColor="#9CA3AF"
-                      value={formData.firstName}
-                      onChangeText={(value) => handleInputChange('firstName', value)}
-                      autoCapitalize="words"
-                    />
-                  </View>
+                  <Text style={styles.inputLabel}>FIRST NAME</Text>
+                  <TextInput
+                    style={styles.textInput}
+                    placeholder="First name"
+                    placeholderTextColor="#666666"
+                    value={formData.firstName}
+                    onChangeText={(value) => handleInputChange('firstName', value)}
+                    autoCapitalize="words"
+                  />
                 </View>
 
                 <View style={styles.nameField}>
-                  <Text style={styles.inputLabel}>Last Name</Text>
-                  <View style={styles.inputWrapper}>
-                    <Ionicons name="person" size={20} color="#9CA3AF" style={styles.inputIcon} />
-                    <TextInput
-                      style={styles.textInput}
-                      placeholder="Last name"
-                      placeholderTextColor="#9CA3AF"
-                      value={formData.lastName}
-                      onChangeText={(value) => handleInputChange('lastName', value)}
-                      autoCapitalize="words"
-                    />
-                  </View>
+                  <Text style={styles.inputLabel}>LAST NAME</Text>
+                  <TextInput
+                    style={styles.textInput}
+                    placeholder="Last name"
+                    placeholderTextColor="#666666"
+                    value={formData.lastName}
+                    onChangeText={(value) => handleInputChange('lastName', value)}
+                    autoCapitalize="words"
+                  />
                 </View>
               </View>
 
               {/* Email */}
               <View style={styles.inputContainer}>
-                <Text style={styles.inputLabel}>Email Address</Text>
-                <View style={styles.inputWrapper}>
-                  <Ionicons name="mail" size={20} color="#9CA3AF" style={styles.inputIcon} />
-                  <TextInput
-                    style={styles.textInput}
-                    placeholder="Enter your email"
-                    placeholderTextColor="#9CA3AF"
-                    value={formData.email}
-                    onChangeText={(value) => handleInputChange('email', value)}
-                    keyboardType="email-address"
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                  />
-                </View>
-              </View>
-
-              {/* Phone */}
-              <View style={styles.inputContainer}>
-                <Text style={styles.inputLabel}>Phone Number (Optional)</Text>
-                <View style={styles.inputWrapper}>
-                  <Ionicons name="call" size={20} color="#9CA3AF" style={styles.inputIcon} />
-                  <TextInput
-                    style={styles.textInput}
-                    placeholder="Enter your phone number"
-                    placeholderTextColor="#9CA3AF"
-                    value={formData.phone}
-                    onChangeText={(value) => handleInputChange('phone', value)}
-                    keyboardType="phone-pad"
-                  />
-                </View>
+                <Text style={styles.inputLabel}>EMAIL</Text>
+                <TextInput
+                  style={styles.textInput}
+                  placeholder="Enter your email"
+                  placeholderTextColor="#666666"
+                  value={formData.email}
+                  onChangeText={(value) => handleInputChange('email', value)}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                />
               </View>
 
               {/* Password */}
               <View style={styles.inputContainer}>
-                <Text style={styles.inputLabel}>Password</Text>
-                <View style={styles.inputWrapper}>
-                  <Ionicons name="lock-closed" size={20} color="#9CA3AF" style={styles.inputIcon} />
+                <Text style={styles.inputLabel}>PASSWORD</Text>
+                <View style={styles.passwordWrapper}>
                   <TextInput
-                    style={styles.textInput}
+                    style={styles.passwordInput}
                     placeholder="Create a password"
-                    placeholderTextColor="#9CA3AF"
+                    placeholderTextColor="#666666"
                     value={formData.password}
                     onChangeText={(value) => handleInputChange('password', value)}
                     secureTextEntry={!showPassword}
@@ -208,7 +249,7 @@ export default function SignUpScreen() {
                     <Ionicons 
                       name={showPassword ? "eye-off" : "eye"} 
                       size={20} 
-                      color="#9CA3AF" 
+                      color="#666666" 
                     />
                   </TouchableOpacity>
                 </View>
@@ -216,13 +257,12 @@ export default function SignUpScreen() {
 
               {/* Confirm Password */}
               <View style={styles.inputContainer}>
-                <Text style={styles.inputLabel}>Confirm Password</Text>
-                <View style={styles.inputWrapper}>
-                  <Ionicons name="lock-closed" size={20} color="#9CA3AF" style={styles.inputIcon} />
+                <Text style={styles.inputLabel}>CONFIRM PASSWORD</Text>
+                <View style={styles.passwordWrapper}>
                   <TextInput
-                    style={styles.textInput}
+                    style={styles.passwordInput}
                     placeholder="Confirm your password"
-                    placeholderTextColor="#9CA3AF"
+                    placeholderTextColor="#666666"
                     value={formData.confirmPassword}
                     onChangeText={(value) => handleInputChange('confirmPassword', value)}
                     secureTextEntry={!showConfirmPassword}
@@ -234,7 +274,7 @@ export default function SignUpScreen() {
                     <Ionicons 
                       name={showConfirmPassword ? "eye-off" : "eye"} 
                       size={20} 
-                      color="#9CA3AF" 
+                      color="#666666" 
                     />
                   </TouchableOpacity>
                 </View>
@@ -247,7 +287,7 @@ export default function SignUpScreen() {
               >
                 <View style={styles.checkboxContainer}>
                   <View style={[styles.checkbox, acceptTerms && styles.checkboxChecked]}>
-                    {acceptTerms && <Ionicons name="checkmark" size={16} color="white" />}
+                    {acceptTerms && <Ionicons name="checkmark" size={16} color="#FFFFFF" />}
                   </View>
                   <Text style={styles.termsText}>
                     I agree to the{' '}
@@ -263,37 +303,10 @@ export default function SignUpScreen() {
                 onPress={handleSignUp}
                 disabled={isLoading}
               >
-                {isLoading ? (
-                  <Text style={styles.signUpButtonText}>Creating Account...</Text>
-                ) : (
-                  <Text style={styles.signUpButtonText}>Create Account</Text>
-                )}
-              </TouchableOpacity>
-            </View>
-
-            {/* Divider */}
-            <View style={styles.dividerContainer}>
-              <View style={styles.dividerLine} />
-              <Text style={styles.dividerText}>or continue with</Text>
-              <View style={styles.dividerLine} />
-            </View>
-
-            {/* Social Sign Up */}
-            <View style={styles.socialContainer}>
-              <TouchableOpacity 
-                style={styles.socialButton}
-                onPress={() => handleSocialSignUp('Google')}
-              >
-                <Ionicons name="logo-google" size={24} color="#DB4437" />
-                <Text style={styles.socialButtonText}>Google</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity 
-                style={styles.socialButton}
-                onPress={() => handleSocialSignUp('Apple')}
-              >
-                <Ionicons name="logo-apple" size={24} color="white" />
-                <Text style={styles.socialButtonText}>Apple</Text>
+                <Text style={styles.signUpButtonText}>
+                  {isLoading ? 'Creating Account...' : 'Create Account'}
+                </Text>
+                <Ionicons name="chevron-forward" size={20} color="#FFFFFF" style={styles.buttonChevron} />
               </TouchableOpacity>
             </View>
 
@@ -307,13 +320,14 @@ export default function SignUpScreen() {
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
-    </LinearGradient>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#FFF0F0',
   },
   safeArea: {
     flex: 1,
@@ -328,39 +342,71 @@ const styles = StyleSheet.create({
   header: {
     paddingTop: 20,
     paddingBottom: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   backButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#000000',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  logoSection: {
+  titleSection: {
+    marginBottom: 40,
     alignItems: 'center',
+  },
+  mainTitle: {
+    fontSize: 28,
+    fontWeight: '900',
+    color: '#000000',
+    fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
+    letterSpacing: -0.5,
+  },
+  providerSection: {
     marginBottom: 32,
   },
-  logoContainer: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  welcomeTitle: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: 'white',
-    marginBottom: 8,
-  },
-  welcomeSubtitle: {
+  providerLabel: {
     fontSize: 16,
-    color: 'rgba(255, 255, 255, 0.8)',
+    color: '#000000',
+    fontFamily: 'InstrumentSerif-Regular',
+    marginBottom: 20,
     textAlign: 'center',
-    lineHeight: 22,
+  },
+  providerButton: {
+    backgroundColor: '#000000',
+    borderRadius: 50,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+    minHeight: 56,
+  },
+  providerButtonText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-Bold',
+  },
+  dividerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 24,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#000000',
+    opacity: 0.2,
+  },
+  dividerText: {
+    fontSize: 14,
+    color: '#000000',
+    marginHorizontal: 16,
+    fontFamily: 'InstrumentSerif-Regular',
   },
   formContainer: {
     marginBottom: 32,
@@ -368,44 +414,54 @@ const styles = StyleSheet.create({
   nameRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 20,
+    marginBottom: 24,
   },
   nameField: {
     flex: 1,
     marginHorizontal: 4,
   },
   inputContainer: {
-    marginBottom: 20,
+    marginBottom: 24,
   },
   inputLabel: {
     fontSize: 14,
     fontWeight: '600',
-    color: 'white',
+    color: '#000000',
     marginBottom: 8,
+    fontFamily: 'Poppins-SemiBold',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
-  inputWrapper: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  textInput: {
+    backgroundColor: '#2E2E2E',
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    fontSize: 16,
+    color: '#FFFFFF',
+    fontFamily: 'InstrumentSerif-Regular',
+    minHeight: 52,
   },
-  inputIcon: {
-    marginRight: 12,
+  passwordWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#2E2E2E',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    minHeight: 52,
   },
-  textInput: {
+  passwordInput: {
     flex: 1,
     fontSize: 16,
-    color: 'white',
+    color: '#FFFFFF',
+    fontFamily: 'InstrumentSerif-Regular',
+    paddingVertical: 16,
   },
   eyeButton: {
     padding: 4,
   },
   termsContainer: {
-    marginBottom: 24,
+    marginBottom: 32,
   },
   checkboxContainer: {
     flexDirection: 'row',
@@ -416,98 +472,69 @@ const styles = StyleSheet.create({
     height: 20,
     borderRadius: 4,
     borderWidth: 2,
-    borderColor: 'rgba(255, 255, 255, 0.3)',
+    borderColor: '#000000',
     marginRight: 12,
     justifyContent: 'center',
     alignItems: 'center',
+    marginTop: 2,
   },
   checkboxChecked: {
-    backgroundColor: '#10B981',
-    borderColor: '#10B981',
+    backgroundColor: '#000000',
+    borderColor: '#000000',
   },
   termsText: {
     flex: 1,
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.8)',
+    color: '#000000',
+    fontFamily: 'InstrumentSerif-Regular',
     lineHeight: 20,
   },
   termsLink: {
-    color: '#10B981',
-    fontWeight: '600',
+    color: '#000000',
+    fontWeight: 'bold',
+    fontFamily: 'Poppins-Bold',
+    textDecorationLine: 'underline',
   },
   signUpButton: {
-    backgroundColor: '#10B981',
-    borderRadius: 12,
+    backgroundColor: '#000000',
+    borderRadius: 50,
     paddingVertical: 16,
+    paddingHorizontal: 24,
+    flexDirection: 'row',
     alignItems: 'center',
-    shadowColor: '#10B981',
-    shadowOffset: {
-      width: 0,
-      height: 4,
-    },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 8,
+    justifyContent: 'center',
+    minHeight: 56,
   },
   signUpButtonDisabled: {
-    backgroundColor: 'rgba(16, 185, 129, 0.6)',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
   },
   signUpButtonText: {
     fontSize: 16,
     fontWeight: 'bold',
-    color: 'white',
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-Bold',
+    marginRight: 8,
   },
-  dividerContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 32,
-  },
-  dividerLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-  },
-  dividerText: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.6)',
-    marginHorizontal: 16,
-  },
-  socialContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 32,
-  },
-  socialButton: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    paddingVertical: 16,
-    marginHorizontal: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.1)',
-  },
-  socialButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
-    marginLeft: 8,
+  buttonChevron: {
+    marginLeft: 4,
   },
   signInContainer: {
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
+    marginTop: 32,
     marginBottom: 40,
   },
   signInText: {
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.8)',
+    color: '#000000',
+    fontFamily: 'InstrumentSerif-Regular',
   },
   signInLink: {
     fontSize: 14,
-    color: '#10B981',
+    color: '#000000',
     fontWeight: 'bold',
+    fontFamily: 'Poppins-Bold',
+    textDecorationLine: 'underline',
   },
 });

@@ -117,10 +117,11 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
     if (visible && user) {
       fetchAccounts();
       fetchCategories();
-      // Also refresh accounts from realtime data
+      // Also refresh accounts and account funds from realtime data
       refreshAccounts();
+      refreshAccountFunds();
     }
-  }, [visible, user, refreshAccounts]);
+  }, [visible, user, refreshAccounts, refreshAccountFunds]);
 
   // Sync local accounts with realtime accounts (use realtimeAccounts as primary source)
   useEffect(() => {
@@ -156,18 +157,20 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
   const accountHasFunds = useMemo(() => {
     if (!account) return false;
     const funds = getFundsForAccount(account, { includeLocked: true });
-    // Check if account has ANY funds (personal, borrowed, goal, reserved, sinking)
+    // Check if account has ANY funds (borrowed, goal, reserved, sinking) - personal is calculated, not stored
     return funds.length > 0;
   }, [account, getFundsForAccount, accountFunds]);
 
   // Check if account has any non-personal funds (for showing fund picker)
+  // Personal funds are always available (calculated), so we check for borrowed/liability funds
   const accountHasOtherFunds = useMemo(() => {
     if (!account) return false;
     const funds = getFundsForAccount(account, { includeLocked: true });
-    // Check if account has any non-personal funds (borrowed, goal, reserved, sinking) with balance > 0
+    // Check if account has any borrowed/liability funds with balance > 0 (for payments)
+    // Goal funds are excluded from payments, so we only check for borrowed funds
     return funds.some(
       (fund) =>
-        fund.fund_type !== 'personal' &&
+        (fund.fund_type === 'borrowed' || fund.fund_type === 'liability') &&
         (typeof fund.balance === 'string' ? parseFloat(fund.balance) : fund.balance || 0) > 0
     );
   }, [account, getFundsForAccount, accountFunds]);
@@ -180,36 +183,18 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
       return;
     }
 
-    // Reset fund bucket when account changes
-    setSelectedFundBucket(null);
-
-    // Check if account has any funds in account_funds table
-    if (!accountHasFunds) {
-      // No funds in account_funds: account might be new or not initialized
-      // Default to personal fund (RPC will handle creating it if needed)
-      setSelectedFundBucket({
-        type: 'personal',
-        id: 'personal',
-        name: 'Personal Funds',
-        amount: 0,
-        spendable: true,
-      });
-      setShowFundPicker(false);
-    } else if (!accountHasOtherFunds) {
-      // Has funds but only personal: default to personal fund, don't show picker
-      setSelectedFundBucket({
-        type: 'personal',
-        id: 'personal',
-        name: 'Personal Funds',
-        amount: 0,
-        spendable: true,
-      });
-      setShowFundPicker(false);
-    } else {
-      // Has other funds: show picker for user to choose
-      // Don't auto-open picker, let user click to open it
-      setShowFundPicker(false);
-    }
+    // Always default to Personal Funds when account changes
+    // User can change it via the fund picker if other funds exist
+    const personalFund = {
+      type: 'personal' as const,
+      id: 'personal',
+      name: 'Personal Funds',
+      amount: 0,
+      spendable: true,
+    };
+    
+    setSelectedFundBucket(personalFund);
+    setShowFundPicker(false);
   }, [account, accountHasFunds, accountHasOtherFunds]);
 
 
@@ -309,10 +294,12 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
       const amountValue = parseFloat(amount);
       const selectedCategory = categories.find((cat) => cat.id === category);
       const categoryName = selectedCategory?.name || null;
+      const categoryId = selectedCategory?.id || null;
 
-      // If no fund bucket selected but account has no funds or only personal funds, default to personal
+      // Always default to Personal Funds if no fund bucket is selected
+      // This should rarely happen since we auto-select Personal Funds when account changes
       let fundBucket = selectedFundBucket;
-      if (!fundBucket && (!accountHasFunds || !accountHasOtherFunds)) {
+      if (!fundBucket) {
         fundBucket = {
           type: 'personal',
           id: 'personal',
@@ -320,10 +307,6 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
           amount: 0,
           spendable: true,
         };
-      }
-
-      if (!fundBucket) {
-        throw new Error('No fund source selected');
       }
 
       const bucketParam = {
@@ -339,7 +322,7 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
         p_account_id: account,
         p_bucket: bucketParam,
         p_amount: amountValue,
-        p_category: categoryName,
+        p_category: categoryId || categoryName, // Pass UUID if available, fallback to name
         p_description: description.trim() || categoryName || 'Payment',
         p_date: date.toISOString().split('T')[0],
         p_currency: currency,
@@ -390,7 +373,7 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
       await globalRefresh();
       onSuccess?.();
       
-      // Reset form
+      // Reset form but keep modal open
       setAmount('');
       setDescription('');
       setCategory('');
@@ -400,7 +383,9 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
       setSelectedFundBucket(null);
       setErrors({});
       setShowNoteInput(false);
-      onClose();
+      setShowAmountInput(true);
+      
+      // Modal stays open - user can add another transaction
     } catch (error) {
       console.error('Error creating transaction:', error);
       Alert.alert('Error', 'Failed to record payment. Please try again.');
@@ -627,8 +612,8 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
                 {!showNoteInput && <Ionicons name="chevron-forward" size={18} color="#9AA88B" />}
                   </TouchableOpacity>
 
-              {/* Fund Source - Show picker if account has other funds besides personal */}
-              {account && accountHasFunds && accountHasOtherFunds && (
+              {/* Fund Source - Always show picker if account has other funds (borrowed/liability) */}
+              {account && accountHasOtherFunds && (
                   <TouchableOpacity
                   style={styles.detailRow}
                     onPress={() => setShowFundPicker(true)}
@@ -640,7 +625,8 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
                   <Ionicons name="chevron-forward" size={18} color="#9AA88B" />
                   </TouchableOpacity>
                 )}
-              {account && (!accountHasFunds || !accountHasOtherFunds) && (
+              {/* Show static "Personal Funds" only if no other funds exist */}
+              {account && !accountHasOtherFunds && (
                 <View style={styles.detailRow}>
                   <Ionicons name="wallet-outline" size={20} color="#1F3A24" />
                   <Text style={styles.detailText}>Personal Funds</Text>
@@ -680,8 +666,8 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
             </View>
 
 
-        {/* Fund Picker Modal - Only show if account has funds and other funds besides personal */}
-        {accountHasFunds && accountHasOtherFunds && (
+        {/* Fund Picker Modal - Show if account has other funds (borrowed/liability) */}
+        {account && accountHasOtherFunds && (
       <FundPicker
         visible={showFundPicker}
         onClose={() => setShowFundPicker(false)}
@@ -689,6 +675,7 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
             amount={amountValue}
             excludeGoalFunds={true} // Goal funds cannot be used for payments
             allowGoalFunds={false}
+            excludeBorrowedFunds={false} // Allow borrowed funds for payments
         onSelect={(bucket) => {
           setSelectedFundBucket(bucket);
           setShowFundPicker(false);

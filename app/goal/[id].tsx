@@ -28,6 +28,8 @@ import {
   withdrawFromGoal,
   getGoalAccounts,
   transferGoalFunds,
+  markGoalComplete,
+  completeGoalWithWithdraw,
 } from '@/utils/goals';
 import { GoalContributionWithTransaction, Account } from '@/types';
 import AddContributionModal from '../modals/add-contribution';
@@ -38,12 +40,13 @@ import ExtendGoalModal from '@/components/ExtendGoalModal';
 import WithdrawFundsModal from '@/components/WithdrawFundsModal';
 import TransferGoalFundsModal from '@/components/TransferGoalFundsModal';
 import { BudgetCard } from '@/components/BudgetCard';
+import GoalCycles from '@/components/cycles/GoalCycles';
 
 const GoalDetailScreen: React.FC = () => {
   const { id } = useLocalSearchParams();
   const { user } = useAuth();
   const { currency } = useSettings();
-  const { goals, budgets, refreshGoals, accounts, globalRefresh } = useRealtimeData();
+  const { goals, budgets, refreshGoals, accounts, globalRefresh, refreshAccountFunds, refreshAccounts } = useRealtimeData();
 
   const goal = useMemo(() => goals.find((item) => item.id === id), [goals, id]);
 
@@ -51,7 +54,7 @@ const GoalDetailScreen: React.FC = () => {
   const [loadingContributions, setLoadingContributions] = useState(false);
   const [goalAccounts, setGoalAccounts] = useState<Array<{ account: Account; balance: number }>>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
-  const [activeTab, setActiveTab] = useState<'transactions' | 'accounts' | 'analytics'>('transactions');
+  const [activeTab, setActiveTab] = useState<'transactions' | 'accounts' | 'analytics' | 'cycles'>('transactions');
   
   const [showAddContribution, setShowAddContribution] = useState(false);
   const [showEditGoal, setShowEditGoal] = useState(false);
@@ -68,64 +71,49 @@ const GoalDetailScreen: React.FC = () => {
   );
 
   const fetchContributions = useCallback(async () => {
-    if (!goal) return;
+    if (!goal?.id) return;
 
     try {
       setLoadingContributions(true);
       const rows = await fetchGoalContributions(goal.id);
       setContributions(rows);
 
-      const { isNewlyAchieved } = await updateGoalProgress(goal.id);
-      if (isNewlyAchieved) {
-          setShowCelebration(true);
-          await refreshGoals();
-        }
-      } catch (error) {
+      // Update goal progress (doesn't auto-complete - manual completion)
+      await updateGoalProgress(goal.id);
+      // Don't call refreshGoals here to prevent flickering - let parent handle refresh
+    } catch (error) {
       console.error('Error fetching goal contributions', error);
     } finally {
       setLoadingContributions(false);
-      }
-  }, [goal, refreshGoals]);
+    }
+  }, [goal?.id]); // Only depend on goal.id
 
-  const fetchGoalAccounts = useCallback(async () => {
-    if (!goal) return;
+  const fetchGoalAccounts = useCallback(async (forceRefresh: boolean = true) => {
+    if (!goal?.id) return;
     
     try {
       setLoadingAccounts(true);
-      const accounts = await getGoalAccounts(goal.id);
+      console.log(`🔄 Fetching goal accounts for goal ${goal.id} (forceRefresh: ${forceRefresh})`);
+      const accounts = await getGoalAccounts(goal.id, forceRefresh);
+      console.log(`✅ Fetched ${accounts.length} goal account(s)`, accounts);
       setGoalAccounts(accounts);
     } catch (error) {
-      console.error('Error fetching goal accounts', error);
+      console.error('❌ Error fetching goal accounts', error);
     } finally {
       setLoadingAccounts(false);
     }
-  }, [goal]);
+  }, [goal?.id]); // Only depend on goal.id
 
   useEffect(() => {
-    if (goal) {
+    if (goal?.id) {
       fetchContributions();
       fetchGoalAccounts();
     }
-  }, [goal, fetchContributions, fetchGoalAccounts]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [goal?.id]); // Only depend on goal.id to prevent infinite loops
 
-  useEffect(() => {
-    if (!goal || goal.is_achieved) return;
-
-    const interval = setInterval(async () => {
-      try {
-        const { isCompleted } = await checkGoalCompletion(goal.id);
-        if (isCompleted) {
-        setShowCelebration(true);
-      await refreshGoals();
-          clearInterval(interval);
-        }
-    } catch (error) {
-        console.error('Error checking goal completion', error);
-      }
-    }, 5000);
-
-    return () => clearInterval(interval);
-  }, [goal, refreshGoals]);
+  // NOTE: Goal completion is MANUAL - user decides when to complete
+  // No auto-completion interval needed
 
   const progress = useMemo(() => {
     if (!goal) return 0;
@@ -156,11 +144,41 @@ const GoalDetailScreen: React.FC = () => {
     ? 'On track'
     : '—';
 
+  // Check if goal can be completed (reached target but not yet marked complete)
+  const canComplete = useMemo(() => {
+    if (!goal) return false;
+    return goal.current_amount >= goal.target_amount && !goal.is_achieved;
+  }, [goal]);
+
   const handleAddContributionSuccess = async () => {
+    console.log('🎯 handleAddContributionSuccess called');
+    
+    // Close modal first
+    setShowAddContribution(false);
+    
+    // Wait a bit for RPC operations to complete
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    // Refresh account funds first (this updates account_funds table)
+    console.log('🔄 Refreshing account funds...');
+    await refreshAccountFunds();
+    
+    // Wait again to ensure refresh completes
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
+    // Then refresh goals and contributions
+    console.log('🔄 Refreshing goals and contributions...');
     await refreshGoals();
     await fetchContributions();
-    await fetchGoalAccounts();
-    setShowAddContribution(false);
+    
+    // Wait one more time to ensure all data is synced
+    await new Promise(resolve => setTimeout(resolve, 200));
+    
+    // Finally fetch goal accounts with fresh data (force refresh)
+    console.log('🔄 Fetching goal accounts with force refresh...');
+    await fetchGoalAccounts(true);
+    
+    console.log('✅ handleAddContributionSuccess completed');
   };
 
   const handleArchiveGoal = async () => {
@@ -194,52 +212,218 @@ const GoalDetailScreen: React.FC = () => {
     amount: number;
     sourceAccountId: string; // Account where goal fund is located
     destinationAccountId: string; // Account where money goes
+    date?: string; // Date of withdrawal
     note?: string;
   }) => {
     if (!goal) return;
     try {
-      await withdrawFromGoal(goal.id, data.amount, data.sourceAccountId, data.destinationAccountId, data.note);
+      await withdrawFromGoal(goal.id, data.amount, data.sourceAccountId, data.destinationAccountId, data.note, data.date);
       await refreshGoals();
       await fetchContributions();
       await fetchGoalAccounts();
       setShowWithdrawFunds(false);
       Alert.alert('Funds withdrawn', `${formatCurrency(data.amount)} moved to your account.`);
+      await globalRefresh();
     } catch (error: any) {
       console.error('Error withdrawing goal funds', error);
       Alert.alert('Error', error.message || 'Withdrawal failed. Try again.');
     }
   };
 
-  const handleDeleteGoal = () => {
+  const handleMarkComplete = async () => {
     if (!goal) return;
-    Alert.alert(
-      'Delete goal?',
-      'This will remove the goal and its history permanently.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-    try {
-              await deleteGoal(goal.id);
-      await refreshGoals();
-              router.back();
-    } catch (error) {
-              console.error('Error deleting goal', error);
-              Alert.alert('Error', 'Failed to delete goal.');
+    
+    if (goal.is_achieved) {
+      Alert.alert('Already Complete', 'This goal is already marked as complete.');
+      return;
     }
+
+    // Check if goal has remaining funds
+    const hasFunds = goalAccounts.length > 0 && goalAccounts.some(ga => ga.balance > 0);
+
+    if (hasFunds) {
+      // Ask user what to do with remaining funds
+      Alert.alert(
+        'Goal Completed! 🎉',
+        `"${goal.title}" is now marked as complete.\n\nYou have ${formatCurrency(goal.current_amount)} in goal funds. What would you like to do?`,
+        [
+          {
+            text: 'Withdraw Funds',
+            onPress: () => {
+              setShowWhatsNext(false);
+              setShowWithdrawFunds(true);
+            },
           },
-        },
-      ]
-    );
+          {
+            text: 'Delete Goal',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await deleteGoal(goal.id);
+                await refreshGoals();
+                await globalRefresh();
+                router.back();
+              } catch (error) {
+                console.error('Error deleting goal', error);
+                Alert.alert('Error', 'Failed to delete goal.');
+              }
+            },
+          },
+          {
+            text: 'Archive Goal',
+            onPress: async () => {
+              try {
+                await archiveGoal(goal.id);
+                await refreshGoals();
+                await globalRefresh();
+                setShowWhatsNext(false);
+                setShowCelebration(true);
+              } catch (error) {
+                console.error('Error archiving goal', error);
+                Alert.alert('Error', 'Failed to archive goal.');
+              }
+            },
+          },
+          {
+            text: 'Keep as Complete',
+            style: 'cancel',
+            onPress: async () => {
+              try {
+                await markGoalComplete(goal.id);
+                await refreshGoals();
+                setShowCelebration(true);
+                setShowWhatsNext(false);
+              } catch (error: any) {
+                console.error('Error marking goal as complete:', error);
+                Alert.alert('Error', error.message || 'Failed to mark goal as complete.');
+              }
+            },
+          },
+        ]
+      );
+    } else {
+      // No funds, just mark as complete
+      try {
+        await markGoalComplete(goal.id);
+        await refreshGoals();
+        await globalRefresh();
+        setShowCelebration(true);
+        setShowWhatsNext(false);
+        Alert.alert('Goal Completed!', `🎉 "${goal.title}" is now marked as complete.`);
+      } catch (error: any) {
+        console.error('Error marking goal as complete:', error);
+        Alert.alert('Error', error.message || 'Failed to mark goal as complete.');
+      }
+    }
   };
 
-  const handleTransferFunds = async (fromAccountId: string, toAccountId: string, amount: number) => {
+  const handleCompleteWithWithdraw = async (destinationAccountId: string, description?: string) => {
+    if (!goal) return;
+
+    if (goal.is_achieved) {
+      Alert.alert('Already Complete', 'This goal is already marked as complete.');
+      return;
+    }
+
+    try {
+      const { transactions } = await completeGoalWithWithdraw(goal.id, destinationAccountId, description);
+      await refreshGoals();
+      await fetchContributions();
+      await fetchGoalAccounts();
+      setShowWhatsNext(false);
+      
+      if (transactions.length > 0) {
+        const totalWithdrawn = transactions.reduce((sum, t) => sum + Math.abs(t.amount), 0);
+        Alert.alert(
+          'Goal Completed!',
+          `🎉 "${goal.title}" is complete!\n\nAll funds (${formatCurrency(totalWithdrawn)}) have been withdrawn to your account.`
+        );
+      } else {
+        Alert.alert('Goal Completed!', `🎉 "${goal.title}" is now marked as complete.`);
+      }
+      
+      setShowCelebration(true);
+    } catch (error: any) {
+      console.error('Error completing goal with withdraw:', error);
+      Alert.alert('Error', error.message || 'Failed to complete goal.');
+    }
+  };
+
+  const handleDeleteGoal = () => {
+    if (!goal) return;
+    
+    // Check if goal has funds first
+    const hasFunds = goalAccounts.length > 0 && goalAccounts.some(ga => ga.balance > 0);
+    const totalFunds = goalAccounts.reduce((sum, ga) => sum + ga.balance, 0);
+    
+    if (hasFunds) {
+      // Goal has funds - ask user what to do
+      Alert.alert(
+        'Goal Has Funds',
+        `This goal has ${formatCurrency(totalFunds)} in funds. What would you like to do?`,
+        [
+          {
+            text: 'Withdraw First',
+            onPress: () => {
+              setShowWithdrawFunds(true);
+            },
+          },
+          {
+            text: 'Delete Anyway',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await deleteGoal(goal.id, true); // Force delete
+                await refreshGoals();
+                await globalRefresh();
+                router.back();
+              } catch (error: any) {
+                console.error('Error deleting goal', error);
+                Alert.alert('Error', error.message || 'Failed to delete goal.');
+              }
+            },
+          },
+          { text: 'Cancel', style: 'cancel' },
+        ]
+      );
+    } else {
+      // No funds - proceed with normal deletion
+      Alert.alert(
+        'Delete goal?',
+        'This will remove the goal and its history permanently.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await deleteGoal(goal.id);
+                await refreshGoals();
+                await globalRefresh();
+                router.back();
+              } catch (error: any) {
+                console.error('Error deleting goal', error);
+                Alert.alert('Error', error.message || 'Failed to delete goal.');
+              }
+            },
+          },
+        ]
+      );
+    }
+  };
+
+  const handleTransferFunds = async (fromAccountId: string, toAccountId: string, amount: number, description?: string) => {
     if (!goal || !user) return;
 
     try {
-      await transferGoalFunds(goal.id, fromAccountId, toAccountId, amount, user.id);
+      await transferGoalFunds(goal.id, {
+        goal_id: goal.id,
+        from_account_id: fromAccountId,
+        to_account_id: toAccountId,
+        amount,
+        description,
+      }, user.id);
       await fetchGoalAccounts();
       await refreshGoals();
       await globalRefresh();
@@ -342,26 +526,38 @@ const GoalDetailScreen: React.FC = () => {
             </View>
 
             <View style={styles.actionsRow}>
-        <TouchableOpacity
-                style={[styles.primaryButton, styles.flexOne]}
-          onPress={() => setShowAddContribution(true)}
-        >
-                <Ionicons name="add" size={16} color="#FFFFFF" />
-                <Text style={styles.primaryButtonText}>Boost Goal</Text>
-              </TouchableOpacity>
+              {canComplete ? (
+                <TouchableOpacity
+                  style={[styles.primaryButton, styles.flexOne, { backgroundColor: '#10B981' }]}
+                  onPress={handleMarkComplete}
+                >
+                  <Ionicons name="checkmark-circle" size={16} color="#FFFFFF" />
+                  <Text style={styles.primaryButtonText}>Mark Complete</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={[styles.primaryButton, styles.flexOne]}
+                  onPress={() => setShowAddContribution(true)}
+                >
+                  <Ionicons name="add" size={16} color="#FFFFFF" />
+                  <Text style={styles.primaryButtonText}>Boost Goal</Text>
+                </TouchableOpacity>
+              )}
               <TouchableOpacity style={styles.secondaryIconButton} onPress={() => setShowWithdrawFunds(true)}>
                 <Ionicons name="arrow-down" size={18} color="#4F6F3E" />
               </TouchableOpacity>
               <TouchableOpacity style={styles.secondaryIconButton} onPress={handleDeleteGoal}>
                 <Ionicons name="trash-outline" size={18} color="#4F6F3E" />
-        </TouchableOpacity>
+              </TouchableOpacity>
             </View>
       </View>
 
           {/* Goal Funds Breakdown Section */}
-          {goalAccounts.length > 0 && (
             <View style={styles.fundsBreakdownSection}>
               <Text style={styles.sectionTitle}>Goal Funds Breakdown</Text>
+            {loadingAccounts ? (
+              <Text style={styles.emptyMessageText}>Loading accounts...</Text>
+            ) : goalAccounts.length > 0 ? (
               <View style={styles.accountCardsContainer}>
                 {goalAccounts.map(({ account, balance }) => (
                   <TouchableOpacity
@@ -381,14 +577,17 @@ const GoalDetailScreen: React.FC = () => {
                   </TouchableOpacity>
                 ))}
                 </View>
-              </View>
+            ) : (
+              <Text style={styles.emptyMessageText}>No accounts with goal funds yet.</Text>
           )}
+          </View>
 
           <View style={styles.tabControl}>
             {[
               { key: 'transactions', label: 'Contributions' },
               { key: 'accounts', label: 'Accounts' },
               { key: 'analytics', label: 'Analytics' },
+              { key: 'cycles', label: 'Cycles' },
             ].map((tab) => (
               <TouchableOpacity
                 key={tab.key}
@@ -520,6 +719,12 @@ const GoalDetailScreen: React.FC = () => {
             </View>
           )}
 
+          {activeTab === 'cycles' && goal && (
+            <View style={styles.cyclesContainer}>
+              <GoalCycles goalId={goal.id} maxCycles={12} />
+            </View>
+          )}
+
           <View style={{ height: 96 }} />
         </ScrollView>
 
@@ -559,6 +764,28 @@ const GoalDetailScreen: React.FC = () => {
             setShowWithdrawFunds(true);
           }}
           onDeleteGoal={handleDeleteGoal}
+          onMarkComplete={handleMarkComplete}
+          onCompleteWithWithdraw={() => {
+            setShowWhatsNext(false);
+            // Show modal to select destination account for withdrawal
+            Alert.alert(
+              'Complete & Withdraw All Funds',
+              'Select an account to withdraw all goal funds to.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                ...(accounts
+                  .filter(acc => {
+                    // Use currency from settings for filtering (account may not have currency property in useRealtimeData)
+                    const accountCurrency = (acc as any).currency || currency;
+                    return accountCurrency === (goal?.currency || currency) && acc.is_active !== false;
+                  })
+                  .map(acc => ({
+                    text: acc.name,
+                    onPress: () => handleCompleteWithWithdraw(acc.id, `Complete goal: ${goal?.title}`),
+                  }))),
+              ]
+            );
+          }}
           goal={goal}
         />
 
@@ -599,8 +826,15 @@ const GoalDetailScreen: React.FC = () => {
             fromAccountId={transferFromAccount}
             goalAccounts={goalAccounts}
             availableAccounts={accounts.filter(
-              acc => acc.currency === goal.currency && (acc.is_active || acc.is_active === null) && acc.id !== transferFromAccount
-            )}
+              acc => {
+                // Use currency from settings for filtering (account may not have currency property in useRealtimeData)
+                const accountCurrency = (acc as any).currency || currency;
+                return accountCurrency === (goal.currency || currency) && (acc.is_active || acc.is_active === null) && acc.id !== transferFromAccount;
+              }
+            ).map(acc => ({
+              ...acc,
+              currency: (acc as any).currency || currency,
+            })) as Account[]}
             onClose={() => {
               setShowTransferFunds(false);
               setTransferFromAccount(null);
@@ -1036,6 +1270,10 @@ const styles = StyleSheet.create({
     fontFamily: 'Poppins-SemiBold',
     color: '#0E401C',
     marginBottom: 8,
+  },
+  cyclesContainer: {
+    marginTop: 12,
+    minHeight: 400,
   },
 });
 

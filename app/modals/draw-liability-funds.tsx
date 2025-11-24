@@ -1,6 +1,17 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, TextInput, Modal, Alert, Platform } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  StyleSheet,
+  Text,
+  View,
+  TouchableOpacity,
+  ScrollView,
+  SafeAreaView,
+  TextInput,
+  Modal,
+  Alert,
+  Platform,
+  ActivityIndicator,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/contexts/AuthContext';
 import { useNotification } from '@/contexts/NotificationContext';
@@ -9,6 +20,10 @@ import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { supabase } from '@/lib/supabase';
 import { formatCurrencyAmount } from '@/utils/currency';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import GlassCard from '@/components/GlassCard';
+import InlineAccountSelector from '@/components/InlineAccountSelector';
+import CategoryPicker from '@/components/CategoryPicker';
+import { getLiabilityAccounts } from '@/utils/liabilityFunds';
 
 interface DrawLiabilityFundsModalProps {
   visible: boolean;
@@ -31,23 +46,27 @@ export default function DrawLiabilityFundsModal({
   const { user } = useAuth();
   const { showNotification } = useNotification();
   const { currency } = useSettings();
-  const { globalRefresh, refreshAccounts } = useRealtimeData();
+  const {
+    accounts: realtimeAccounts,
+    globalRefresh,
+    refreshAccounts,
+    refreshAccountFunds,
+  } = useRealtimeData();
+
   const [liability, setLiability] = useState<any>(null);
   const [date, setDate] = useState(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
-  const [accounts, setAccounts] = useState<any[]>([]);
+  const [liabilityAccounts, setLiabilityAccounts] = useState<Array<{ account: any; balance: number }>>([]);
   const [distributions, setDistributions] = useState<Distribution[]>([{ accountId: '', amount: '' }]);
   const [notes, setNotes] = useState('');
   const [category, setCategory] = useState<string>('');
-  const [categories, setCategories] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [errors, setErrors] = useState<{[key: string]: string}>({});
+  const [errors, setErrors] = useState<{ [key: string]: string }>({});
 
   useEffect(() => {
     if (visible && liabilityId && user) {
       fetchLiability();
-      fetchAccounts();
-      fetchCategories();
+      fetchLiabilityAccounts();
     }
   }, [visible, liabilityId, user]);
 
@@ -61,12 +80,68 @@ export default function DrawLiabilityFundsModal({
     }
   }, [visible]);
 
-  // Auto-select first liability category when categories are loaded
-  useEffect(() => {
-    if (categories.length > 0 && !category) {
-      setCategory(categories[0].id);
+  const fetchLiabilityAccounts = async () => {
+    if (!liabilityId || !user) return;
+    try {
+      const accountsWithFunds = await getLiabilityAccounts(liabilityId, true);
+      setLiabilityAccounts(accountsWithFunds);
+    } catch (error) {
+      console.error('Error fetching liability accounts:', error);
+      setLiabilityAccounts([]);
     }
-  }, [categories, category]);
+  };
+
+  // Compute destination accounts: Show accounts with liability funds first, then all other accounts
+  const destinationAccounts = useMemo(() => {
+    const accountMap = new Map<string, any & { liabilityFundBalance?: number }>();
+
+    // First priority: Add accounts that have liability funds for this liability
+    liabilityAccounts.forEach(({ account, balance }) => {
+      if (
+        account &&
+        account.type !== 'liability' &&
+        account.type !== 'goals_savings' &&
+        (account.is_active === true || account.is_active === undefined || account.is_active === null)
+      ) {
+        accountMap.set(account.id, {
+          ...account,
+          liabilityFundBalance: balance,
+        });
+      }
+    });
+
+    // Second priority: Add all other active accounts (from realtimeAccounts)
+    if (realtimeAccounts && realtimeAccounts.length > 0) {
+      realtimeAccounts.forEach((acc) => {
+        if (
+          acc.type !== 'goals_savings' &&
+          acc.type !== 'liability' &&
+          (acc.is_active === true || acc.is_active === undefined || acc.is_active === null)
+        ) {
+          if (!accountMap.has(acc.id)) {
+            accountMap.set(acc.id, {
+              ...acc,
+              liabilityFundBalance: 0,
+            });
+          }
+        }
+      });
+    }
+
+    const result = Array.from(accountMap.values());
+
+    // Sort: accounts with liability funds first, then others
+    result.sort((a, b) => {
+      const aHasFunds = (a.liabilityFundBalance ?? 0) > 0;
+      const bHasFunds = (b.liabilityFundBalance ?? 0) > 0;
+
+      if (aHasFunds && !bHasFunds) return -1;
+      if (bHasFunds && !aHasFunds) return 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    return result;
+  }, [liabilityAccounts, realtimeAccounts]);
 
   const fetchLiability = async () => {
     try {
@@ -85,48 +160,11 @@ export default function DrawLiabilityFundsModal({
     }
   };
 
-  const fetchAccounts = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('accounts')
-        .select('*')
-        .eq('user_id', user?.id)
-        .eq('is_active', true)
-        .neq('type', 'liability')
-        .neq('type', 'goals_savings')
-        .order('name');
-
-      if (error) throw error;
-      setAccounts(data || []);
-    } catch (error) {
-      console.error('Error fetching accounts:', error);
-    }
-  };
-
-  const fetchCategories = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('categories')
-        .select('*')
-        .eq('user_id', user?.id)
-        .contains('activity_types', ['liability'])
-        .eq('is_deleted', false)
-        .order('name');
-
-      if (error) throw error;
-      setCategories(data || []);
-      
-      // Auto-select first category if available
-      if (data && data.length > 0) {
-        setCategory(data[0].id);
-      }
-    } catch (error) {
-      console.error('Error fetching categories:', error);
-    }
-  };
-
   const calculateAvailable = () => {
     if (!liability) return 0;
+    if (liability.available_funds !== null && liability.available_funds !== undefined) {
+      return Math.max(0, parseFloat(liability.available_funds.toString()));
+    }
     const original = parseFloat(liability.original_amount || '0');
     const disbursed = parseFloat(liability.disbursed_amount || '0');
     return Math.max(0, original - disbursed);
@@ -140,16 +178,12 @@ export default function DrawLiabilityFundsModal({
   };
 
   const validateForm = () => {
-    const newErrors: {[key: string]: string} = {};
+    const newErrors: { [key: string]: string } = {};
     const totalDistributed = calculateTotalDistribution();
     const available = calculateAvailable();
 
-    if (distributions.length === 0 || distributions.every(d => !d.accountId || !d.amount)) {
+    if (distributions.length === 0 || distributions.every((d) => !d.accountId || !d.amount)) {
       newErrors.distributions = 'Please add at least one account distribution';
-    }
-
-    if (!category || category.trim() === '') {
-      newErrors.category = 'Please select a category';
     }
 
     distributions.forEach((dist, index) => {
@@ -165,7 +199,6 @@ export default function DrawLiabilityFundsModal({
       newErrors.total = 'Total distribution must be greater than 0';
     }
 
-    // Warn if overdrawing, but don't block (we'll confirm before submit)
     if (totalDistributed > available && available > 0) {
       newErrors.total = `⚠️ Overdrawing by ${formatCurrencyAmount(totalDistributed - available, currency)}`;
     }
@@ -199,7 +232,6 @@ export default function DrawLiabilityFundsModal({
     const isOverdraw = totalDistributed > available && available > 0;
     const overdrawAmount = isOverdraw ? totalDistributed - available : 0;
 
-    // If overdrawing, confirm first
     if (isOverdraw) {
       Alert.alert(
         'Overdraw Limit',
@@ -218,7 +250,6 @@ export default function DrawLiabilityFundsModal({
       return;
     }
 
-    // Normal draw within limit
     executeDraw(totalDistributed, 0);
   };
 
@@ -227,89 +258,122 @@ export default function DrawLiabilityFundsModal({
 
     try {
       const distributionsArray = distributions
-        .filter(d => d.accountId && d.amount)
-        .map(d => ({
+        .filter((d) => d.accountId && d.amount)
+        .map((d) => ({
           account_id: d.accountId,
           amount: parseFloat(d.amount),
         }));
 
-      const { error } = await supabase.rpc('draw_liability_funds', {
-        p_user_id: user?.id,
-        p_liability_id: liabilityId,
-        p_distributions: distributionsArray,
-        p_date: date.toISOString().split('T')[0],
-        p_notes: notes.trim() || null,
-        p_category_id: category || null,
-      });
+      // ✅ FIXED: Use receive_to_account_bucket to ADD funds to accounts (not spend)
+      for (const distribution of distributionsArray) {
+        // Get account details
+        const account = destinationAccounts.find((a) => a.id === distribution.account_id);
+        if (!account) {
+          throw new Error(`Account not found: ${distribution.account_id}`);
+        }
 
-      if (error) throw error;
+        // Use receive_to_account_bucket to add funds to the account's liability fund
+        const { error: receiveError } = await supabase.rpc('receive_to_account_bucket', {
+          p_user_id: user?.id,
+          p_account_id: distribution.account_id,
+          p_bucket_type: 'borrowed', // Liability funds are 'borrowed' type
+          p_bucket_id: liabilityId, // Reference to the liability
+          p_amount: distribution.amount,
+          p_category: category || 'Loan Disbursement',
+          p_description: notes.trim() || `Draw funds from ${liability?.title || 'liability'}`,
+          p_date: date.toISOString().split('T')[0],
+          p_currency: account.currency || currency || 'INR',
+        });
 
-      // Force immediate account refresh to get updated balances
-      await refreshAccounts();
-      
-      // Small delay to ensure database has committed and state has updated
-      await new Promise(resolve => setTimeout(resolve, 200));
+        if (receiveError) {
+          throw new Error(`Failed to draw funds to account: ${receiveError.message}`);
+        }
+      }
 
-      // If limit was increased, ask to update terms
+      // Update liability available_funds (decrease by total drawn)
+      const { data: currentLiability, error: fetchError } = await supabase
+        .from('liabilities')
+        .select('available_funds, original_amount, disbursed_amount')
+        .eq('id', liabilityId)
+        .eq('user_id', user?.id)
+        .single();
+
+      if (!fetchError && currentLiability) {
+        const currentAvailable =
+          currentLiability.available_funds !== null && currentLiability.available_funds !== undefined
+            ? parseFloat(currentLiability.available_funds.toString())
+            : (currentLiability.original_amount || 0) - (currentLiability.disbursed_amount || 0);
+
+        const newAvailable = Math.max(0, currentAvailable - totalDistributed);
+
+        // If overdrawing, increase original_amount
+        const updateData: any = {
+          available_funds: newAvailable,
+          updated_at: new Date().toISOString(),
+        };
+
+        if (overdrawAmount > 0) {
+          const currentOriginal = parseFloat(currentLiability.original_amount || '0');
+          updateData.original_amount = currentOriginal + overdrawAmount;
+        }
+
+        const { error: updateLiabilityError } = await supabase
+          .from('liabilities')
+          .update(updateData)
+          .eq('id', liabilityId)
+          .eq('user_id', user?.id);
+
+        if (updateLiabilityError) {
+          console.error('Error updating liability:', updateLiabilityError);
+        }
+      }
+
+      // Refresh data
+      await Promise.all([refreshAccounts(), refreshAccountFunds()]);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
       if (overdrawAmount > 0) {
         Alert.alert(
           'Limit Increased',
-          `Limit increased by ${formatCurrencyAmount(overdrawAmount, currency)}.\n\nDo you want to update target date, monthly payment, interest rate, or installment amount?`,
+          `Limit increased by ${formatCurrencyAmount(overdrawAmount, currency)}.\n\nDo you want to update loan terms?`,
           [
             {
               text: 'Not Now',
               style: 'cancel',
-              onPress: () => {
-                showSuccessNotification(totalDistributed, distributionsArray.length);
-                handleDrawComplete();
-              },
+              onPress: handleDrawComplete,
             },
             {
               text: 'Update Terms',
-              onPress: () => {
-                // Navigate to edit liability or show inline edit
-                // For now, just show notification and close
-                showSuccessNotification(totalDistributed, distributionsArray.length);
-                handleDrawComplete();
-                // TODO: Navigate to edit liability modal or show inline edit form
-              },
+              onPress: handleDrawComplete,
             },
           ]
         );
       } else {
-        showSuccessNotification(totalDistributed, distributionsArray.length);
+        showNotification({
+          type: 'success',
+          title: 'Funds Drawn',
+          amount: totalDistributed,
+          currency: currency,
+          description: liability?.title || 'Liability',
+          account: `${distributionsArray.length} account(s)`,
+          date: date.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }),
+        });
         handleDrawComplete();
       }
-
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error drawing funds:', error);
-      Alert.alert('Error', error.message || 'Failed to draw funds. Please try again.');
+      const errorMessage = error instanceof Error ? error.message : 'Failed to draw funds. Please try again.';
+      Alert.alert('Error', errorMessage);
       setIsLoading(false);
     }
   };
 
-  const showSuccessNotification = (amount: number, accountCount: number) => {
-    showNotification({
-      type: 'success',
-      title: 'Funds Drawn',
-      amount: amount,
-      currency: currency,
-      description: liability?.title || 'Liability',
-      account: `${accountCount} account(s)`,
-      date: date.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' }),
-    });
-  };
-
   const handleDrawComplete = async () => {
-    // Ensure accounts are refreshed before closing
-    await refreshAccounts();
+    await Promise.all([refreshAccounts(), refreshAccountFunds()]);
     await globalRefresh();
-    
-    // Small delay to ensure state has updated
-    await new Promise(resolve => setTimeout(resolve, 100));
-    
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
     onSuccess?.();
-    
     setDistributions([{ accountId: '', amount: '' }]);
     setDate(new Date());
     setNotes('');
@@ -322,236 +386,227 @@ export default function DrawLiabilityFundsModal({
   const totalDistributed = calculateTotalDistribution();
 
   return (
-    <Modal
-      visible={visible}
-      animationType="slide"
-      presentationStyle="pageSheet"
-    >
-      <LinearGradient
-        colors={['#6366F1', '#6366F1', '#6366F1']}
-        style={styles.container}
-      >
-        <SafeAreaView style={styles.safeArea}>
-          <ScrollView style={styles.scrollView}>
-            {/* Header */}
-            <View style={styles.header}>
-              <TouchableOpacity style={styles.closeButton} onPress={onClose}>
-                <Ionicons name="close" size={24} color="white" />
-              </TouchableOpacity>
-              <Text style={styles.headerTitle}>Draw Funds</Text>
-              <TouchableOpacity 
-                style={[styles.saveButton, isLoading && styles.disabledButton]}
-                onPress={handleSubmit}
-                disabled={isLoading}
-              >
-                <Text style={styles.saveText}>
-                  {isLoading ? 'Drawing...' : 'Draw Funds'}
-                </Text>
-              </TouchableOpacity>
-            </View>
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet">
+      <SafeAreaView style={styles.container}>
+        <View style={styles.header}>
+          <TouchableOpacity style={styles.closeButton} onPress={onClose}>
+            <Ionicons name="close" size={24} color="#000000" />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Draw Funds</Text>
+          <View style={styles.headerSpacer} />
+        </View>
 
-            {/* Liability Info */}
-            {liability && (
-              <View style={styles.infoCard}>
-                <Text style={styles.infoLabel}>Liability</Text>
-                <Text style={styles.infoValue}>{liability.title}</Text>
-                <View style={styles.infoRow}>
-                  <View style={styles.infoBox}>
-                    <Text style={styles.infoBoxLabel}>Available</Text>
-                    <Text style={styles.infoBoxValue}>
-                      {formatCurrencyAmount(available, currency)}
-                    </Text>
-                  </View>
-                  <View style={styles.infoBox}>
-                    <Text style={styles.infoBoxLabel}>Total Owed</Text>
-                    <Text style={styles.infoBoxValue}>
-                      {formatCurrencyAmount(parseFloat(liability.original_amount || '0'), currency)}
-                    </Text>
-                  </View>
-                </View>
-              </View>
-            )}
-
-            {/* Date Selection */}
-            <View style={styles.inputCard}>
-              <Text style={styles.inputLabel}>Date</Text>
-              <TouchableOpacity 
-                style={styles.dateButton}
-                onPress={() => setShowDatePicker(true)}
-              >
-                <View style={styles.dateButtonContent}>
-                  <Ionicons name="calendar" size={20} color="#10B981" />
-                  <Text style={styles.dateText}>
-                    {date.toLocaleDateString('en-US', {
-                      weekday: 'short',
-                      year: 'numeric',
-                      month: 'short',
-                      day: 'numeric'
-                    })}
+        <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
+          {/* Liability Info */}
+          {liability && (
+            <GlassCard padding={20} marginVertical={12}>
+              <Text style={styles.infoLabel}>Liability</Text>
+              <Text style={styles.infoValue}>{liability.title}</Text>
+              <View style={styles.infoRow}>
+                <View style={styles.infoBox}>
+                  <Text style={styles.infoBoxLabel}>Available</Text>
+                  <Text style={styles.infoBoxValue}>
+                    {formatCurrencyAmount(available, currency)}
                   </Text>
-                  <Ionicons name="chevron-down" size={16} color="#9CA3AF" />
                 </View>
+                <View style={styles.infoBox}>
+                  <Text style={styles.infoBoxLabel}>Total Owed</Text>
+                  <Text style={styles.infoBoxValue}>
+                    {formatCurrencyAmount(parseFloat(liability.original_amount || '0'), currency)}
+                  </Text>
+                </View>
+              </View>
+            </GlassCard>
+          )}
+
+          {/* Date Selection */}
+          <GlassCard padding={20} marginVertical={12}>
+            <Text style={styles.sectionLabel}>Date</Text>
+            <TouchableOpacity style={styles.dateButton} onPress={() => setShowDatePicker(true)}>
+              <Ionicons name="calendar-outline" size={20} color="#000000" />
+              <Text style={styles.dateText}>
+                {date.toLocaleDateString('en-US', {
+                  weekday: 'short',
+                  year: 'numeric',
+                  month: 'short',
+                  day: 'numeric',
+                })}
+              </Text>
+              <Ionicons name="chevron-down" size={16} color="rgba(0, 0, 0, 0.5)" />
+            </TouchableOpacity>
+
+            {showDatePicker && (
+              <DateTimePicker
+                value={date}
+                mode="date"
+                display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                onChange={(event, selectedDate) => {
+                  setShowDatePicker(Platform.OS === 'ios');
+                  if (selectedDate) {
+                    setDate(selectedDate);
+                  }
+                }}
+                maximumDate={new Date()}
+              />
+            )}
+          </GlassCard>
+
+          {/* Distributions */}
+          <GlassCard padding={20} marginVertical={12}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionLabel}>Distribute to Accounts</Text>
+              <TouchableOpacity onPress={handleAddAccount} style={styles.addButton}>
+                <Ionicons name="add-circle" size={24} color="#10B981" />
               </TouchableOpacity>
-              
-              {showDatePicker && (
-                <DateTimePicker
-                  value={date}
-                  mode="date"
-                  display={Platform.OS === 'ios' ? 'spinner' : 'default'}
-                  onChange={(event, selectedDate) => {
-                    setShowDatePicker(Platform.OS === 'ios');
-                    if (selectedDate) {
-                      setDate(selectedDate);
-                    }
-                  }}
-                  maximumDate={new Date()}
-                />
-              )}
             </View>
 
-            {/* Distributions */}
-            <View style={styles.inputCard}>
-              <View style={styles.sectionHeader}>
-                <Text style={styles.inputLabel}>Distribute to Accounts</Text>
-                <TouchableOpacity onPress={handleAddAccount} style={styles.addButton}>
-                  <Ionicons name="add-circle" size={24} color="#10B981" />
-                </TouchableOpacity>
-              </View>
+            {distributions.map((dist, index) => (
+              <View key={index} style={styles.distributionCard}>
+                <View style={styles.distributionHeader}>
+                  <Text style={styles.distributionNumber}>Account {index + 1}</Text>
+                  {distributions.length > 1 && (
+                    <TouchableOpacity
+                      style={styles.removeButton}
+                      onPress={() => handleRemoveAccount(index)}
+                    >
+                      <Ionicons name="trash-outline" size={18} color="#EF4444" />
+                    </TouchableOpacity>
+                  )}
+                </View>
 
-              {distributions.map((dist, index) => (
-                <View key={index} style={styles.distributionRow}>
-                  <View style={styles.distributionAccount}>
+                <View style={styles.distributionContent}>
+                  <View style={styles.accountSelectorContainer}>
                     <Text style={styles.distributionLabel}>Account</Text>
-                    <View style={styles.accountSelector}>
-                      {accounts.map((acc) => (
-                        <TouchableOpacity
-                          key={acc.id}
-                          style={[
-                            styles.accountOption,
-                            dist.accountId === acc.id && styles.selectedAccountOption
-                          ]}
-                          onPress={() => handleDistributionChange(index, 'accountId', acc.id)}
-                        >
-                          <Text style={[
-                            styles.accountOptionText,
-                            dist.accountId === acc.id && styles.selectedAccountOptionText
-                          ]}>
-                            {acc.name}
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
+                    {destinationAccounts.length > 0 ? (
+                      <>
+                        <InlineAccountSelector
+                          accounts={destinationAccounts}
+                          selectedAccountId={dist.accountId}
+                          onSelect={(account) => handleDistributionChange(index, 'accountId', account.id)}
+                          label=""
+                          showBalance={true}
+                        />
+                        {/* Show liability fund balance if account has funds */}
+                        {dist.accountId && (() => {
+                          const selectedAccount = destinationAccounts.find(a => a.id === dist.accountId);
+                          const liabilityBalance = selectedAccount?.liabilityFundBalance || 0;
+                          if (liabilityBalance > 0) {
+                            return (
+                              <View style={styles.liabilityFundBadge}>
+                                <Ionicons name="card-outline" size={14} color="#6366F1" />
+                                <Text style={styles.liabilityFundText}>
+                                  {liability.title} Funds: {formatCurrencyAmount(liabilityBalance, currency)}
+                                </Text>
+                              </View>
+                            );
+                          }
+                          return null;
+                        })()}
+                      </>
+                    ) : (
+                      <View style={styles.emptyAccounts}>
+                        <Ionicons name="wallet-outline" size={24} color="rgba(0, 0, 0, 0.3)" />
+                        <Text style={styles.emptyAccountsText}>No accounts available</Text>
+                      </View>
+                    )}
                     {errors[`account_${index}`] && (
                       <Text style={styles.errorText}>{errors[`account_${index}`]}</Text>
                     )}
                   </View>
 
-                  <View style={styles.distributionAmount}>
+                  <View style={styles.amountContainer}>
                     <Text style={styles.distributionLabel}>Amount</Text>
                     <TextInput
                       style={[styles.amountInput, errors[`amount_${index}`] && styles.errorInput]}
                       value={dist.amount}
                       onChangeText={(value) => handleDistributionChange(index, 'amount', value)}
                       placeholder="0.00"
-                      placeholderTextColor="#6B7280"
-                      keyboardType="numeric"
+                      placeholderTextColor="rgba(0, 0, 0, 0.3)"
+                      keyboardType="decimal-pad"
                     />
                     {errors[`amount_${index}`] && (
                       <Text style={styles.errorText}>{errors[`amount_${index}`]}</Text>
                     )}
                   </View>
-
-                  {distributions.length > 1 && (
-                    <TouchableOpacity
-                      style={styles.removeButton}
-                      onPress={() => handleRemoveAccount(index)}
-                    >
-                      <Ionicons name="trash-outline" size={20} color="#EF4444" />
-                    </TouchableOpacity>
-                  )}
                 </View>
-              ))}
-
-              {errors.total && (
-                <Text style={styles.errorText}>{errors.total}</Text>
-              )}
-            </View>
-
-            {/* Total Distribution */}
-            {totalDistributed > 0 && (
-              <View style={[
-                styles.totalCard,
-                totalDistributed > available && available > 0 && styles.totalCardWarning
-              ]}>
-                <Text style={styles.totalLabel}>Total Distribution</Text>
-                <Text style={styles.totalValue}>
-                  {formatCurrencyAmount(totalDistributed, currency)}
-                </Text>
-                {available > 0 ? (
-                  <>
-                    {totalDistributed > available ? (
-                      <Text style={styles.totalWarning}>
-                        ⚠️ Overdrawing by {formatCurrencyAmount(totalDistributed - available, currency)}
-                      </Text>
-                    ) : (
-                      <Text style={styles.totalRemaining}>
-                        Remaining: {formatCurrencyAmount(available - totalDistributed, currency)}
-                      </Text>
-                    )}
-                  </>
-                ) : (
-                  <Text style={styles.totalWarning}>
-                    ⚠️ No funds available to draw
-                  </Text>
-                )}
               </View>
-            )}
+            ))}
 
-            {/* Category Selection */}
-            <View style={styles.inputCard}>
-              <Text style={styles.inputLabel}>Category</Text>
-              <View style={styles.categoryGrid}>
-                {categories.map((cat) => (
-                  <TouchableOpacity
-                    key={cat.id}
-                    style={[
-                      styles.categoryButton,
-                      category === cat.id && styles.selectedCategory
-                    ]}
-                    onPress={() => setCategory(cat.id)}
-                  >
-                    <Text style={[
-                      styles.categoryText,
-                      category === cat.id && styles.selectedCategoryText
-                    ]}>
-                      {cat.name}
+            {errors.distributions && <Text style={styles.errorText}>{errors.distributions}</Text>}
+          </GlassCard>
+
+          {/* Total Distribution */}
+          {totalDistributed > 0 && (
+            <GlassCard
+              padding={20}
+              marginVertical={12}
+              style={totalDistributed > available && available > 0 ? styles.warningCard : undefined}
+            >
+              <Text style={styles.totalLabel}>Total Distribution</Text>
+              <Text style={styles.totalValue}>
+                {formatCurrencyAmount(totalDistributed, currency)}
+              </Text>
+              {available > 0 ? (
+                <>
+                  {totalDistributed > available ? (
+                    <Text style={styles.totalWarning}>
+                      ⚠️ Overdrawing by {formatCurrencyAmount(totalDistributed - available, currency)}
                     </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-              {categories.length === 0 && (
-                <Text style={styles.hintText}>No liability categories found. Please create one.</Text>
+                  ) : (
+                    <Text style={styles.totalRemaining}>
+                      Remaining: {formatCurrencyAmount(available - totalDistributed, currency)}
+                    </Text>
+                  )}
+                </>
+              ) : (
+                <Text style={styles.totalWarning}>⚠️ No funds available to draw</Text>
               )}
-              {errors.category && (
-                <Text style={styles.errorText}>{errors.category}</Text>
-              )}
-            </View>
+            </GlassCard>
+          )}
 
-            {/* Notes */}
-            <View style={styles.inputCard}>
-              <Text style={styles.inputLabel}>Notes (Optional)</Text>
-              <TextInput
-                style={styles.textInput}
-                value={notes}
-                onChangeText={setNotes}
-                placeholder="Add any notes about this withdrawal..."
-                placeholderTextColor="#6B7280"
-                multiline
-              />
-            </View>
-          </ScrollView>
-        </SafeAreaView>
-      </LinearGradient>
+          {/* Category Selection */}
+          <GlassCard padding={20} marginVertical={12}>
+            <Text style={styles.sectionLabel}>Category</Text>
+            <CategoryPicker
+              selectedCategoryId={category}
+              onCategorySelect={(cat) => setCategory(cat?.id || '')}
+              activityType="liability"
+              placeholder="Select category (optional)"
+            />
+            {errors.category && <Text style={styles.errorText}>{errors.category}</Text>}
+          </GlassCard>
+
+          {/* Notes */}
+          <GlassCard padding={20} marginVertical={12}>
+            <Text style={styles.sectionLabel}>Notes (Optional)</Text>
+            <TextInput
+              style={styles.textInput}
+              value={notes}
+              onChangeText={setNotes}
+              placeholder="Add any notes about this withdrawal..."
+              placeholderTextColor="rgba(0, 0, 0, 0.3)"
+              multiline
+              numberOfLines={3}
+            />
+          </GlassCard>
+
+          {/* Action Button */}
+          <TouchableOpacity
+            style={[styles.drawButton, isLoading && styles.drawButtonDisabled]}
+            onPress={handleSubmit}
+            disabled={isLoading}
+          >
+            {isLoading ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : (
+              <>
+                <Ionicons name="cash-outline" size={20} color="#FFFFFF" />
+                <Text style={styles.drawButtonText}>Draw Funds</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </ScrollView>
+      </SafeAreaView>
     </Modal>
   );
 }
@@ -559,61 +614,45 @@ export default function DrawLiabilityFundsModal({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-  },
-  safeArea: {
-    flex: 1,
-  },
-  scrollView: {
-    flex: 1,
-    paddingHorizontal: 20,
+    backgroundColor: '#FFFFFF',
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    paddingHorizontal: 20,
     paddingTop: 20,
-    paddingBottom: 30,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
   },
   closeButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 12,
+    padding: 8,
   },
   headerTitle: {
     fontSize: 20,
-    color: 'white',
-    fontWeight: 'bold',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
   },
-  saveButton: {
-    backgroundColor: '#10B981',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+  headerSpacer: {
+    width: 40,
   },
-  saveText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  disabledButton: {
-    backgroundColor: '#6B7280',
-    opacity: 0.6,
-  },
-  infoCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 16,
+  scrollView: {
+    flex: 1,
+    paddingHorizontal: 20,
   },
   infoLabel: {
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
     marginBottom: 4,
   },
   infoValue: {
     fontSize: 20,
-    color: 'white',
-    fontWeight: 'bold',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
     marginBottom: 16,
   },
   infoRow: {
@@ -622,25 +661,28 @@ const styles = StyleSheet.create({
   },
   infoBox: {
     flex: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
+    backgroundColor: 'rgba(0, 0, 0, 0.03)',
     borderRadius: 12,
     padding: 12,
   },
   infoBoxLabel: {
     fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.7)',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
     marginBottom: 4,
   },
   infoBoxValue: {
     fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
     color: '#10B981',
-    fontWeight: 'bold',
   },
-  inputCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 16,
+  sectionLabel: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 12,
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -648,167 +690,163 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 16,
   },
-  inputLabel: {
-    fontSize: 16,
-    color: 'white',
-    fontWeight: 'bold',
-    marginBottom: 12,
-  },
   addButton: {
     padding: 4,
   },
   dateButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-  },
-  dateButtonContent: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    gap: 12,
+    paddingVertical: 12,
   },
   dateText: {
-    color: 'white',
-    fontSize: 16,
     flex: 1,
-    marginLeft: 12,
+    fontSize: 16,
+    fontFamily: 'Poppins-Medium',
+    color: '#000000',
   },
-  distributionRow: {
+  distributionCard: {
+    backgroundColor: 'rgba(0, 0, 0, 0.02)',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+  },
+  distributionHeader: {
     flexDirection: 'row',
-    gap: 12,
-    marginBottom: 16,
-    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
   },
-  distributionAccount: {
-    flex: 2,
+  distributionNumber: {
+    fontSize: 14,
+    fontFamily: 'Poppins-Medium',
+    color: 'rgba(0, 0, 0, 0.7)',
   },
-  distributionAmount: {
+  removeButton: {
+    padding: 4,
+  },
+  distributionContent: {
+    gap: 16,
+  },
+  accountSelectorContainer: {
     flex: 1,
   },
   distributionLabel: {
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.7)',
     marginBottom: 8,
   },
-  accountSelector: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  accountOption: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 20,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    marginBottom: 4,
-  },
-  selectedAccountOption: {
-    backgroundColor: '#10B981',
-  },
-  accountOptionText: {
-    color: 'white',
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  selectedAccountOptionText: {
-    color: 'white',
-    fontWeight: 'bold',
+  amountContainer: {
+    flex: 1,
   },
   amountInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: 'rgba(0, 0, 0, 0.03)',
     borderRadius: 12,
     padding: 12,
-    color: 'white',
     fontSize: 16,
-  },
-  removeButton: {
-    padding: 12,
-    justifyContent: 'center',
-  },
-  totalCard: {
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 16,
-    alignItems: 'center',
+    fontFamily: 'Poppins-Medium',
+    color: '#000000',
     borderWidth: 1,
-    borderColor: '#10B981',
-  },
-  totalLabel: {
-    fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
-    marginBottom: 8,
-  },
-  totalValue: {
-    fontSize: 24,
-    color: '#10B981',
-    fontWeight: 'bold',
-  },
-  totalRemaining: {
-    fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.7)',
-    marginTop: 4,
-  },
-  totalCardWarning: {
-    backgroundColor: 'rgba(245, 158, 11, 0.1)',
-    borderColor: '#F59E0B',
-  },
-  totalWarning: {
-    fontSize: 12,
-    color: '#F59E0B',
-    marginTop: 4,
-    fontWeight: '600',
-  },
-  textInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    color: 'white',
-    fontSize: 16,
-    minHeight: 80,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
   },
   errorInput: {
     borderColor: '#EF4444',
-    borderWidth: 1,
   },
   errorText: {
     color: '#EF4444',
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
     marginTop: 4,
   },
-  categoryGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    marginTop: 8,
-  },
-  categoryButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 20,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
-  },
-  selectedCategory: {
-    backgroundColor: 'rgba(99, 102, 241, 0.3)',
-    borderColor: '#6366F1',
-    borderWidth: 2,
-  },
-  categoryText: {
-    color: 'white',
+  totalLabel: {
     fontSize: 14,
-    fontWeight: '500',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    marginBottom: 8,
+    textAlign: 'center',
   },
-  selectedCategoryText: {
-    color: '#6366F1',
-    fontWeight: 'bold',
+  totalValue: {
+    fontSize: 24,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#10B981',
+    textAlign: 'center',
+    marginBottom: 4,
   },
-  hintText: {
-    color: 'rgba(255, 255, 255, 0.7)',
+  totalRemaining: {
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
+    textAlign: 'center',
+  },
+  totalWarning: {
+    fontSize: 12,
+    fontFamily: 'Poppins-Medium',
+    color: '#F59E0B',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  warningCard: {
+    borderWidth: 1,
+    borderColor: '#F59E0B',
+  },
+  textInput: {
+    backgroundColor: 'rgba(0, 0, 0, 0.03)',
+    borderRadius: 12,
+    padding: 16,
+    fontSize: 15,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
+    minHeight: 80,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+  },
+  drawButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#000000',
+    borderRadius: 12,
+    paddingVertical: 16,
+    marginTop: 20,
+    marginBottom: 32,
+  },
+  drawButtonDisabled: {
+    opacity: 0.6,
+  },
+  drawButtonText: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  liabilityFundBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     marginTop: 8,
-    fontStyle: 'italic',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: 'rgba(99, 102, 241, 0.1)',
+    borderRadius: 8,
+    alignSelf: 'flex-start',
+  },
+  liabilityFundText: {
+    fontSize: 12,
+    fontFamily: 'Poppins-Medium',
+    color: '#6366F1',
+  },
+  emptyAccounts: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 24,
+    gap: 8,
+  },
+  emptyAccountsText: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
   },
 });
-

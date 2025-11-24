@@ -9,6 +9,7 @@ import { supabase } from '@/lib/supabase';
 import { formatCurrencyAmount } from '@/utils/currency';
 import EditTransactionModal from '../modals/edit-transaction';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
+import { useLiabilities } from '@/contexts/LiabilitiesContext';
 
 interface Transaction {
   id: string;
@@ -25,6 +26,11 @@ interface Transaction {
   created_at?: string;
   balance_before?: number;
   balance_after?: number;
+  metadata?: {
+    bucket_type?: 'personal' | 'liability' | 'goal';
+    bucket_id?: string;
+    [key: string]: any;
+  };
   account?: {
     name: string;
     color: string;
@@ -39,7 +45,8 @@ export default function TransactionDetailScreen() {
   const { id } = useLocalSearchParams();
   const { user } = useAuth();
   const { currency } = useSettings();
-  const { accounts, refreshAccounts } = useRealtimeData();
+  const { accounts, refreshAccounts, getFundsForAccount, goals, refreshGoals, globalRefresh } = useRealtimeData();
+  const { liabilities, fetchLiabilities } = useLiabilities();
   const [transaction, setTransaction] = useState<Transaction | null>(null);
   const [loading, setLoading] = useState(true);
   const [relatedTransactions, setRelatedTransactions] = useState<Transaction[]>([]);
@@ -48,6 +55,11 @@ export default function TransactionDetailScreen() {
   const [beforeBalance, setBeforeBalance] = useState<number | null>(null);
   const [afterBalance, setAfterBalance] = useState<number | null>(null);
   const [currentAccountBalance, setCurrentAccountBalance] = useState<number | null>(null);
+  const [fundInfo, setFundInfo] = useState<{
+    fundName: string;
+    fundType: 'personal' | 'liability' | 'goal' | null;
+    fundId: string | null;
+  } | null>(null);
 
   // Update current account balance from real-time accounts data
   const updateCurrentAccountBalance = React.useCallback(() => {
@@ -119,6 +131,74 @@ export default function TransactionDetailScreen() {
       }
 
       setTransaction(transactionData);
+
+      // Refresh liabilities and goals first to ensure we have the names
+      if (transactionData?.metadata?.bucket_type && transactionData.metadata.bucket_type !== 'personal') {
+        await Promise.all([
+          fetchLiabilities(),
+          refreshGoals(),
+        ]);
+      }
+
+      // Extract and fetch fund information from metadata
+      if (transactionData?.metadata) {
+        const bucketType = transactionData.metadata.bucket_type;
+        const bucketId = transactionData.metadata.bucket_id;
+        
+        if (bucketType && bucketType !== 'personal') {
+          let fundName = 'Unknown Fund';
+          
+          // Re-fetch liabilities/goals after refresh
+          if (bucketType === 'liability' && bucketId) {
+            // Try to fetch liability directly if not in cache
+            const { data: liabilityData } = await supabase
+              .from('liabilities')
+              .select('title')
+              .eq('id', bucketId)
+              .eq('user_id', user?.id)
+              .single();
+            
+            fundName = liabilityData?.title 
+              ? `Liability Fund (${liabilityData.title})` 
+              : (liabilities?.find(l => l.id === bucketId)?.title 
+                ? `Liability Fund (${liabilities.find(l => l.id === bucketId)!.title})`
+                : 'Liability Fund');
+          } else if (bucketType === 'goal' && bucketId) {
+            // Try to fetch goal directly if not in cache
+            const { data: goalData } = await supabase
+              .from('goals')
+              .select('title')
+              .eq('id', bucketId)
+              .eq('user_id', user?.id)
+              .single();
+            
+            fundName = goalData?.title 
+              ? `Goal Fund (${goalData.title})` 
+              : (goals?.find(g => g.id === bucketId)?.title 
+                ? `Goal Fund (${goals.find(g => g.id === bucketId)!.title})`
+                : 'Goal Fund');
+          }
+          
+          setFundInfo({
+            fundName,
+            fundType: bucketType as 'liability' | 'goal',
+            fundId: bucketId || null,
+          });
+        } else {
+          setFundInfo({
+            fundName: 'Personal Fund',
+            fundType: 'personal',
+            fundId: null,
+          });
+        }
+      } else {
+        // No metadata means it's from Personal Fund (default)
+        setFundInfo({
+          fundName: 'Personal Fund',
+          fundType: 'personal',
+          fundId: null,
+        });
+      }
 
       // Refresh accounts to ensure we have the latest balance
       await refreshAccounts();
@@ -472,6 +552,44 @@ export default function TransactionDetailScreen() {
                   <Text style={styles.infoValue}>{transaction.location}</Text>
                 </View>
               )}
+
+              {/* Fund Information */}
+              {fundInfo && (
+                <View style={styles.infoRow}>
+                  <Text style={styles.infoLabel}>Fund Source:</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                    <Ionicons
+                      name={
+                        fundInfo.fundType === 'personal' ? 'wallet-outline' :
+                        fundInfo.fundType === 'liability' ? 'card-outline' :
+                        fundInfo.fundType === 'goal' ? 'flag-outline' :
+                        'layers-outline'
+                      }
+                      size={16}
+                      color={
+                        fundInfo.fundType === 'personal' ? '#10B981' :
+                        fundInfo.fundType === 'liability' ? '#EF4444' :
+                        fundInfo.fundType === 'goal' ? '#3B82F6' :
+                        '#6B7280'
+                      }
+                      style={{ marginRight: 6 }}
+                    />
+                    <Text style={[
+                      styles.infoValue,
+                      {
+                        color:
+                          fundInfo.fundType === 'personal' ? '#10B981' :
+                          fundInfo.fundType === 'liability' ? '#EF4444' :
+                          fundInfo.fundType === 'goal' ? '#3B82F6' :
+                          '#000000',
+                        flex: 1
+                      }
+                    ]}>
+                      {fundInfo.fundName}
+                    </Text>
+                  </View>
+                </View>
+              )}
             </View>
 
             {/* Tags */}
@@ -519,6 +637,39 @@ export default function TransactionDetailScreen() {
                       <Text style={styles.currentBalanceLabel}>Current Account Balance:</Text>
                       <Text style={styles.currentBalanceValue}>{formatCurrency(currentAccountBalance)}</Text>
                     </View>
+                  )}
+
+                  {/* Fund Balance Impact */}
+                  {fundInfo && fundInfo.fundType !== 'personal' && transaction?.account_id && (
+                    <>
+                      <View style={{ marginTop: 20, paddingTop: 20, borderTopWidth: 1, borderTopColor: 'rgba(255, 255, 255, 0.1)' }}>
+                        <Text style={[styles.sectionTitle, { fontSize: 14, marginBottom: 12 }]}>
+                          {fundInfo.fundName} Balance Impact
+                        </Text>
+                        <View style={styles.balanceRow}>
+                          <Text style={styles.balanceLabel}>Fund Balance Changed:</Text>
+                          <Text style={[
+                            styles.balanceValue,
+                            { 
+                              color: transaction?.type === 'expense' ? '#EF4444' : '#10B981',
+                              fontSize: 16,
+                              fontWeight: '600'
+                            }
+                          ]}>
+                            {transaction?.type === 'expense' ? '-' : '+'}{formatCurrency(Math.abs(transaction?.amount || 0))}
+                          </Text>
+                        </View>
+                        <Text style={{ marginTop: 8, fontSize: 12, color: '#9CA3AF', lineHeight: 16 }}>
+                          {transaction?.type === 'expense' 
+                            ? (fundInfo.fundType === 'liability' 
+                              ? 'Amount deducted from liability fund' 
+                              : 'Amount deducted from goal fund')
+                            : (fundInfo.fundType === 'liability' 
+                              ? 'Amount added to liability fund' 
+                              : 'Amount added to goal fund')}
+                        </Text>
+                      </View>
+                    </>
                   )}
                   
                   {/* Verify calculation */}

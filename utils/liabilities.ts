@@ -40,33 +40,34 @@ export async function checkLiabilitySettlementStatus(
   const remainingOwed = parseFloat(liability.current_balance?.toString() || '0');
   const totalLoan = parseFloat(liability.original_amount?.toString() || liability.current_balance?.toString() || '0');
 
-  // Get all liability funds in accounts for this liability
-  const { data: portions, error: portionsError } = await supabase
-    .from('account_liability_portions')
+  // Get all liability funds in accounts for this liability (from account_funds - single source of truth)
+  const { data: funds, error: fundsError } = await supabase
+    .from('account_funds')
     .select(`
       account_id,
-      amount,
-      account:accounts!account_liability_portions_account_id_fkey(
+      balance,
+      account:accounts!account_funds_account_id_fkey(
         id,
         name
       )
     `)
-    .eq('liability_id', liabilityId);
+    .eq('type', 'borrowed')
+    .eq('reference_id', liabilityId);
 
-  if (portionsError) {
-    console.error('Error fetching liability portions:', portionsError);
+  if (fundsError) {
+    console.error('Error fetching liability funds:', fundsError);
   }
 
-  const liabilityFundsInAccounts = (portions || []).reduce((sum, p: any) => {
-    return sum + parseFloat(p.amount?.toString() || '0');
+  const liabilityFundsInAccounts = (funds || []).reduce((sum, f: any) => {
+    return sum + parseFloat(f.balance?.toString() || '0');
   }, 0);
 
-  const accountsWithFunds = (portions || [])
-    .filter((p: any) => parseFloat(p.amount?.toString() || '0') > 0)
-    .map((p: any) => ({
-      accountId: p.account_id,
-      accountName: p.account?.name || 'Unknown Account',
-      amount: parseFloat(p.amount?.toString() || '0'),
+  const accountsWithFunds = (funds || [])
+    .filter((f: any) => parseFloat(f.balance?.toString() || '0') > 0)
+    .map((f: any) => ({
+      accountId: f.account_id,
+      accountName: f.account?.name || 'Unknown Account',
+      amount: parseFloat(f.balance?.toString() || '0'),
     }));
 
   const overfundedBy = Math.max(0, liabilityFundsInAccounts - remainingOwed);
@@ -146,67 +147,36 @@ export async function executeLiabilitySettlement(
           break;
 
         case 'refund':
-          // Remove liability funds from account (reduce account balance and portion)
+          // Remove liability funds from account (reduce account balance and fund)
+          // Use RPC to handle balance + fund updates atomically
           if (adjustment.accountId) {
-            // Get current portion
-            const { data: portion } = await supabase
-              .from('account_liability_portions')
-              .select('amount')
+            // Get current fund balance (from account_funds - single source of truth)
+            const { data: fund } = await supabase
+              .from('account_funds')
+              .select('balance')
               .eq('account_id', adjustment.accountId)
-              .eq('liability_id', liabilityId)
+              .eq('type', 'borrowed')
+              .eq('reference_id', liabilityId)
               .single();
 
-            if (portion) {
-              const currentAmount = parseFloat(portion.amount?.toString() || '0');
+            if (fund) {
+              const currentAmount = parseFloat(fund.balance?.toString() || '0');
               const refundAmount = Math.min(adjustment.amount, currentAmount);
 
               if (refundAmount > 0) {
-                // Reduce account balance
-                const { data: account } = await supabase
-                  .from('accounts')
-                  .select('balance')
-                  .eq('id', adjustment.accountId)
-                  .single();
+                // Use RPC to spend from borrowed fund (reduces both account balance and fund)
+                const { error: spendError } = await supabase.rpc('spend_from_account_bucket', {
+                  p_user_id: userId,
+                  p_account_id: adjustment.accountId,
+                  p_bucket: { type: 'borrowed', id: liabilityId },
+                  p_amount: refundAmount,
+                  p_category: 'Liability Refund',
+                  p_description: adjustment.note || 'Liability fund refund',
+                  p_date: adjustment.date,
+                  p_currency: currency,
+                });
 
-                if (account) {
-                  const newBalance = Math.max(0, parseFloat(account.balance?.toString() || '0') - refundAmount);
-                  await supabase
-                    .from('accounts')
-                    .update({ balance: newBalance })
-                    .eq('id', adjustment.accountId);
-
-                  // Reduce or delete portion
-                  const newPortionAmount = currentAmount - refundAmount;
-                  if (newPortionAmount <= 0) {
-                    await supabase
-                      .from('account_liability_portions')
-                      .delete()
-                      .eq('account_id', adjustment.accountId)
-                      .eq('liability_id', liabilityId);
-                  } else {
-                    await supabase
-                      .from('account_liability_portions')
-                      .update({ amount: newPortionAmount })
-                      .eq('account_id', adjustment.accountId)
-                      .eq('liability_id', liabilityId);
-                  }
-
-                  // Create transaction record
-                  await supabase.from('transactions').insert({
-                    user_id: userId,
-                    account_id: adjustment.accountId,
-                    amount: -refundAmount,
-                    currency: currency,
-                    type: 'expense',
-                    description: adjustment.note || 'Liability fund refund',
-                    date: adjustment.date,
-                    metadata: {
-                      liability_settlement: true,
-                      liability_id: liabilityId,
-                      adjustment_type: 'refund',
-                    },
-                  });
-                }
+                if (spendError) throw spendError;
               }
             }
           }
@@ -214,43 +184,53 @@ export async function executeLiabilitySettlement(
 
         case 'convert_to_personal':
           // Convert liability funds to personal (reclassify, don't change account balance)
+          // Reduce borrowed fund balance in account_funds (personal increases automatically)
           if (adjustment.accountId) {
-            // Manual conversion: reduce portion, account balance stays same
-            const { data: portion } = await supabase
-              .from('account_liability_portions')
-              .select('amount')
+            // Get current borrowed fund (from account_funds - single source of truth)
+            const { data: fund } = await supabase
+              .from('account_funds')
+              .select('balance')
               .eq('account_id', adjustment.accountId)
-              .eq('liability_id', liabilityId)
+              .eq('type', 'borrowed')
+              .eq('reference_id', liabilityId)
               .single();
 
-            if (!portion) {
-              throw new Error('No liability portion found for this account');
+            if (!fund) {
+              throw new Error('No liability fund found for this account');
             }
 
-            const currentAmount = parseFloat(portion.amount?.toString() || '0');
+            const currentAmount = parseFloat(fund.balance?.toString() || '0');
             const convertAmount = Math.min(adjustment.amount, currentAmount);
 
             if (convertAmount <= 0) {
               throw new Error('Invalid conversion amount');
             }
 
-            const newAmount = currentAmount - convertAmount;
+            // Reduce borrowed fund balance (personal fund increases automatically)
+            // Personal fund = account.balance - sum(borrowed) - sum(goal)
+            const { error: updateError } = await supabase
+              .from('account_funds')
+              .update({ 
+                balance: currentAmount - convertAmount,
+                updated_at: new Date().toISOString()
+              })
+              .eq('account_id', adjustment.accountId)
+              .eq('type', 'borrowed')
+              .eq('reference_id', liabilityId);
 
-            if (newAmount <= 0) {
+            if (updateError) throw updateError;
+
+            // Delete fund if balance reaches zero
+            if (currentAmount - convertAmount <= 0) {
               await supabase
-                .from('account_liability_portions')
+                .from('account_funds')
                 .delete()
                 .eq('account_id', adjustment.accountId)
-                .eq('liability_id', liabilityId);
-            } else {
-              await supabase
-                .from('account_liability_portions')
-                .update({ amount: newAmount })
-                .eq('account_id', adjustment.accountId)
-                .eq('liability_id', liabilityId);
+                .eq('type', 'borrowed')
+                .eq('reference_id', liabilityId);
             }
 
-            // Create transaction record for tracking (no balance change)
+            // Create transaction record for tracking (no balance change, just reclassification)
             await supabase.from('transactions').insert({
               user_id: userId,
               account_id: adjustment.accountId,
@@ -270,65 +250,36 @@ export async function executeLiabilitySettlement(
           break;
 
         case 'expense_writeoff':
-          // Mark money as spent (reduce account balance and portion, but don't reduce liability)
+          // Mark money as spent (reduce account balance and fund, but don't reduce liability balance)
+          // Use RPC to handle balance + fund updates atomically
           if (adjustment.accountId) {
-            // Use settle_liability_portion but don't reduce liability balance
-            // Instead, create an expense transaction that reduces account and portion
-            const { data: portion } = await supabase
-              .from('account_liability_portions')
-              .select('amount')
+            // Get current fund balance (from account_funds - single source of truth)
+            const { data: fund } = await supabase
+              .from('account_funds')
+              .select('balance')
               .eq('account_id', adjustment.accountId)
-              .eq('liability_id', liabilityId)
+              .eq('type', 'borrowed')
+              .eq('reference_id', liabilityId)
               .single();
 
-            if (portion) {
-              const currentAmount = parseFloat(portion.amount?.toString() || '0');
+            if (fund) {
+              const currentAmount = parseFloat(fund.balance?.toString() || '0');
               const writeoffAmount = Math.min(adjustment.amount, currentAmount);
 
               if (writeoffAmount > 0) {
-                // Reduce account balance
-                const { data: account } = await supabase
-                  .from('accounts')
-                  .select('balance')
-                  .eq('id', adjustment.accountId)
-                  .single();
+                // Use RPC to spend from borrowed fund (reduces both account balance and fund)
+                const { error: spendError } = await supabase.rpc('spend_from_account_bucket', {
+                  p_user_id: userId,
+                  p_account_id: adjustment.accountId,
+                  p_bucket: { type: 'borrowed', id: liabilityId },
+                  p_amount: writeoffAmount,
+                  p_category: 'Liability Write-off',
+                  p_description: adjustment.note || 'Liability fund write-off',
+                  p_date: adjustment.date,
+                  p_currency: currency,
+                });
 
-                if (account) {
-                  const newBalance = Math.max(0, parseFloat(account.balance?.toString() || '0') - writeoffAmount);
-                  await supabase.from('accounts').update({ balance: newBalance }).eq('id', adjustment.accountId);
-
-                  // Reduce or delete portion
-                  const newPortionAmount = currentAmount - writeoffAmount;
-                  if (newPortionAmount <= 0) {
-                    await supabase
-                      .from('account_liability_portions')
-                      .delete()
-                      .eq('account_id', adjustment.accountId)
-                      .eq('liability_id', liabilityId);
-                  } else {
-                    await supabase
-                      .from('account_liability_portions')
-                      .update({ amount: newPortionAmount })
-                      .eq('account_id', adjustment.accountId)
-                      .eq('liability_id', liabilityId);
-                  }
-
-                  // Create expense transaction
-                  await supabase.from('transactions').insert({
-                    user_id: userId,
-                    account_id: adjustment.accountId,
-                    amount: -writeoffAmount,
-                    currency: currency,
-                    type: 'expense',
-                    description: adjustment.note || 'Liability fund write-off',
-                    date: adjustment.date,
-                    metadata: {
-                      liability_settlement: true,
-                      liability_id: liabilityId,
-                      adjustment_type: 'expense_writeoff',
-                    },
-                  });
-                }
+                if (spendError) throw spendError;
               }
             }
           }
@@ -354,62 +305,38 @@ export async function executeLiabilitySettlement(
       // Note: Activity log table may not exist, skip logging for now
       // The transaction records will serve as the audit trail
     } else if (finalAction === 'erase_funds') {
-      // Remove funds from accounts (reduce account balances and portions)
-      const { data: portions } = await supabase
-        .from('account_liability_portions')
-        .select('account_id, amount')
-        .eq('liability_id', liabilityId);
+      // Remove funds from accounts (reduce account balances and funds)
+      // Query from account_funds (single source of truth)
+      const { data: funds } = await supabase
+        .from('account_funds')
+        .select('account_id, balance')
+        .eq('type', 'borrowed')
+        .eq('reference_id', liabilityId)
+        .gt('balance', 0);
 
       let remainingToErase = unaccountedAmount;
-      for (const portion of portions || []) {
+      for (const fund of funds || []) {
         if (remainingToErase <= 0) break;
 
-        const portionAmount = parseFloat(portion.amount?.toString() || '0');
-        const eraseAmount = Math.min(remainingToErase, portionAmount);
+        const fundAmount = parseFloat(fund.balance?.toString() || '0');
+        const eraseAmount = Math.min(remainingToErase, fundAmount);
 
         if (eraseAmount > 0) {
-          // Reduce account balance
-          const { data: account } = await supabase
-            .from('accounts')
-            .select('balance')
-            .eq('id', portion.account_id)
-            .single();
+          // Use RPC to spend from borrowed fund (reduces both account balance and fund)
+          const { error: spendError } = await supabase.rpc('spend_from_account_bucket', {
+            p_user_id: userId,
+            p_account_id: fund.account_id,
+            p_bucket: { type: 'borrowed', id: liabilityId },
+            p_amount: eraseAmount,
+            p_category: 'Liability Settlement',
+            p_description: 'Liability fund erased during settlement',
+            p_date: new Date().toISOString().split('T')[0],
+            p_currency: currency,
+          });
 
-          if (account) {
-            const newBalance = Math.max(0, parseFloat(account.balance?.toString() || '0') - eraseAmount);
-            await supabase.from('accounts').update({ balance: newBalance }).eq('id', portion.account_id);
-
-            // Reduce or delete portion
-            const newPortionAmount = portionAmount - eraseAmount;
-            if (newPortionAmount <= 0) {
-              await supabase
-                .from('account_liability_portions')
-                .delete()
-                .eq('account_id', portion.account_id)
-                .eq('liability_id', liabilityId);
-            } else {
-              await supabase
-                .from('account_liability_portions')
-                .update({ amount: newPortionAmount })
-                .eq('account_id', portion.account_id)
-                .eq('liability_id', liabilityId);
-            }
-
-            // Create transaction
-            await supabase.from('transactions').insert({
-              user_id: userId,
-              account_id: portion.account_id,
-              amount: -eraseAmount,
-              currency: currency,
-              type: 'expense',
-              description: 'Liability fund erased during settlement',
-              date: new Date().toISOString().split('T')[0],
-              metadata: {
-                liability_settlement: true,
-                liability_id: liabilityId,
-                adjustment_type: 'erase_funds',
-              },
-            });
+          if (spendError) {
+            console.error(`Error erasing funds from account ${fund.account_id}:`, spendError);
+            // Continue with other accounts even if one fails
           }
 
           remainingToErase -= eraseAmount;

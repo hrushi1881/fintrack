@@ -1,9 +1,14 @@
 import React, { createContext, useCallback, useContext, useMemo } from 'react';
-import { supabase } from '@/lib/supabase';
-import { useAuth } from '@/contexts/AuthContext';
+ import { useAuth } from '@/contexts/AuthContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { formatCurrencyAmount } from '@/utils/currency';
 import { useSettings } from '@/contexts/SettingsContext';
+import {
+  createOrganization as createOrgUtil,
+  type OrganizationWithAccounts,
+  type CreateOrganizationData,
+} from '@/utils/organizations';
+import { assignAccountToOrganization as assignAccountToOrgUtil } from '@/utils/accounts';
 import type { Account, Organization } from '@/types';
 
 type OrganizationFormValues = {
@@ -13,11 +18,9 @@ type OrganizationFormValues = {
   themeColor?: string;
 };
 
-export interface OrganizationWithAccounts extends Organization {
-  totalBalance: number;
-  accounts: Account[];
-  formattedBalance: string;
-}
+// OrganizationWithAccounts is exported from utils/organizations.ts
+// Re-exporting here for backwards compatibility
+export type { OrganizationWithAccounts } from '@/utils/organizations';
 
 interface OrganizationsContextValue {
   organizations: Organization[];
@@ -40,43 +43,66 @@ export const OrganizationsProvider: React.FC<{ children: React.ReactNode }> = ({
     accounts,
     refreshAccounts,
     refreshOrganizations,
+    globalRefresh,
   } = useRealtimeData();
 
+  // Get all organizations with accounts - computed from existing data
   const organizationsWithAccounts = useMemo<OrganizationWithAccounts[]>(() => {
+    if (!user?.id || !dbOrganizations) return [];
+
     const map = new Map<string, OrganizationWithAccounts>();
 
+    // Add real organizations
     (dbOrganizations || []).forEach((org) => {
-      map.set(org.id, {
-        ...org,
-        totalBalance: 0,
-        accounts: [],
-        formattedBalance: formatCurrencyAmount(0, org.currency),
-      });
+      if (org.is_active && !org.is_deleted) {
+        map.set(org.id, {
+          ...org,
+          totalBalance: 0,
+          accounts: [],
+          formattedBalance: formatCurrencyAmount(0, org.currency),
+          accountCount: 0,
+        });
+      }
     });
 
+    // Create "Unassigned" organization for accounts without organization_id
     const fallbackOrg: OrganizationWithAccounts = {
       id: DEFAULT_ORGANIZATION_ID,
       user_id: user?.id || '',
       name: 'Unassigned',
+      type: 'custom',
       currency: userCurrency ?? 'USD',
       country: undefined,
       logo_url: undefined,
       theme_color: undefined,
+      description: undefined,
+      is_active: true,
+      is_deleted: false,
+      deleted_at: undefined,
       created_at: new Date(0).toISOString(),
       updated_at: new Date(0).toISOString(),
       totalBalance: 0,
       accounts: [],
       formattedBalance: formatCurrencyAmount(0, userCurrency ?? 'USD'),
+      accountCount: 0,
     };
 
-    accounts.forEach((account) => {
-      const orgId = account.organization_id || DEFAULT_ORGANIZATION_ID;
+    // Group accounts by organization
+    const activeAccounts = accounts.filter(
+      (acc) => acc.is_active
+    );
+
+    activeAccounts.forEach((account) => {
+      // TypeScript type assertion - organization_id exists on Account but may not be in type definition
+      const accountWithOrgId = account as Account & { organization_id?: string | null };
+      const orgId = accountWithOrgId.organization_id || DEFAULT_ORGANIZATION_ID;
       const targetOrg =
         map.get(orgId) ||
         (orgId === DEFAULT_ORGANIZATION_ID ? fallbackOrg : undefined);
       if (!targetOrg) return;
       targetOrg.accounts.push(account);
       targetOrg.totalBalance += Number(account.balance ?? 0);
+      targetOrg.accountCount = targetOrg.accounts.length;
       targetOrg.formattedBalance = formatCurrencyAmount(
         targetOrg.totalBalance,
         targetOrg.currency || userCurrency || 'USD'
@@ -84,6 +110,8 @@ export const OrganizationsProvider: React.FC<{ children: React.ReactNode }> = ({
     });
 
     const result = Array.from(map.values());
+    
+    // Only include "Unassigned" if it has accounts
     if (fallbackOrg.accounts.length > 0) {
       fallbackOrg.formattedBalance = formatCurrencyAmount(
         fallbackOrg.totalBalance,
@@ -91,51 +119,50 @@ export const OrganizationsProvider: React.FC<{ children: React.ReactNode }> = ({
       );
       result.push(fallbackOrg);
     }
-    return result;
+
+    // Sort: Unassigned first (if exists), then by name
+    return result.sort((a, b) => {
+      if (a.id === DEFAULT_ORGANIZATION_ID) return -1;
+      if (b.id === DEFAULT_ORGANIZATION_ID) return 1;
+      return a.name.localeCompare(b.name);
+    });
   }, [accounts, dbOrganizations, userCurrency, user?.id]);
 
   const createOrganization = useCallback(
     async (values: OrganizationFormValues) => {
-      if (!user) {
+      if (!user?.id) {
         throw new Error('You must be signed in to create an organization.');
       }
 
-      const { data, error } = await supabase
-        .from('organizations')
-        .insert({
-          user_id: user.id,
-          name: values.name.trim(),
-          currency: values.currency || userCurrency || 'USD',
-          logo_url: values.logoUrl,
-          theme_color: values.themeColor,
-        })
-        .select()
-        .single();
+      const createData: CreateOrganizationData = {
+        name: values.name.trim(),
+        currency: values.currency || userCurrency || 'USD',
+        logo_url: values.logoUrl,
+        color_theme: values.themeColor,
+      };
 
-      if (error) {
-        console.error('Error creating organization', error);
-        throw error;
-      }
-
-      await refreshOrganizations();
-      return data as Organization;
+      const organization = await createOrgUtil(createData, user.id);
+      await globalRefresh();
+      return organization;
     },
-    [user, userCurrency, refreshOrganizations]
+    [user, userCurrency, globalRefresh]
   );
 
   const assignAccountToOrganization = useCallback(
     async (accountId: string, organizationId: string | null) => {
+      if (!user?.id) {
+        throw new Error('You must be signed in to assign accounts.');
+      }
+
       try {
-        await supabase
-          .from('accounts')
-          .update({ organization_id: organizationId })
-          .eq('id', accountId);
-        await refreshAccounts();
+        await assignAccountToOrgUtil(accountId, organizationId, user.id);
+        await globalRefresh();
       } catch (error) {
         console.error('Error assigning account to organization', error);
+        throw error;
       }
     },
-    [refreshAccounts]
+    [user?.id, globalRefresh]
   );
 
   const getOrganizationById = useCallback(

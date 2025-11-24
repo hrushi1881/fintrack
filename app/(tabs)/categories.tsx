@@ -10,7 +10,6 @@ import {
   FlatList,
   StatusBar,
 } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useRealtimeData } from '../../hooks/useRealtimeData';
@@ -19,6 +18,15 @@ import { Category, CategoryStats } from '../../types';
 import { getCategoryStats } from '../../utils/categories';
 import { formatCurrencyAmount } from '../../utils/currency';
 
+const ACTIVITY_TYPE_CONFIG = {
+  income: { label: 'Receive', icon: 'arrow-down-circle', color: '#10B981' },
+  expense: { label: 'Pay', icon: 'arrow-up-circle', color: '#EF4444' },
+  goal: { label: 'Goal', icon: 'flag', color: '#3B82F6' },
+  bill: { label: 'Bill', icon: 'receipt', color: '#F59E0B' },
+  liability: { label: 'Liability', icon: 'card', color: '#8B5CF6' },
+  budget: { label: 'Budget', icon: 'pie-chart', color: '#6366F1' },
+};
+
 export default function CategoriesScreen() {
   const { categories, globalRefresh } = useRealtimeData();
   const { currency } = useSettings();
@@ -26,6 +34,7 @@ export default function CategoriesScreen() {
   const [selectedActivityType, setSelectedActivityType] = useState<string>('all');
   const [categoryStats, setCategoryStats] = useState<CategoryStats[]>([]);
   const [loading, setLoading] = useState(true);
+  const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
 
   const activityTypes = [
     { key: 'all', label: 'All', icon: 'grid' },
@@ -40,6 +49,8 @@ export default function CategoriesScreen() {
   useEffect(() => {
     if (categories.length > 0) {
       loadCategoryStats();
+    } else {
+      setLoading(false);
     }
   }, [categories]);
 
@@ -86,44 +97,128 @@ export default function CategoriesScreen() {
     return formatCurrencyAmount(amount, currency);
   };
 
-  const renderCategoryCard = ({ item }: { item: Category }) => (
-    <TouchableOpacity
-      style={styles.categoryCard}
-      onPress={() => router.push(`/category/${item.id}` as any)}
-    >
-      <View style={styles.categoryHeader}>
-        <View style={[styles.categoryIcon, { backgroundColor: item.color }]}>
-          <Ionicons name={item.icon as any} size={24} color="white" />
-        </View>
-        <View style={styles.categoryInfo}>
-          <Text style={styles.categoryName}>{item.name}</Text>
-          <View style={styles.activityTypes}>
-            {item.activity_types.map((type, index) => (
-              <View key={index} style={styles.activityTypeBadge}>
-                <Text style={styles.activityTypeText}>{type}</Text>
+  const renderCategoryCard = ({ item }: { item: Category }) => {
+    const isExpanded = expandedCategory === item.id;
+    
+    return (
+      <View key={item.id} style={styles.categoryCard}>
+        {/* Category Header */}
+        <TouchableOpacity
+          style={[
+            styles.categoryHeader,
+            isExpanded && styles.categoryHeaderExpanded,
+          ]}
+          onPress={() => setExpandedCategory(isExpanded ? null : item.id)}
+        >
+          <View style={styles.categoryHeaderLeft}>
+            <View style={[styles.categoryIcon, { backgroundColor: item.color }]}>
+              <Ionicons name={item.icon as any} size={20} color="#FFFFFF" />
+            </View>
+            <View style={styles.categoryInfo}>
+              <Text style={styles.categoryName}>{item.name}</Text>
+              <View style={styles.categoryActivityTypes}>
+                {item.activity_types.slice(0, 3).map((type) => {
+                  const config = ACTIVITY_TYPE_CONFIG[type as keyof typeof ACTIVITY_TYPE_CONFIG];
+                  if (!config) return null;
+                  return (
+                    <View key={type} style={[styles.activityTypeBadge, { borderColor: config.color }]}>
+                      <Ionicons name={config.icon as any} size={12} color={config.color} />
+                      <Text style={[styles.activityTypeBadgeText, { color: config.color }]}>
+                        {config.label}
+                      </Text>
+                    </View>
+                  );
+                })}
+                {item.activity_types.length > 3 && (
+                  <Text style={styles.moreTypesText}>+{item.activity_types.length - 3}</Text>
+                )}
               </View>
-            ))}
+            </View>
           </View>
-        </View>
-        <Ionicons name="chevron-forward" size={20} color="#9CA3AF" />
+
+          <View style={styles.categoryHeaderRight}>
+            <Ionicons
+              name={isExpanded ? 'chevron-up' : 'chevron-down'}
+              size={20}
+              color="#666666"
+            />
+          </View>
+        </TouchableOpacity>
+
+        {/* Expanded Category Details */}
+        {isExpanded && (
+          <View style={styles.categoryDetails}>
+            {/* Activity Types */}
+            <View style={styles.activityTypesSection}>
+              <Text style={styles.sectionLabel}>Activity Types</Text>
+              <View style={styles.activityTypesGrid}>
+                {item.activity_types.map((type) => {
+                  const config = ACTIVITY_TYPE_CONFIG[type as keyof typeof ACTIVITY_TYPE_CONFIG];
+                  if (!config) return null;
+                  return (
+                    <View key={type} style={[styles.activityTypePill, { borderColor: config.color }]}>
+                      <Ionicons name={config.icon as any} size={16} color={config.color} />
+                      <Text style={[styles.activityTypeText, { color: config.color }]}>
+                        {config.label}
+                      </Text>
+                    </View>
+                  );
+                })}
+              </View>
+            </View>
+
+            {/* Statistics */}
+            <View style={styles.statsSection}>
+              <View style={styles.statRow}>
+                <View style={styles.statItem}>
+                  <Text style={styles.statLabel}>Total Spent</Text>
+                  <Text style={[styles.statValue, { color: '#EF4444' }]}>
+                    {formatCurrency(item.total_spent || 0)}
+                  </Text>
+                </View>
+                <View style={styles.statItem}>
+                  <Text style={styles.statLabel}>Total Received</Text>
+                  <Text style={[styles.statValue, { color: '#10B981' }]}>
+                    {formatCurrency(item.total_received || 0)}
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.statRow}>
+                <View style={styles.statItem}>
+                  <Text style={styles.statLabel}>Transactions</Text>
+                  <Text style={styles.statValue}>{item.transaction_count || 0}</Text>
+                </View>
+                <View style={styles.statItem}>
+                  <Text style={styles.statLabel}>Total Saved</Text>
+                  <Text style={[styles.statValue, { color: '#3B82F6' }]}>
+                    {formatCurrency(item.total_saved || 0)}
+                  </Text>
+                </View>
+              </View>
+            </View>
+
+            {/* Actions */}
+            <View style={styles.actionsSection}>
+              <TouchableOpacity
+                style={styles.actionButton}
+                onPress={() => router.push(`/category/${item.id}` as any)}
+              >
+                <Ionicons name="eye-outline" size={20} color="#000000" />
+                <Text style={styles.actionButtonText}>View Details</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.actionButton, styles.editButton]}
+                onPress={() => router.push(`/modals/edit-category?id=${item.id}` as any)}
+              >
+                <Ionicons name="create-outline" size={20} color="#FFFFFF" />
+                <Text style={styles.editButtonText}>Edit</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
       </View>
-      
-      <View style={styles.categoryStats}>
-        <View style={styles.statItem}>
-          <Text style={styles.statLabel}>Spent</Text>
-          <Text style={styles.statValue}>{formatCurrency(item.total_spent)}</Text>
-        </View>
-        <View style={styles.statItem}>
-          <Text style={styles.statLabel}>Received</Text>
-          <Text style={styles.statValue}>{formatCurrency(item.total_received)}</Text>
-        </View>
-        <View style={styles.statItem}>
-          <Text style={styles.statLabel}>Transactions</Text>
-          <Text style={styles.statValue}>{item.transaction_count}</Text>
-        </View>
-      </View>
-    </TouchableOpacity>
-  );
+    );
+  };
 
   const renderStatsCard = (title: string, category: CategoryStats | undefined, color: string) => (
     <View style={[styles.statsCard, { borderLeftColor: color }]}>
@@ -133,7 +228,7 @@ export default function CategoriesScreen() {
       ) : category ? (
         <>
           <Text style={styles.statsCategoryName}>{category.category_name}</Text>
-          <Text style={styles.statsAmount}>{formatCurrency(category.total_amount)}</Text>
+          <Text style={[styles.statsAmount, { color }]}>{formatCurrency(category.total_amount)}</Text>
           <Text style={styles.statsPercentage}>{category.percentage}% of total</Text>
         </>
       ) : (
@@ -143,11 +238,8 @@ export default function CategoriesScreen() {
   );
 
   return (
-    <LinearGradient
-      colors={['#99D795', '#99D795', '#99D795']}
-      style={styles.container}
-    >
-      <StatusBar barStyle="light-content" backgroundColor="#99D795" />
+    <View style={styles.container}>
+      <StatusBar barStyle="dark-content" backgroundColor="#FFF0F0" />
       <SafeAreaView style={styles.safeArea}>
         <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
           {/* Header */}
@@ -157,19 +249,19 @@ export default function CategoriesScreen() {
               style={styles.addButton}
               onPress={() => router.push('/modals/add-category' as any)}
             >
-              <Ionicons name="add" size={24} color="white" />
+              <Ionicons name="add" size={24} color="#FFFFFF" />
             </TouchableOpacity>
           </View>
 
           {/* Search Bar */}
           <View style={styles.searchContainer}>
-            <Ionicons name="search" size={20} color="#9CA3AF" style={styles.searchIcon} />
+            <Ionicons name="search" size={20} color="#666666" style={styles.searchIcon} />
             <TextInput
               style={styles.searchInput}
               placeholder="Search categories..."
               value={searchTerm}
               onChangeText={setSearchTerm}
-              placeholderTextColor="#9CA3AF"
+              placeholderTextColor="#666666"
             />
           </View>
 
@@ -192,7 +284,7 @@ export default function CategoriesScreen() {
                 <Ionicons
                   name={type.icon as any}
                   size={16}
-                  color={selectedActivityType === type.key ? '#10B981' : '#9CA3AF'}
+                  color={selectedActivityType === type.key ? '#000000' : '#666666'}
                 />
                 <Text
                   style={[
@@ -223,27 +315,17 @@ export default function CategoriesScreen() {
           {/* Top Categories */}
           <View style={styles.topCategories}>
             <Text style={styles.sectionTitle}>Top Categories</Text>
-            {renderStatsCard(
-              'Most Spent',
-              getMostSpentCategory(),
-              '#EF4444'
-            )}
-            {renderStatsCard(
-              'Most Received',
-              getMostReceivedCategory(),
-              '#10B981'
-            )}
-            {renderStatsCard(
-              'Most Saved',
-              getMostSavedCategory(),
-              '#3B82F6'
-            )}
+            {renderStatsCard('Most Spent', getMostSpentCategory(), '#EF4444')}
+            {renderStatsCard('Most Received', getMostReceivedCategory(), '#10B981')}
+            {renderStatsCard('Most Saved', getMostSavedCategory(), '#3B82F6')}
           </View>
 
           {/* Categories List */}
           <View style={styles.categoriesSection}>
             <Text style={styles.sectionTitle}>
-              {selectedActivityType === 'all' ? 'All Categories' : `${selectedActivityType.charAt(0).toUpperCase() + selectedActivityType.slice(1)} Categories`}
+              {selectedActivityType === 'all' 
+                ? 'All Categories' 
+                : `${selectedActivityType.charAt(0).toUpperCase() + selectedActivityType.slice(1)} Categories`}
             </Text>
             {loading ? (
               <View style={styles.loadingContainer}>
@@ -280,13 +362,14 @@ export default function CategoriesScreen() {
           </View>
         </ScrollView>
       </SafeAreaView>
-    </LinearGradient>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#FFF0F0',
   },
   safeArea: {
     flex: 1,
@@ -303,22 +386,36 @@ const styles = StyleSheet.create({
     paddingBottom: 30,
   },
   headerTitle: {
-    fontSize: 24,
-    color: 'white',
-    fontWeight: 'bold',
+    fontSize: 28,
+    fontFamily: 'Helvetica Neue',
+    fontWeight: '900',
+    color: '#000000',
+    letterSpacing: -0.5,
   },
   addButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#000000',
     borderRadius: 12,
     padding: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
   },
   searchContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#FFFFFF',
     borderRadius: 12,
     paddingHorizontal: 16,
     marginBottom: 20,
+    borderWidth: 1,
+    borderColor: '#E5E5E5',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 1,
   },
   searchIcon: {
     marginRight: 12,
@@ -326,7 +423,8 @@ const styles = StyleSheet.create({
   searchInput: {
     flex: 1,
     fontSize: 16,
-    color: 'white',
+    fontFamily: 'Instrument Serif',
+    color: '#000000',
     paddingVertical: 12,
   },
   activityFilter: {
@@ -338,23 +436,27 @@ const styles = StyleSheet.create({
   activityTypeButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#FFFFFF',
     borderRadius: 20,
     paddingHorizontal: 16,
     paddingVertical: 8,
     marginRight: 12,
+    borderWidth: 1,
+    borderColor: '#E5E5E5',
   },
   activeActivityTypeButton: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    backgroundColor: '#000000',
+    borderColor: '#000000',
   },
   activityTypeText: {
-    color: '#9CA3AF',
+    color: '#666666',
     fontSize: 14,
+    fontFamily: 'Poppins',
     fontWeight: '500',
     marginLeft: 6,
   },
   activeActivityTypeText: {
-    color: '#10B981',
+    color: '#FFFFFF',
   },
   summaryCards: {
     flexDirection: 'row',
@@ -362,78 +464,117 @@ const styles = StyleSheet.create({
     marginBottom: 30,
   },
   summaryCard: {
-    backgroundColor: '#000000',
+    backgroundColor: '#FFFFFF',
     borderRadius: 16,
     padding: 20,
     flex: 1,
     marginHorizontal: 8,
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E5E5E5',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
   },
   summaryLabel: {
     fontSize: 14,
-    color: '#9CA3AF',
+    fontFamily: 'Poppins',
+    color: '#666666',
     marginBottom: 8,
   },
   summaryValue: {
-    fontSize: 20,
-    color: 'white',
-    fontWeight: 'bold',
+    fontSize: 24,
+    fontFamily: 'Helvetica Neue',
+    fontWeight: '900',
+    color: '#000000',
   },
   topCategories: {
     marginBottom: 30,
   },
   sectionTitle: {
-    fontSize: 18,
-    color: 'white',
-    fontWeight: 'bold',
+    fontSize: 22,
+    fontFamily: 'Helvetica Neue',
+    fontWeight: '700',
+    color: '#000000',
     marginBottom: 16,
+    letterSpacing: -0.3,
   },
   statsCard: {
-    backgroundColor: '#000000',
+    backgroundColor: '#FFFFFF',
     borderRadius: 12,
     padding: 16,
     marginBottom: 12,
     borderLeftWidth: 4,
+    borderWidth: 1,
+    borderColor: '#E5E5E5',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
   },
   statsTitle: {
     fontSize: 14,
-    color: '#9CA3AF',
+    fontFamily: 'Poppins',
+    color: '#666666',
     marginBottom: 4,
   },
   statsCategoryName: {
     fontSize: 16,
-    color: 'white',
+    fontFamily: 'Helvetica Neue',
     fontWeight: '600',
+    color: '#000000',
     marginBottom: 4,
   },
   statsAmount: {
-    fontSize: 18,
-    color: 'white',
-    fontWeight: 'bold',
+    fontSize: 20,
+    fontFamily: 'Helvetica Neue',
+    fontWeight: '900',
     marginBottom: 2,
   },
   statsPercentage: {
     fontSize: 12,
-    color: '#9CA3AF',
+    fontFamily: 'Instrument Serif',
+    color: '#666666',
   },
   statsEmpty: {
     fontSize: 14,
-    color: '#6B7280',
+    fontFamily: 'Instrument Serif',
+    color: '#9CA3AF',
     fontStyle: 'italic',
   },
   categoriesSection: {
     marginBottom: 30,
   },
   categoryCard: {
-    backgroundColor: '#000000',
+    backgroundColor: '#FFFFFF',
     borderRadius: 16,
-    padding: 20,
     marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#E5E5E5',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
+    overflow: 'hidden',
   },
   categoryHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
+    justifyContent: 'space-between',
+    padding: 16,
+  },
+  categoryHeaderExpanded: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5E5E5',
+  },
+  categoryHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
   },
   categoryIcon: {
     width: 48,
@@ -448,53 +589,155 @@ const styles = StyleSheet.create({
   },
   categoryName: {
     fontSize: 18,
-    color: 'white',
-    fontWeight: 'bold',
+    fontFamily: 'Helvetica Neue',
+    fontWeight: '700',
+    color: '#000000',
     marginBottom: 8,
   },
-  activityTypes: {
+  categoryActivityTypes: {
     flexDirection: 'row',
     flexWrap: 'wrap',
+    alignItems: 'center',
   },
   activityTypeBadge: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 12,
+    borderWidth: 1,
     marginRight: 6,
     marginBottom: 4,
   },
-  categoryStats: {
+  activityTypeBadgeText: {
+    fontSize: 11,
+    fontFamily: 'Poppins',
+    fontWeight: '500',
+    marginLeft: 4,
+  },
+  moreTypesText: {
+    fontSize: 12,
+    fontFamily: 'Instrument Serif',
+    color: '#666666',
+    marginLeft: 4,
+  },
+  categoryHeaderRight: {
+    marginLeft: 12,
+  },
+  categoryDetails: {
+    padding: 16,
+    paddingTop: 0,
+  },
+  activityTypesSection: {
+    marginBottom: 16,
+  },
+  sectionLabel: {
+    fontSize: 14,
+    fontFamily: 'Poppins',
+    fontWeight: '600',
+    color: '#666666',
+    marginBottom: 12,
+  },
+  activityTypesGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  activityTypePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    borderWidth: 1,
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  activityTypeText: {
+    fontSize: 13,
+    fontFamily: 'Poppins',
+    fontWeight: '500',
+    marginLeft: 6,
+  },
+  statsSection: {
+    marginBottom: 16,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#E5E5E5',
+  },
+  statRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    marginBottom: 12,
   },
   statItem: {
-    alignItems: 'center',
+    flex: 1,
+    marginHorizontal: 8,
   },
   statLabel: {
     fontSize: 12,
-    color: '#9CA3AF',
+    fontFamily: 'Poppins',
+    color: '#666666',
     marginBottom: 4,
   },
   statValue: {
+    fontSize: 16,
+    fontFamily: 'Helvetica Neue',
+    fontWeight: '700',
+    color: '#000000',
+  },
+  actionsSection: {
+    flexDirection: 'row',
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: '#E5E5E5',
+  },
+  actionButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F5F5F5',
+    borderRadius: 12,
+    paddingVertical: 10,
+    marginHorizontal: 6,
+    borderWidth: 1,
+    borderColor: '#E5E5E5',
+  },
+  editButton: {
+    backgroundColor: '#000000',
+    borderColor: '#000000',
+  },
+  actionButtonText: {
     fontSize: 14,
-    color: 'white',
+    fontFamily: 'Poppins',
     fontWeight: '600',
+    color: '#000000',
+    marginLeft: 6,
+  },
+  editButtonText: {
+    fontSize: 14,
+    fontFamily: 'Poppins',
+    fontWeight: '600',
+    color: '#FFFFFF',
+    marginLeft: 6,
   },
   emptyContainer: {
     alignItems: 'center',
     paddingVertical: 48,
   },
   emptyText: {
-    fontSize: 16,
-    color: '#9CA3AF',
-    fontWeight: '500',
+    fontSize: 18,
+    fontFamily: 'Helvetica Neue',
+    fontWeight: '600',
+    color: '#666666',
     marginTop: 16,
   },
   emptySubtext: {
     fontSize: 14,
-    color: '#6B7280',
-    marginTop: 4,
+    fontFamily: 'Instrument Serif',
+    color: '#9CA3AF',
+    marginTop: 8,
+    textAlign: 'center',
   },
   loadingContainer: {
     alignItems: 'center',
@@ -502,19 +745,20 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     fontSize: 16,
-    color: '#9CA3AF',
-    fontWeight: '500',
+    fontFamily: 'Instrument Serif',
+    color: '#666666',
   },
   createFirstButton: {
-    backgroundColor: '#10B981',
+    backgroundColor: '#000000',
     paddingHorizontal: 24,
     paddingVertical: 12,
     borderRadius: 12,
     marginTop: 16,
   },
   createFirstButtonText: {
-    color: 'white',
+    color: '#FFFFFF',
     fontSize: 16,
-    fontWeight: '600',
+    fontFamily: 'Helvetica Neue',
+    fontWeight: '700',
   },
 });

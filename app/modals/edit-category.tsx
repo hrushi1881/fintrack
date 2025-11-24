@@ -11,7 +11,6 @@ import {
   Alert,
   StatusBar,
 } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useRealtimeData } from '../../hooks/useRealtimeData';
@@ -42,6 +41,15 @@ const ACTIVITY_TYPES = [
   { key: 'budget', label: 'Budget', icon: 'pie-chart', color: '#EC4899' },
 ];
 
+const activityTypeConfig = {
+  income: { label: 'Income', icon: 'trending-up', color: '#10B981' },
+  expense: { label: 'Expense', icon: 'trending-down', color: '#EF4444' },
+  goal: { label: 'Goal', icon: 'flag', color: '#3B82F6' },
+  bill: { label: 'Bill', icon: 'receipt', color: '#F59E0B' },
+  liability: { label: 'Liability', icon: 'card', color: '#8B5CF6' },
+  budget: { label: 'Budget', icon: 'pie-chart', color: '#EC4899' },
+};
+
 export default function EditCategoryModal() {
   const { id } = useLocalSearchParams();
   const { categories, globalRefresh } = useRealtimeData();
@@ -58,7 +66,7 @@ export default function EditCategoryModal() {
       setName(category.name);
       setSelectedColor(category.color);
       setSelectedIcon(category.icon);
-      setSelectedActivityTypes(category.activity_types);
+      setSelectedActivityTypes(category.activity_types || ['expense']);
     }
   }, [category]);
 
@@ -104,7 +112,7 @@ export default function EditCategoryModal() {
           .eq('name', name.trim())
           .eq('is_deleted', false)
           .neq('id', category.id)
-          .single();
+          .maybeSingle();
 
         if (existing) {
           const existingTypes = existing.activity_types || [];
@@ -178,92 +186,10 @@ export default function EditCategoryModal() {
     }
   };
 
-  const renderColorPicker = () => (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Color</Text>
-      <View style={styles.colorGrid}>
-        {PRESET_COLORS.map((color) => (
-          <TouchableOpacity
-            key={color}
-            style={[
-              styles.colorOption,
-              { backgroundColor: color },
-              selectedColor === color && styles.selectedColorOption,
-            ]}
-            onPress={() => setSelectedColor(color)}
-          >
-            {selectedColor === color && (
-              <Ionicons name="checkmark" size={20} color="white" />
-            )}
-          </TouchableOpacity>
-        ))}
-      </View>
-    </View>
-  );
-
-  const renderIconPicker = () => (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Icon</Text>
-      <View style={styles.iconGrid}>
-        {COMMON_ICONS.map((icon) => (
-          <TouchableOpacity
-            key={icon}
-            style={[
-              styles.iconOption,
-              selectedIcon === icon && styles.selectedIconOption,
-            ]}
-            onPress={() => setSelectedIcon(icon)}
-          >
-            <Ionicons
-              name={icon as any}
-              size={24}
-              color={selectedIcon === icon ? '#10B981' : '#6B7280'}
-            />
-          </TouchableOpacity>
-        ))}
-      </View>
-    </View>
-  );
-
-  const renderActivityTypes = () => (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>Activity Types</Text>
-      <Text style={styles.sectionSubtitle}>Select which activities this category can be used for</Text>
-      <View style={styles.activityTypesGrid}>
-        {ACTIVITY_TYPES.map((type) => (
-          <TouchableOpacity
-            key={type.key}
-            style={[
-              styles.activityTypeOption,
-              selectedActivityTypes.includes(type.key) && styles.selectedActivityTypeOption,
-            ]}
-            onPress={() => handleActivityTypeToggle(type.key)}
-          >
-            <View style={[styles.activityTypeIcon, { backgroundColor: type.color }]}>
-              <Ionicons name={type.icon as any} size={20} color="white" />
-            </View>
-            <Text style={[
-              styles.activityTypeLabel,
-              selectedActivityTypes.includes(type.key) && styles.selectedActivityTypeLabel,
-            ]}>
-              {type.label}
-            </Text>
-            {selectedActivityTypes.includes(type.key) && (
-              <Ionicons name="checkmark-circle" size={20} color="#10B981" />
-            )}
-          </TouchableOpacity>
-        ))}
-      </View>
-    </View>
-  );
-
   if (!category) {
     return (
       <Modal visible={true} animationType="slide" presentationStyle="pageSheet">
-        <LinearGradient
-          colors={['#99D795', '#99D795', '#99D795']}
-          style={styles.container}
-        >
+        <View style={styles.container}>
           <SafeAreaView style={styles.safeArea}>
             <View style={styles.errorContainer}>
               <Ionicons name="alert-circle" size={48} color="#EF4444" />
@@ -276,18 +202,15 @@ export default function EditCategoryModal() {
               </TouchableOpacity>
             </View>
           </SafeAreaView>
-        </LinearGradient>
+        </View>
       </Modal>
     );
   }
 
   return (
     <Modal visible={true} animationType="slide" presentationStyle="pageSheet">
-      <LinearGradient
-        colors={['#99D795', '#99D795', '#99D795']}
-        style={styles.container}
-      >
-        <StatusBar barStyle="light-content" backgroundColor="#99D795" />
+      <View style={styles.container}>
+        <StatusBar barStyle="dark-content" backgroundColor="#FFF0F0" />
         <SafeAreaView style={styles.safeArea}>
           <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
             {/* Header */}
@@ -318,20 +241,99 @@ export default function EditCategoryModal() {
                   value={name}
                   onChangeText={setName}
                   placeholder="Enter category name"
-                  placeholderTextColor="#9CA3AF"
+                  placeholderTextColor="#999999"
                   maxLength={50}
                 />
                 <Text style={styles.characterCount}>{name.length}/50</Text>
               </View>
 
               {/* Color Picker */}
-              {renderColorPicker()}
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Color</Text>
+                <View style={styles.colorGrid}>
+                  {PRESET_COLORS.map((color) => (
+                    <TouchableOpacity
+                      key={color}
+                      style={[
+                        styles.colorOption,
+                        { backgroundColor: color },
+                        selectedColor === color && styles.selectedColorOption,
+                      ]}
+                      onPress={() => setSelectedColor(color)}
+                    >
+                      {selectedColor === color && (
+                        <Ionicons name="checkmark" size={20} color="white" />
+                      )}
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
 
               {/* Icon Picker */}
-              {renderIconPicker()}
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Icon</Text>
+                <View style={styles.iconGrid}>
+                  {COMMON_ICONS.map((icon) => (
+                    <TouchableOpacity
+                      key={icon}
+                      style={[
+                        styles.iconOption,
+                        selectedIcon === icon && styles.selectedIconOption,
+                      ]}
+                      onPress={() => setSelectedIcon(icon)}
+                    >
+                      <Ionicons
+                        name={icon as any}
+                        size={24}
+                        color={selectedIcon === icon ? selectedColor : '#666666'}
+                      />
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
 
               {/* Activity Types */}
-              {renderActivityTypes()}
+              <View style={styles.section}>
+                <Text style={styles.sectionTitle}>Activity Types</Text>
+                <Text style={styles.sectionSubtitle}>
+                  Select which activities this category can be used for
+                </Text>
+                <View style={styles.activityTypesGrid}>
+                  {ACTIVITY_TYPES.map((type) => {
+                    const isSelected = selectedActivityTypes.includes(type.key);
+                    const config = activityTypeConfig[type.key as keyof typeof activityTypeConfig];
+                    return (
+                      <TouchableOpacity
+                        key={type.key}
+                        style={[
+                          styles.activityTypePill,
+                          isSelected && styles.activityTypePillSelected,
+                          isSelected && { backgroundColor: config.color },
+                        ]}
+                        onPress={() => handleActivityTypeToggle(type.key)}
+                      >
+                        <Ionicons
+                          name={config.icon as any}
+                          size={16}
+                          color={isSelected ? '#FFFFFF' : config.color}
+                          style={{ marginRight: 6 }}
+                        />
+                        <Text
+                          style={[
+                            styles.activityTypeText,
+                            isSelected && styles.activityTypeTextSelected,
+                          ]}
+                        >
+                          {config.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                <Text style={styles.activityTypesHint}>
+                  Select how you'll use this category (e.g., Pay for expenses, Set goals, etc.)
+                </Text>
+              </View>
 
               {/* Preview */}
               <View style={styles.section}>
@@ -345,9 +347,17 @@ export default function EditCategoryModal() {
                     <View style={styles.previewActivityTypes}>
                       {selectedActivityTypes.map((type) => {
                         const activityType = ACTIVITY_TYPES.find(t => t.key === type);
+                        const config = activityTypeConfig[type as keyof typeof activityTypeConfig];
                         return (
-                          <View key={type} style={styles.previewActivityType}>
-                            <Text style={styles.previewActivityTypeText}>
+                          <View 
+                            key={type} 
+                            style={[
+                              styles.previewActivityType,
+                              { backgroundColor: config.color + '20', borderColor: config.color + '40' }
+                            ]}
+                          >
+                            <Ionicons name={config.icon as any} size={12} color={config.color} style={{ marginRight: 4 }} />
+                            <Text style={[styles.previewActivityTypeText, { color: config.color }]}>
                               {activityType?.label}
                             </Text>
                           </View>
@@ -365,14 +375,14 @@ export default function EditCategoryModal() {
                   onPress={handleDelete}
                   disabled={loading}
                 >
-                  <Ionicons name="trash" size={20} color="white" />
+                  <Ionicons name="trash" size={20} color="#FFFFFF" />
                   <Text style={styles.deleteText}>Delete Category</Text>
                 </TouchableOpacity>
               </View>
             </View>
           </ScrollView>
         </SafeAreaView>
-      </LinearGradient>
+      </View>
     </Modal>
   );
 }
@@ -380,6 +390,7 @@ export default function EditCategoryModal() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#FFF0F0',
   },
   safeArea: {
     flex: 1,
@@ -400,26 +411,30 @@ const styles = StyleSheet.create({
   },
   cancelText: {
     fontSize: 16,
-    color: 'white',
+    color: '#000000',
+    fontFamily: 'Poppins',
     fontWeight: '500',
   },
   headerTitle: {
     fontSize: 20,
-    color: 'white',
+    color: '#000000',
+    fontFamily: 'Helvetica Neue',
     fontWeight: 'bold',
   },
   saveButton: {
-    backgroundColor: '#10B981',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 8,
+    backgroundColor: '#000000',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 12,
   },
   disabledButton: {
-    backgroundColor: '#6B7280',
+    backgroundColor: '#666666',
+    opacity: 0.6,
   },
   saveText: {
     fontSize: 16,
-    color: 'white',
+    color: '#FFFFFF',
+    fontFamily: 'Poppins',
     fontWeight: '600',
   },
   form: {
@@ -430,110 +445,129 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     fontSize: 18,
-    color: 'white',
+    color: '#000000',
+    fontFamily: 'Helvetica Neue',
     fontWeight: 'bold',
     marginBottom: 12,
   },
   sectionSubtitle: {
     fontSize: 14,
-    color: '#9CA3AF',
+    color: '#666666',
+    fontFamily: 'Instrument Serif',
+    fontStyle: 'italic',
     marginBottom: 16,
   },
   nameInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#FFFFFF',
     borderRadius: 12,
     padding: 16,
     fontSize: 16,
-    color: 'white',
+    color: '#000000',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
+    borderColor: '#E5E5E5',
+    fontFamily: 'Instrument Serif',
   },
   characterCount: {
     fontSize: 12,
-    color: '#9CA3AF',
+    color: '#999999',
     textAlign: 'right',
     marginTop: 4,
+    fontFamily: 'Poppins',
   },
   colorGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'space-between',
+    gap: 12,
   },
   colorOption: {
     width: 48,
     height: 48,
     borderRadius: 24,
-    marginBottom: 12,
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 2,
     borderColor: 'transparent',
   },
   selectedColorOption: {
-    borderColor: 'white',
+    borderColor: '#000000',
+    borderWidth: 3,
   },
   iconGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'space-between',
+    gap: 12,
   },
   iconOption: {
-    width: 48,
-    height: 48,
+    width: 56,
+    height: 56,
     borderRadius: 12,
-    marginBottom: 12,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E5E5E5',
   },
   selectedIconOption: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    borderColor: '#000000',
+    borderWidth: 2,
+    backgroundColor: '#F5F5F5',
   },
   activityTypesGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 8,
   },
-  activityTypeOption: {
-    width: '48%',
+  activityTypePill: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 12,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderWidth: 1.5,
+    borderColor: '#E5E5E5',
   },
-  selectedActivityTypeOption: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+  activityTypePillSelected: {
+    borderColor: 'transparent',
   },
-  activityTypeIcon: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 8,
-  },
-  activityTypeLabel: {
-    flex: 1,
+  activityTypeText: {
     fontSize: 14,
-    color: 'white',
+    color: '#000000',
+    fontFamily: 'Poppins',
     fontWeight: '500',
   },
-  selectedActivityTypeLabel: {
-    color: '#10B981',
+  activityTypeTextSelected: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+  activityTypesHint: {
+    fontSize: 12,
+    color: '#999999',
+    fontFamily: 'Instrument Serif',
+    fontStyle: 'italic',
+    marginTop: 8,
   },
   previewCard: {
-    backgroundColor: '#000000',
+    backgroundColor: '#FFFFFF',
     borderRadius: 16,
     padding: 20,
     flexDirection: 'row',
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E5E5E5',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 3,
   },
   previewIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: 16,
@@ -543,25 +577,28 @@ const styles = StyleSheet.create({
   },
   previewName: {
     fontSize: 18,
-    color: 'white',
+    color: '#000000',
+    fontFamily: 'Helvetica Neue',
     fontWeight: 'bold',
     marginBottom: 8,
   },
   previewActivityTypes: {
     flexDirection: 'row',
     flexWrap: 'wrap',
+    gap: 6,
   },
   previewActivityType: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    paddingHorizontal: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 12,
+    borderWidth: 1,
     marginRight: 6,
-    marginBottom: 4,
   },
   previewActivityTypeText: {
     fontSize: 12,
-    color: '#9CA3AF',
+    fontFamily: 'Poppins',
     fontWeight: '500',
   },
   deleteButton: {
@@ -571,12 +608,13 @@ const styles = StyleSheet.create({
     backgroundColor: '#EF4444',
     borderRadius: 12,
     padding: 16,
+    gap: 8,
   },
   deleteText: {
-    color: 'white',
+    color: '#FFFFFF',
     fontSize: 16,
+    fontFamily: 'Poppins',
     fontWeight: '600',
-    marginLeft: 8,
   },
   errorContainer: {
     flex: 1,
@@ -586,20 +624,22 @@ const styles = StyleSheet.create({
   },
   errorText: {
     fontSize: 18,
-    color: 'white',
+    color: '#000000',
+    fontFamily: 'Helvetica Neue',
     fontWeight: 'bold',
     marginTop: 16,
     marginBottom: 24,
   },
   backButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#000000',
     paddingHorizontal: 24,
     paddingVertical: 12,
-    borderRadius: 8,
+    borderRadius: 12,
   },
   backButtonText: {
-    color: 'white',
+    color: '#FFFFFF',
     fontSize: 16,
+    fontFamily: 'Poppins',
     fontWeight: '600',
   },
 });

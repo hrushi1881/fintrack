@@ -125,6 +125,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         data: {
           first_name: userData.firstName,
           last_name: userData.lastName,
+          phone: userData.phone || null,
         }
       }
     });
@@ -148,18 +149,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (!error && data.user) {
-      // Create user profile immediately
-      const { error: profileError } = await supabase
-        .from('users_profile')
-        .insert({
-          user_id: data.user.id,
-          full_name: `${userData.firstName} ${userData.lastName}`,
-          base_currency: 'USD',
-        });
+      // Profile creation is handled by database trigger (migration 019)
+      // But we'll try to create/update it manually if session is available for phone number
+      // This is a best-effort attempt - the trigger will handle it if this fails
+      try {
+        // Wait a bit for the session to be established
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Get the current session
+        const { data: sessionData } = await supabase.auth.getSession();
+        
+        if (sessionData.session) {
+          // Try to create/update profile with phone number if session is available
+          // The trigger already created it, so this is just to add phone if provided
+          if (userData.phone) {
+            const { error: profileError } = await supabase
+              .from('users_profile')
+              .upsert({
+                user_id: data.user.id,
+                full_name: `${userData.firstName} ${userData.lastName}`,
+                base_currency: 'USD',
+                phone: userData.phone,
+              }, {
+                onConflict: 'user_id'
+              });
 
-      if (profileError) {
-        console.error('Error creating user profile:', profileError);
-        // Don't fail signup if profile creation fails, but log it
+            if (profileError) {
+              // Log but don't fail - trigger already created the profile
+              console.warn('Could not update profile with phone number:', profileError);
+            }
+          }
+        }
+      } catch (err) {
+        // Don't fail signup if profile update fails - trigger handles creation
+        console.warn('Profile update attempt failed (this is OK, trigger handles it):', err);
       }
     }
 
