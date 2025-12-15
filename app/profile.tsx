@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, StatusBar, Image, Switch, Alert } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, StatusBar, Switch, Alert } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
@@ -16,7 +16,7 @@ export default function ProfileScreen() {
   const { user, signOut } = useAuth();
   const { profile } = useUser();
   const { backgroundMode } = useBackgroundMode();
-  const { accounts, transactions, totalBalance } = useRealtimeData();
+  const { transactions, totalBalance } = useRealtimeData();
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [biometricEnabled, setBiometricEnabled] = useState(true);
   const [darkModeEnabled, setDarkModeEnabled] = useState(true);

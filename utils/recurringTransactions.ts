@@ -12,6 +12,7 @@ import {
   calculateStatus as calculateRecurrenceStatus,
   getDaysUntil
 } from '@/utils/recurrence';
+import { mapUiToDbFrequency, mapDbToUiFrequency } from '@/utils/frequency';
 
 export interface RecurringTransaction {
   id: string;
@@ -43,6 +44,7 @@ export interface RecurringTransaction {
   paused_until?: string;
   auto_create: boolean;
   auto_create_days_before: number;
+  payment_tracking_method?: 'bill' | 'scheduled_transaction' | 'direct' | 'manual';
   remind_before: boolean;
   reminder_days: number[];
   color: string;
@@ -92,6 +94,7 @@ export interface CreateRecurringTransactionData {
   subscription_start_date?: string;
   auto_create?: boolean;
   auto_create_days_before?: number;
+  payment_tracking_method?: 'bill' | 'scheduled_transaction' | 'direct' | 'manual';
   remind_before?: boolean;
   reminder_days?: number[];
   color?: string;
@@ -128,13 +131,13 @@ export async function fetchRecurringTransactions(
       query = query.in('status', filters.status);
     }
 
-    // Note: nature is stored in custom_pattern JSONB, not as a direct column
+    // Note: nature is stored as a direct column in the database
     // We'll filter by nature after fetching if needed
     // For now, we fetch all and filter in memory if nature filter is provided
 
     if (filters.direction) {
-      // Database column is 'type', interface uses 'direction'
-      query = query.eq('type', filters.direction);
+      // Database column is 'direction'
+      query = query.eq('direction', filters.direction);
     }
 
     if (filters.is_active !== undefined) {
@@ -156,38 +159,24 @@ export async function fetchRecurringTransactions(
     // Map frequency from database format to interface format
     // Database stores: 'daily', 'weekly', 'monthly', 'quarterly', 'yearly', 'custom'
     // Interface expects: 'day', 'week', 'month', 'quarter', 'year', 'custom'
-    const frequencyReverseMap: Record<string, string> = {
-      'daily': 'day',
-      'weekly': 'week',
-      'monthly': 'month',
-      'quarterly': 'quarter',
-      'yearly': 'year',
-      'custom': 'custom',
-      // Also handle if already in interface format (backward compatibility)
-      'day': 'day',
-      'week': 'week',
-      'month': 'month',
-      'quarter': 'quarter',
-      'year': 'year',
-    };
-
     // Calculate next_transaction_date for each if not set
     // Map database columns to interface fields
     const transactions = (data || []).map(tx => ({
       ...tx,
-      title: tx.name || tx.title, // Map name to title
-      direction: tx.type || tx.direction, // Map type to direction
-      frequency: frequencyReverseMap[tx.frequency] || 'month', // Map frequency back
+      title: tx.title, // Database uses 'title'
+      direction: tx.direction, // Database uses 'direction'
+      account_id: tx.linked_account_id || undefined, // Map linked_account_id to account_id for interface
+      frequency: tx.frequency as any, // Database stores UI format directly, no mapping needed
       // Extract from custom_pattern JSONB
       date_of_occurrence: tx.custom_pattern?.date_of_occurrence?.toString() || undefined,
       custom_unit: tx.custom_pattern?.custom_unit || undefined,
       custom_interval: tx.custom_pattern?.custom_interval?.toString() || undefined,
-      // Extract nature from custom_pattern
-      nature: tx.custom_pattern?.nature || undefined,
+      // Nature is stored directly in database column, not in custom_pattern
+      nature: tx.nature || undefined,
     })).filter(tx => {
-      // Filter by nature if provided (stored in custom_pattern JSONB)
+      // Filter by nature if provided (stored as direct column)
       if (filters.nature && filters.nature.length > 0) {
-        const txNature = tx.custom_pattern?.nature;
+        const txNature = tx.nature;
         return txNature && filters.nature.includes(txNature);
       }
       return true;
@@ -196,23 +185,9 @@ export async function fetchRecurringTransactions(
         // Map frequency from database format to interface format for RecurrenceDefinition
         // Database: 'daily', 'weekly', 'monthly', etc.
         // RecurrenceDefinition expects: 'day', 'week', 'month', etc.
-        const frequencyMap: Record<string, string> = {
-          'daily': 'day',
-          'weekly': 'week',
-          'monthly': 'month',
-          'quarterly': 'quarter',
-          'yearly': 'year',
-          'custom': 'custom',
-          'day': 'day',
-          'week': 'week',
-          'month': 'month',
-          'quarter': 'quarter',
-          'year': 'year',
-        };
-        const mappedFrequency = frequencyMap[tx.frequency] || 'month';
-        
+        // Database stores frequency in UI format, use directly
         const def: RecurrenceDefinition = {
-          frequency: mappedFrequency as any,
+          frequency: tx.frequency as any,
           interval: tx.interval || 1,
           start_date: tx.start_date,
           end_date: tx.end_date || undefined,
@@ -256,30 +231,16 @@ export async function fetchRecurringTransactionById(id: string): Promise<Recurri
     if (!data) return null;
 
     // Map frequency from database format to interface format
-    const frequencyReverseMap: Record<string, string> = {
-      'daily': 'day',
-      'weekly': 'week',
-      'monthly': 'month',
-      'quarterly': 'quarter',
-      'yearly': 'year',
-      'custom': 'custom',
-      'day': 'day',
-      'week': 'week',
-      'month': 'month',
-      'quarter': 'quarter',
-      'year': 'year',
-    };
-
     // Map database columns to interface fields
     return {
       ...data,
-      title: data.name || data.title,
-      direction: data.type || data.direction,
-      frequency: frequencyReverseMap[data.frequency] || 'month', // Map frequency back
+      title: data.title, // Database uses 'title'
+      direction: data.direction, // Database uses 'direction'
+      frequency: mapDbToUiFrequency(data.frequency), // Map frequency back
       date_of_occurrence: data.custom_pattern?.date_of_occurrence?.toString() || undefined,
       custom_unit: data.custom_pattern?.custom_unit || undefined,
       custom_interval: data.custom_pattern?.custom_interval?.toString() || undefined,
-      nature: data.custom_pattern?.nature || undefined, // Extract nature
+      nature: data.nature || undefined, // Nature is stored directly in database column
     } as RecurringTransaction;
   } catch (error) {
     console.error('Error fetching recurring transaction:', error);
@@ -297,62 +258,53 @@ export async function createRecurringTransaction(
     const { data: user } = await supabase.auth.getUser();
     if (!user.user) throw new Error('User not authenticated');
 
+    // Sanitize recurrence inputs
+    const sanitizedInterval = Math.max(1, data.interval || 1);
+    const sanitizedCustomInterval = Math.max(1, data.custom_interval || data.interval || 1);
+    const sanitizedCustomUnit = data.custom_unit
+      ? mapDbToUiFrequency(mapUiToDbFrequency(data.custom_unit)) // normalize to known token
+      : undefined;
+
     // Calculate next_transaction_date using recurrence engine
     const def: RecurrenceDefinition = {
       frequency: data.frequency,
-      interval: data.interval || 1,
+      interval: sanitizedInterval,
       start_date: data.start_date,
       end_date: data.end_date,
       date_of_occurrence: data.date_of_occurrence,
-      custom_unit: data.custom_unit,
-      custom_interval: data.custom_interval,
+      custom_unit: sanitizedCustomUnit,
+      custom_interval: sanitizedCustomInterval,
     };
 
     const nextDate = calculateNextOccurrence(def, data.start_date);
 
-    // Map frequency from interface format to database format
-    // Interface uses: 'day', 'week', 'month', 'quarter', 'year', 'custom'
-    // Database expects: 'daily', 'weekly', 'monthly', 'quarterly', 'yearly', 'custom'
-    const frequencyMap: Record<string, string> = {
-      'day': 'daily',
-      'week': 'weekly',
-      'month': 'monthly',
-      'quarter': 'quarterly',
-      'year': 'yearly',
-      'custom': 'custom',
-      // Also handle if already in database format (backward compatibility)
-      'daily': 'daily',
-      'weekly': 'weekly',
-      'monthly': 'monthly',
-      'quarterly': 'quarterly',
-      'yearly': 'yearly',
-    };
-    const dbFrequency = frequencyMap[data.frequency] || 'monthly';
-
+    // Database stores frequency in UI format ('day', 'week', 'month', etc.), not DB format
+    // So we don't need to map - use frequency directly
     const { data: transaction, error } = await supabase
       .from('recurring_transactions')
       .insert({
         user_id: user.user.id,
-        name: data.title, // Database column is 'name', interface uses 'title'
+        title: data.title, // Database column is 'title'
         description: data.description,
         category_id: data.category_id,
-        type: data.direction || 'expense', // Database column is 'type', interface uses 'direction'
+        direction: data.direction || 'expense', // Database column is 'direction'
         amount: data.amount,
         amount_type: data.amount_type || 'fixed',
         estimated_amount: data.estimated_amount,
         currency: data.currency,
-        frequency: dbFrequency, // Use mapped frequency
-        interval: data.interval || 1,
+        frequency: data.frequency, // Database stores UI format directly
+        interval: sanitizedInterval,
         start_date: data.start_date,
         end_date: data.end_date,
-        // Store date_of_occurrence, custom_unit, custom_interval, and nature in custom_pattern JSONB
-        custom_pattern: (data.date_of_occurrence || data.custom_unit || data.custom_interval || data.nature) ? {
+        // Store date_of_occurrence, custom_unit, custom_interval in custom_pattern JSONB
+        // Note: nature is stored as a direct column, not in custom_pattern
+        custom_pattern: (data.date_of_occurrence || data.custom_unit || data.custom_interval) ? {
           date_of_occurrence: data.date_of_occurrence ? parseInt(data.date_of_occurrence.toString()) : undefined,
-          custom_unit: data.custom_unit,
-          custom_interval: data.custom_interval ? parseInt(data.custom_interval.toString()) : undefined,
-          nature: data.nature, // Store nature in custom_pattern JSONB
+          custom_unit: sanitizedCustomUnit,
+          custom_interval: sanitizedCustomInterval,
         } : null,
-        account_id: data.account_id || null, // Required for income, optional for expenses (selected when paying)
+        nature: data.nature, // Store nature as direct column
+        linked_account_id: data.account_id || null, // Database uses 'linked_account_id', required for income, optional for expenses (selected when paying)
         fund_type: data.fund_type || 'personal',
         specific_fund_id: data.specific_fund_id,
         is_subscription: data.is_subscription || false,
@@ -362,6 +314,7 @@ export async function createRecurringTransaction(
         status: 'active',
         auto_create: data.auto_create !== false,
         auto_create_days_before: data.auto_create_days_before || 3,
+        payment_tracking_method: data.payment_tracking_method || 'scheduled_transaction',
         remind_before: data.remind_before !== false,
         reminder_days: data.reminder_days || [7, 3, 1],
         color: data.color || '#F59E0B',
@@ -379,8 +332,9 @@ export async function createRecurringTransaction(
     // Map database columns to interface fields
     return {
       ...transaction,
-      title: transaction.name || transaction.title,
-      direction: transaction.type || transaction.direction,
+      title: transaction.title, // Database uses 'title'
+      direction: transaction.direction, // Database uses 'direction'
+      account_id: transaction.linked_account_id || undefined, // Map linked_account_id to account_id for interface
       date_of_occurrence: transaction.custom_pattern?.date_of_occurrence?.toString() || undefined,
       custom_unit: transaction.custom_pattern?.custom_unit || undefined,
       custom_interval: transaction.custom_pattern?.custom_interval?.toString() || undefined,
@@ -401,6 +355,16 @@ export async function updateRecurringTransaction(
     const { data: user } = await supabase.auth.getUser();
     if (!user.user) throw new Error('User not authenticated');
 
+    // Sanitize recurrence inputs
+    const sanitizedInterval = data.interval !== undefined ? Math.max(1, data.interval) : undefined;
+    const sanitizedCustomInterval = data.custom_interval !== undefined
+      ? Math.max(1, data.custom_interval)
+      : undefined;
+    // Database stores custom_unit in UI format ('day', 'week', etc.), normalize to ensure valid token
+    const sanitizedCustomUnit = data.custom_unit
+      ? (['day', 'week', 'month', 'quarter', 'year'].includes(data.custom_unit) ? data.custom_unit : 'month')
+      : undefined;
+
     // Recalculate next_transaction_date if recurrence fields changed
     let nextDate: string | undefined = undefined;
     if (data.frequency || data.interval || data.start_date || data.end_date || data.date_of_occurrence) {
@@ -408,12 +372,12 @@ export async function updateRecurringTransaction(
       if (current) {
         const def: RecurrenceDefinition = {
           frequency: data.frequency || current.frequency,
-          interval: data.interval ?? current.interval,
+          interval: sanitizedInterval ?? current.interval,
           start_date: data.start_date || current.start_date,
           end_date: data.end_date !== undefined ? data.end_date : current.end_date,
           date_of_occurrence: data.date_of_occurrence !== undefined ? data.date_of_occurrence : current.date_of_occurrence,
-          custom_unit: data.custom_unit !== undefined ? data.custom_unit : current.custom_unit,
-          custom_interval: data.custom_interval !== undefined ? data.custom_interval : current.custom_interval,
+          custom_unit: sanitizedCustomUnit !== undefined ? sanitizedCustomUnit : current.custom_unit,
+          custom_interval: sanitizedCustomInterval !== undefined ? sanitizedCustomInterval : current.custom_interval,
         };
         const next = calculateNextOccurrence(def, new Date().toISOString().split('T')[0]);
         nextDate = next || undefined;
@@ -426,42 +390,32 @@ export async function updateRecurringTransaction(
     };
 
     // Map interface fields to database columns
-    if (updateData.title !== undefined) {
-      updateData.name = updateData.title;
-      delete updateData.title;
+    // Database uses 'title' and 'direction' directly, no mapping needed
+    // But map account_id to linked_account_id
+    if (updateData.account_id !== undefined) {
+      updateData.linked_account_id = updateData.account_id;
+      delete updateData.account_id;
     }
     
-    // Map direction to type
-    if (updateData.direction !== undefined) {
-      updateData.type = updateData.direction;
-      delete updateData.direction;
-    }
-    
-    // Map frequency from interface format to database format
-    if (updateData.frequency !== undefined) {
-      const frequencyMap: Record<string, string> = {
-        'day': 'daily',
-        'week': 'weekly',
-        'month': 'monthly',
-        'quarter': 'quarterly',
-        'year': 'yearly',
-        'custom': 'custom',
-        'daily': 'daily',
-        'weekly': 'weekly',
-        'monthly': 'monthly',
-        'quarterly': 'quarterly',
-        'yearly': 'yearly',
-      };
-      updateData.frequency = frequencyMap[updateData.frequency] || 'monthly';
+    // Database stores frequency in UI format, no mapping needed
+    // if (updateData.frequency !== undefined) {
+    //   updateData.frequency = mapUiToDbFrequency(updateData.frequency);
+    // }
+    if (sanitizedInterval !== undefined) {
+      updateData.interval = sanitizedInterval;
     }
     
     // Store custom fields in custom_pattern JSONB
-    if (updateData.date_of_occurrence !== undefined || updateData.custom_unit !== undefined || updateData.custom_interval !== undefined) {
+    if (updateData.date_of_occurrence !== undefined || updateData.custom_unit !== undefined || updateData.custom_interval !== undefined || sanitizedCustomUnit !== undefined || sanitizedCustomInterval !== undefined) {
       updateData.custom_pattern = {
         ...(updateData.custom_pattern || {}),
         date_of_occurrence: updateData.date_of_occurrence ? parseInt(updateData.date_of_occurrence) : undefined,
-        custom_unit: updateData.custom_unit,
-        custom_interval: updateData.custom_interval ? parseInt(updateData.custom_interval) : undefined,
+        custom_unit: sanitizedCustomUnit ?? updateData.custom_unit,
+        custom_interval: sanitizedCustomInterval !== undefined
+          ? sanitizedCustomInterval
+          : updateData.custom_interval
+            ? parseInt(updateData.custom_interval)
+            : undefined,
       };
       delete updateData.date_of_occurrence;
       delete updateData.custom_unit;
@@ -489,8 +443,9 @@ export async function updateRecurringTransaction(
     // Map database columns to interface fields
     return {
       ...transaction,
-      title: transaction.name || transaction.title,
-      direction: transaction.type || transaction.direction,
+      title: transaction.title, // Database uses 'title'
+      direction: transaction.direction, // Database uses 'direction'
+      account_id: transaction.linked_account_id || undefined, // Map linked_account_id to account_id for interface
       date_of_occurrence: transaction.custom_pattern?.date_of_occurrence?.toString() || undefined,
       custom_unit: transaction.custom_pattern?.custom_unit || undefined,
       custom_interval: transaction.custom_pattern?.custom_interval?.toString() || undefined,
@@ -562,11 +517,28 @@ export async function resumeRecurringTransaction(id: string): Promise<RecurringT
     const { data: user } = await supabase.auth.getUser();
     if (!user.user) throw new Error('User not authenticated');
 
+    // Recompute next_transaction_date on resume so the series starts from “today”
+    const current = await fetchRecurringTransactionById(id);
+    let nextDate: string | undefined;
+    if (current) {
+      const def: RecurrenceDefinition = {
+        frequency: current.frequency,
+        interval: current.interval,
+        start_date: current.start_date,
+        end_date: current.end_date || undefined,
+        date_of_occurrence: current.date_of_occurrence || undefined,
+        custom_unit: current.custom_unit || undefined,
+        custom_interval: current.custom_interval || undefined,
+      };
+      nextDate = calculateNextOccurrence(def, new Date().toISOString().split('T')[0]) || undefined;
+    }
+
     const { data: transaction, error } = await supabase
       .from('recurring_transactions')
       .update({
         status: 'active',
         paused_until: null,
+        ...(nextDate ? { next_transaction_date: nextDate } : {}),
         updated_at: new Date().toISOString(),
       })
       .eq('id', id)

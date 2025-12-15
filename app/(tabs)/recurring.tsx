@@ -16,8 +16,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { fetchRecurringTransactions, RecurringTransaction, deleteRecurringTransaction } from '@/utils/recurringTransactions';
 import { formatCurrencyAmount } from '@/utils/currency';
-import { getRecurrenceDescription } from '@/utils/recurrence';
-import { calculateNextOccurrence } from '@/utils/recurrence';
+import { getRecurrenceDescription, calculateNextOccurrence } from '@/utils/recurrence';
 
 const getNatureLabel = (transaction: RecurringTransaction) => {
   if (transaction.is_subscription) return 'Subscription';

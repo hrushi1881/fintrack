@@ -615,23 +615,8 @@ export async function applyExtraPayment(
           .eq('user_id', userId)
           .eq('status', 'upcoming');
 
-        // Regenerate bills with new payment amount but same end date
-        const billOptions: LiabilityBillGenerationOptions = {
-          liabilityId,
-          userId,
-          startDate: firstPendingDate,
-          endDate,
-          frequency: 'monthly',
-          paymentAmount: newPayment,
-          interestRate: currentRate,
-          totalAmount: newBalance,
-          interestIncluded: true,
-          currency: liability.currency || 'INR',
-          linkedAccountId: liability.linked_account_id || undefined,
-          startingPaymentNumber,
-        };
-
-        await generateLiabilityBills(billOptions);
+        // Regenerate upcoming payments as cycles only; defer bill creation to user action per-cycle
+        // (No bulk bill creation here to avoid instant bills on liability adjustments)
       }
 
       impact = {
@@ -689,7 +674,7 @@ export async function applyExtraPayment(
         .eq('status', 'upcoming')
         .gt('due_date', newEndDate.toISOString().split('T')[0]);
 
-      // Delete bills beyond new term and regenerate
+      // Delete bills beyond new term; do not regenerate (user schedules via cycles)
       const { data: pendingBills } = await supabase
         .from('bills')
         .select('due_date')
@@ -698,47 +683,14 @@ export async function applyExtraPayment(
         .eq('status', 'upcoming')
         .order('due_date', { ascending: true });
 
+      // If any pending remain, mark them deleted; users will recreate per-cycle as needed
       if (pendingBills && pendingBills.length > 0) {
-        // Get last paid bill's payment number
-        const { data: lastPaidBill } = await supabase
-          .from('bills')
-          .select('payment_number')
-          .eq('liability_id', liabilityId)
-          .eq('user_id', userId)
-          .eq('status', 'paid')
-          .order('payment_number', { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        const startingPaymentNumber = lastPaidBill?.payment_number 
-          ? lastPaidBill.payment_number + 1
-          : 1;
-
-        // Delete all pending bills (mark as deleted)
         await supabase
           .from('bills')
           .update({ is_deleted: true, updated_at: new Date().toISOString() })
           .eq('liability_id', liabilityId)
           .eq('user_id', userId)
           .eq('status', 'upcoming');
-
-        // Regenerate bills with same payment but new end date
-        const billOptions: LiabilityBillGenerationOptions = {
-          liabilityId,
-          userId,
-          startDate: firstPendingDate,
-          endDate: newEndDate,
-          frequency: 'monthly',
-          paymentAmount: currentPayment,
-          interestRate: currentRate,
-          totalAmount: newBalance,
-          interestIncluded: true,
-          currency: liability.currency || 'INR',
-          linkedAccountId: liability.linked_account_id || undefined,
-          startingPaymentNumber,
-        };
-
-        await generateLiabilityBills(billOptions);
       }
 
       // Calculate old term for comparison
@@ -845,23 +797,7 @@ export async function applyExtraPayment(
           .eq('user_id', userId)
           .eq('status', 'upcoming');
 
-        // Regenerate bills with same payment and end date but new balance
-        const billOptions: LiabilityBillGenerationOptions = {
-          liabilityId,
-          userId,
-          startDate: firstPendingDate,
-          endDate,
-          frequency: 'monthly',
-          paymentAmount: currentPayment,
-          interestRate: currentRate,
-          totalAmount: newBalance,
-          interestIncluded: true,
-          currency: liability.currency || 'INR',
-          linkedAccountId: liability.linked_account_id || undefined,
-          startingPaymentNumber,
-        };
-
-        await generateLiabilityBills(billOptions);
+        // Do not regenerate bills; users will create/schedule per cycle
       }
 
       // Calculate term change

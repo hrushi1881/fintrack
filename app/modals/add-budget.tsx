@@ -7,12 +7,12 @@ import {
   TextInput,
   ScrollView,
   StyleSheet,
-  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useNotification } from '@/contexts/NotificationContext';
+import { router } from 'expo-router';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { createBudget } from '@/utils/budgets';
 import CalendarDatePicker from '@/components/CalendarDatePicker';
@@ -20,8 +20,8 @@ import { formatCurrencyAmount } from '@/utils/currency';
 import { supabase } from '@/lib/supabase';
 
 interface AddBudgetModalProps {
-  visible: boolean;
-  onClose: () => void;
+  visible?: boolean;
+  onClose?: () => void;
 }
 
 const BUDGET_TYPES = [
@@ -83,14 +83,14 @@ const BUDGET_TYPES = [
   },
 ];
 
-const RECURRENCE_OPTIONS = [
-  { id: 'monthly', label: 'Monthly' },
-  { id: 'weekly', label: 'Weekly' },
-  { id: 'yearly', label: 'Yearly' },
-  { id: 'custom', label: 'Custom' },
-];
+// const RECURRENCE_OPTIONS = [
+//   { id: 'monthly', label: 'Monthly' },
+//   { id: 'weekly', label: 'Weekly' },
+//   { id: 'yearly', label: 'Yearly' },
+//   { id: 'custom', label: 'Custom' },
+// ];
 
-export const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible, onClose }) => {
+const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose }) => {
   const { user } = useAuth();
   const { currency } = useSettings();
   const { showNotification } = useNotification();
@@ -173,7 +173,12 @@ export const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible, onClose
 
   const handleClose = () => {
     handleReset();
-    onClose();
+    if (onClose) {
+      onClose();
+    } else {
+      // Fallback for route-driven modal
+      router.back();
+    }
   };
 
   const handleDateSelect = (date: Date) => {
@@ -238,12 +243,12 @@ export const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible, onClose
       // Reset form but keep modal open
       // Note: handleClose resets form, but we want to keep modal open
       // So we'll reset manually without closing
-      setCurrentStep(1);
-      setBudgetType(null);
+      setStep(1);
+      setBudgetType('');
       setFormData({
         name: '',
         amount: '',
-        startDate: '',
+        startDate: new Date().toISOString().split('T')[0],
         endDate: '',
         categoryId: '',
         goalId: '',
@@ -252,9 +257,9 @@ export const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible, onClose
         recurrencePattern: 'monthly',
         budgetMode: 'spend_cap',
         goalSubtype: '',
-        alertThresholds: [50, 75, 90],
-        paceAlerts: false,
-        progressAlerts: false,
+        alertThresholds: [50, 80, 100],
+        paceAlerts: true,
+        progressAlerts: true,
         endOfPeriodAlerts: false,
       });
       
@@ -387,7 +392,7 @@ export const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible, onClose
             </TouchableOpacity>
           </View>
           <Text style={styles.helperText}>
-            A 'Spend Cap' helps you stay under spending, while a 'Save Target' encourages you to save towards a specific amount.
+            A &apos;Spend Cap&apos; helps you stay under spending, while a &apos;Save Target&apos; encourages you to save towards a specific amount.
           </Text>
         </View>
       )}
@@ -639,7 +644,7 @@ export const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible, onClose
           </View>
           {formData.goalSubtype && (
             <Text style={styles.helperText}>
-              Mode automatically set to "{formData.budgetMode === 'save_target' ? 'Save Target' : 'Spend Cap'}" based on selected subtype.
+              Mode automatically set to &quot;{formData.budgetMode === 'save_target' ? 'Save Target' : 'Spend Cap'}&quot; based on selected subtype.
             </Text>
           )}
         </View>
@@ -1477,9 +1482,6 @@ const styles = StyleSheet.create({
     fontWeight: '400',
     color: '#6B7280',
   },
-  alertSection: {
-    marginTop: 8,
-  },
   modeInfoContainer: {
     backgroundColor: '#F9FAFB',
     borderRadius: 8,
@@ -1500,3 +1502,5 @@ const styles = StyleSheet.create({
     color: '#10B981',
   },
 });
+
+export default AddBudgetModal;

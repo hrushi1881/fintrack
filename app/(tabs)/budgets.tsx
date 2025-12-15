@@ -6,11 +6,12 @@ import { formatCurrencyAmount } from '@/utils/currency';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { BudgetCard } from '@/components/BudgetCard';
 import { useSettings } from '@/contexts/SettingsContext';
-import { AddBudgetModal } from '@/app/modals/add-budget';
+import AddBudgetModal from '@/app/modals/add-budget';
 import ActionSheet, { ActionSheetItem } from '@/components/ActionSheet';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
 import { Budget } from '@/types';
+import GlassCard from '@/components/GlassCard';
 
 export default function BudgetsScreen() {
   const { user } = useAuth();
@@ -24,6 +25,11 @@ export default function BudgetsScreen() {
   // Filter budgets based on active tab
   const activeBudgets = budgets.filter(budget => budget.is_active);
   const completedBudgets = budgets.filter(budget => !budget.is_active);
+
+  // Calculate summary statistics
+  const totalBudgets = activeBudgets.length;
+  const totalSpent = activeBudgets.reduce((sum, b) => sum + b.spent_amount, 0);
+  const totalAmount = activeBudgets.reduce((sum, b) => sum + b.amount, 0);
 
   const handleAddBudget = () => {
     setShowAddBudget(true);
@@ -183,27 +189,30 @@ export default function BudgetsScreen() {
   const renderEmptyState = (type: 'active' | 'completed') => {
     const isActive = type === 'active';
     return (
-      <View style={styles.emptyContainer}>
-        <Ionicons 
-          name={isActive ? "wallet-outline" : "checkmark-circle-outline"} 
-          size={64} 
-          color="#D1D5DB" 
-        />
-        <Text style={styles.emptyTitle}>
-          {isActive ? 'No Active Budgets' : 'No Completed Budgets'}
-        </Text>
-        <Text style={styles.emptyDescription}>
-          {isActive 
-            ? 'Create your first budget to start tracking your spending'
-            : 'Your completed budgets will appear here'
-          }
-        </Text>
-        {isActive && (
-          <TouchableOpacity style={styles.createButton} onPress={handleAddBudget}>
-            <Text style={styles.createButtonText}>Create Budget</Text>
-          </TouchableOpacity>
-        )}
-      </View>
+      <GlassCard padding={48} marginVertical={24}>
+        <View style={styles.emptyContainer}>
+          <Ionicons 
+            name={isActive ? "wallet-outline" : "checkmark-circle-outline"} 
+            size={48} 
+            color="rgba(0, 0, 0, 0.4)" 
+          />
+          <Text style={styles.emptyTitle}>
+            {isActive ? 'No Active Budgets' : 'No Completed Budgets'}
+          </Text>
+          <Text style={styles.emptyDescription}>
+            {isActive 
+              ? 'Create your first budget to start tracking your spending'
+              : 'Your completed budgets will appear here'
+            }
+          </Text>
+          {isActive && (
+            <TouchableOpacity style={styles.createButton} onPress={handleAddBudget}>
+              <Ionicons name="add" size={20} color="#FFFFFF" />
+              <Text style={styles.createButtonText}>Create Budget</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </GlassCard>
     );
   };
 
@@ -213,36 +222,56 @@ export default function BudgetsScreen() {
       <SafeAreaView style={styles.safeArea}>
         <ScrollView 
           style={styles.scrollView}
+          contentContainerStyle={styles.scrollContent}
           refreshControl={
             <RefreshControl
               refreshing={loading}
               onRefresh={refreshBudgets}
-              tintColor="#10B981"
+              tintColor="#000000"
             />
           }
         >
           {/* Header */}
-          <View style={styles.header}>
-            <View style={styles.headerLeft} />
+          <View style={styles.headerRow}>
             <Text style={styles.headerTitle}>Budgets</Text>
-            <TouchableOpacity style={styles.addButton} onPress={handleAddBudget}>
-              <Ionicons name="add" size={24} color="#000000" />
+            <TouchableOpacity style={styles.iconButton} onPress={handleAddBudget}>
+              <Ionicons name="add" size={22} color="#0E401C" />
             </TouchableOpacity>
           </View>
 
-          {/* Tab Selector */}
-          <View style={styles.tabContainer}>
+          {/* Summary Card */}
+          {activeTab === 'active' && totalBudgets > 0 && (
+            <GlassCard padding={24} marginVertical={20}>
+              <View style={styles.summaryGrid}>
+                <View style={styles.summaryItem}>
+                  <Text style={styles.summaryLabel}>Active Budgets</Text>
+                  <Text style={styles.summaryValue}>{totalBudgets}</Text>
+                </View>
+                <View style={styles.summaryItem}>
+                  <Text style={styles.summaryLabel}>Total Spent</Text>
+                  <Text style={styles.summaryValue}>{formatCurrencyAmount(totalSpent, currency)}</Text>
+                </View>
+                <View style={styles.summaryItem}>
+                  <Text style={styles.summaryLabel}>Total Budget</Text>
+                  <Text style={styles.summaryValue}>{formatCurrencyAmount(totalAmount, currency)}</Text>
+                </View>
+              </View>
+            </GlassCard>
+          )}
+
+          {/* Segmented Control */}
+          <View style={styles.segmentedControl}>
             <TouchableOpacity
               style={[
-                styles.tabButton,
-                activeTab === 'active' && styles.activeTab,
+                styles.segmentButton,
+                activeTab === 'active' && styles.segmentButtonActive,
               ]}
               onPress={() => setActiveTab('active')}
             >
               <Text
                 style={[
-                  styles.tabText,
-                  activeTab === 'active' && styles.activeTabText,
+                  styles.segmentText,
+                  activeTab === 'active' && styles.segmentTextActive,
                 ]}
               >
                 Active ({activeBudgets.length})
@@ -250,15 +279,15 @@ export default function BudgetsScreen() {
             </TouchableOpacity>
             <TouchableOpacity
               style={[
-                styles.tabButton,
-                activeTab === 'completed' && styles.activeTab,
+                styles.segmentButton,
+                activeTab === 'completed' && styles.segmentButtonActive,
               ]}
               onPress={() => setActiveTab('completed')}
             >
               <Text
                 style={[
-                  styles.tabText,
-                  activeTab === 'completed' && styles.activeTabText,
+                  styles.segmentText,
+                  activeTab === 'completed' && styles.segmentTextActive,
                 ]}
               >
                 Completed ({completedBudgets.length})
@@ -297,13 +326,6 @@ export default function BudgetsScreen() {
             )}
           </View>
 
-          {/* Add Budget Button */}
-          {activeTab === 'active' && activeBudgets.length > 0 && (
-            <TouchableOpacity style={styles.addBudgetButton} onPress={handleAddBudget}>
-              <Ionicons name="add-circle" size={24} color="#10B981" />
-              <Text style={styles.addBudgetText}>Add New Budget</Text>
-            </TouchableOpacity>
-          )}
         </ScrollView>
       </SafeAreaView>
 
@@ -329,7 +351,7 @@ export default function BudgetsScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#FFFFFF', // White background
+    backgroundColor: '#FFFFFF',
   },
   safeArea: {
     flex: 1,
@@ -337,60 +359,80 @@ const styles = StyleSheet.create({
   },
   scrollView: {
     flex: 1,
-    paddingHorizontal: 20,
-    backgroundColor: '#FFFFFF',
   },
-  header: {
+  scrollContent: {
+    paddingHorizontal: 20,
+    paddingBottom: 32,
+  },
+  headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingTop: 16,
-    paddingBottom: 20,
-    backgroundColor: '#FFFFFF',
-  },
-  headerLeft: {
-    width: 40,
-    height: 40,
+    paddingBottom: 8,
   },
   headerTitle: {
-    fontSize: 28,
-    fontFamily: 'Archivo Black', // Archivo Black for page headings
-    fontWeight: '900',
-    color: '#000000', // Black text
+    fontSize: 26,
+    fontFamily: 'Archivo Black',
+    color: '#000000',
   },
-  addButton: {
+  iconButton: {
     width: 40,
     height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#D7DECC',
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  tabContainer: {
+  summaryGrid: {
     flexDirection: 'row',
-    backgroundColor: '#F3F4F6',
+    flexWrap: 'wrap',
+    gap: 16,
+  },
+  summaryItem: {
+    flex: 1,
+    minWidth: '30%',
+  },
+  summaryLabel: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.7)',
+    marginBottom: 4,
+  },
+  summaryValue: {
+    fontSize: 20,
+    fontFamily: 'Poppins-Bold',
+    fontWeight: '700',
+    color: '#000000',
+  },
+  segmentedControl: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
     borderRadius: 12,
     padding: 4,
-    marginBottom: 20,
+    marginBottom: 16,
   },
-  tabButton: {
+  segmentButton: {
     flex: 1,
-    paddingVertical: 12,
-    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
     borderRadius: 8,
+    alignItems: 'center',
   },
-  activeTab: {
-    backgroundColor: '#FFFFFF',
+  segmentButtonActive: {
+    backgroundColor: '#000000',
   },
-  tabText: {
-    fontSize: 16,
-    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
-    fontWeight: '400',
-    color: '#6B7280',
+  segmentText: {
+    fontSize: 14,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.6)',
   },
-  activeTabText: {
-    color: '#000000', // Black text
-    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
-    fontWeight: '400',
+  segmentTextActive: {
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
   },
   budgetsList: {
     marginBottom: 20,
@@ -497,37 +539,36 @@ const styles = StyleSheet.create({
   },
   emptyContainer: {
     alignItems: 'center',
-    paddingVertical: 60,
-    paddingHorizontal: 40,
+    gap: 16,
   },
   emptyTitle: {
-    fontSize: 20,
-    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for titles
-    fontWeight: '400',
-    color: '#000000', // Black text
-    marginTop: 16,
-    marginBottom: 8,
+    fontSize: 18,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
     textAlign: 'center',
   },
   emptyDescription: {
-    fontSize: 16,
-    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
-    fontWeight: '400',
-    color: '#6B7280',
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.7)',
     textAlign: 'center',
-    lineHeight: 24,
-    marginBottom: 24,
+    marginTop: 4,
   },
   createButton: {
-    backgroundColor: '#10B981', // Dark green button
-    paddingHorizontal: 24,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#000000',
+    paddingHorizontal: 20,
     paddingVertical: 12,
-    borderRadius: 8,
+    borderRadius: 12,
+    marginTop: 8,
   },
   createButtonText: {
-    fontSize: 16,
-    fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
-    fontWeight: '400',
-    color: '#FFFFFF', // White text on button
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
 });

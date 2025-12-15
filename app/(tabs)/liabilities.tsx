@@ -14,14 +14,11 @@ import { router } from 'expo-router';
 import { useLiabilities } from '@/contexts/LiabilitiesContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { formatCurrencyAmount } from '@/utils/currency';
-import GlassCard from '@/components/GlassCard';
 import ActionSheet, { ActionSheetItem } from '@/components/ActionSheet';
 import { supabase } from '@/lib/supabase';
-import { useAuth } from '@/contexts/AuthContext';
 import { Liability } from '@/types';
 
 const LiabilitiesScreen: React.FC = () => {
-  const { user } = useAuth();
   const { liabilities, loading, refreshLiabilities } = useLiabilities();
   const { currency } = useSettings();
 
@@ -234,7 +231,7 @@ const LiabilitiesScreen: React.FC = () => {
   };
 
   const renderEmptyState = (message: string, icon: keyof typeof Ionicons.glyphMap) => (
-    <GlassCard padding={48} marginVertical={24}>
+    <View style={[styles.card, { padding: 48, marginVertical: 24 }]}>
       <View style={styles.emptyStateContent}>
         <Ionicons name={icon} size={48} color="rgba(0, 0, 0, 0.4)" />
         <Text style={styles.emptyText}>{message}</Text>
@@ -246,7 +243,7 @@ const LiabilitiesScreen: React.FC = () => {
           <Text style={styles.emptyActionText}>Add Liability</Text>
         </TouchableOpacity>
       </View>
-    </GlassCard>
+    </View>
   );
 
   if (loading) {
@@ -280,7 +277,7 @@ const LiabilitiesScreen: React.FC = () => {
           </View>
 
           {/* Summary Card */}
-          <GlassCard padding={24} marginVertical={20}>
+          <View style={[styles.card, { padding: 24, marginVertical: 20 }]}>
             <View style={styles.summaryGrid}>
               <View style={styles.summaryItem}>
                 <Text style={styles.summaryLabel}>Total Outstanding</Text>
@@ -301,7 +298,7 @@ const LiabilitiesScreen: React.FC = () => {
                 </Text>
               </View>
             </View>
-          </GlassCard>
+          </View>
 
           {/* Segmented Control */}
           <View style={styles.segmentedControl}>
@@ -346,7 +343,7 @@ const LiabilitiesScreen: React.FC = () => {
                     onPress={() => router.push(`/liability/${item.id}` as any)}
                     activeOpacity={0.7}
                   >
-                    <GlassCard padding={20} marginVertical={12}>
+                    <View style={[styles.card, { padding: 20, marginVertical: 12 }]}>
                       <View style={styles.liabilityCardContent}>
                         {/* Header */}
                         <View style={styles.liabilityHeader}>
@@ -432,7 +429,7 @@ const LiabilitiesScreen: React.FC = () => {
                           )}
                         </View>
                       </View>
-                    </GlassCard>
+                    </View>
                   </TouchableOpacity>
                 );
               })
@@ -485,6 +482,16 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#FFFFFF',
+  },
+  card: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    shadowColor: '#1A331F',
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
+    elevation: 2,
   },
   scrollContent: {
     paddingHorizontal: 20,

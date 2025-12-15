@@ -2,7 +2,7 @@ import React from 'react';
 import { View, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import ThemedCard from './ThemedCard';
-import ThemedText, { CardTitle, CurrencyText, SecondaryText } from './ThemedText';
+import { CardTitle, CurrencyText, SecondaryText } from './ThemedText';
 import { theme } from '@/theme';
 
 interface ProfileCardProps {

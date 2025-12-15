@@ -17,7 +17,6 @@ import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { useSettings } from '@/contexts/SettingsContext';
-import { formatCurrencyAmount } from '@/utils/currency';
 import type { Account } from '@/types';
 
 export type AccountTypeOption = 'debit' | 'credit' | 'savings' | 'wallet';
@@ -46,7 +45,7 @@ interface AccountFormState {
   description?: string;
 }
 
-const ACCOUNT_TYPE_OPTIONS: Array<{ value: AccountTypeOption; label: string; icon: keyof typeof Ionicons.glyphMap }> = [
+const ACCOUNT_TYPE_OPTIONS: { value: AccountTypeOption; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { value: 'debit', label: 'Debit', icon: 'card-outline' },
   { value: 'credit', label: 'Credit', icon: 'card' },
   { value: 'savings', label: 'Savings', icon: 'cash-outline' },

@@ -4,15 +4,15 @@ import {
   Text,
   TouchableOpacity,
   StyleSheet,
-  ScrollView,
   TextInput,
   Modal,
-  FlatList,
+  ActivityIndicator,
+  ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Category } from '../types';
-import { fetchCategories } from '../utils/categories';
 import { supabase } from '../lib/supabase';
+import { getParentCategories, getSubcategories } from '../utils/categories';
 
 interface CategoryPickerProps {
   selectedCategoryId?: string;
@@ -23,18 +23,6 @@ interface CategoryPickerProps {
   style?: any;
 }
 
-const PRESET_COLORS = [
-  '#EF4444', '#F59E0B', '#10B981', '#3B82F6', '#8B5CF6', '#EC4899',
-  '#F97316', '#6366F1', '#84CC16', '#06B6D4', '#F43F5E', '#8B5A2B'
-];
-
-const COMMON_ICONS = [
-  'home', 'car', 'restaurant', 'bag', 'medical', 'school',
-  'airplane', 'gift', 'card', 'cash', 'trending-up', 'receipt',
-  'wifi', 'call', 'flash', 'shield', 'play', 'time', 'flag',
-  'briefcase', 'laptop', 'musical-notes', 'ellipsis-horizontal'
-];
-
 export default function CategoryPicker({
   selectedCategoryId,
   onCategorySelect,
@@ -43,34 +31,25 @@ export default function CategoryPicker({
   disabled = false,
   style,
 }: CategoryPickerProps) {
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [filteredCategories, setFilteredCategories] = useState<Category[]>([]);
+  const [parentCategories, setParentCategories] = useState<Category[]>([]);
+  const [subcategoriesMap, setSubcategoriesMap] = useState<Map<string, Category[]>>(new Map());
+  const [allItems, setAllItems] = useState<{ category: Category; parent?: Category }[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalVisible, setIsModalVisible] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<Category | null>(null);
+  const [expandedParentId, setExpandedParentId] = useState<string | null>(null);
 
   useEffect(() => {
     loadCategories();
   }, [activityType]);
 
   useEffect(() => {
-    if (selectedCategoryId && categories.length > 0) {
-      const category = categories.find(c => c.id === selectedCategoryId);
+    if (selectedCategoryId && allItems.length > 0) {
+      const category = allItems.find(c => c.category.id === selectedCategoryId)?.category;
       setSelectedCategory(category || null);
     }
-  }, [selectedCategoryId, categories]);
-
-  useEffect(() => {
-    if (searchTerm) {
-      const filtered = categories.filter(category =>
-        category.name.toLowerCase().includes(searchTerm.toLowerCase())
-      );
-      setFilteredCategories(filtered);
-    } else {
-      setFilteredCategories(categories);
-    }
-  }, [searchTerm, categories]);
+  }, [selectedCategoryId, allItems]);
 
   const loadCategories = async () => {
     try {
@@ -78,10 +57,27 @@ export default function CategoryPicker({
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
-      const fetchedCategories = await fetchCategories(user.id, {
-        activityType,
-      });
-      setCategories(fetchedCategories);
+      // Load parents
+      const parents = await getParentCategories(user.id, activityType);
+
+      // Load subs for each parent
+      const subMap = new Map<string, Category[]>();
+      const items: { category: Category; parent?: Category }[] = [];
+
+      for (const parent of parents) {
+        items.push({ category: parent });
+        try {
+          const subs = await getSubcategories(user.id, parent.id);
+          subMap.set(parent.id, subs);
+          subs.forEach((sub) => items.push({ category: sub, parent }));
+        } catch {
+          subMap.set(parent.id, []);
+        }
+      }
+
+      setParentCategories(parents);
+      setSubcategoriesMap(subMap);
+      setAllItems(items);
     } catch (error) {
       console.error('Error loading categories:', error);
     } finally {
@@ -105,32 +101,13 @@ export default function CategoryPicker({
     }
   };
 
-  const renderCategoryItem = ({ item }: { item: Category }) => (
-    <TouchableOpacity
-      style={[
-        styles.categoryItem,
-        selectedCategory?.id === item.id && styles.selectedCategoryItem,
-      ]}
-      onPress={() => handleCategorySelect(item)}
-    >
-      <View style={[styles.categoryIcon, { backgroundColor: item.color }]}>
-        <Ionicons name={item.icon as any} size={20} color="white" />
-      </View>
-      <View style={styles.categoryInfo}>
-        <Text style={styles.categoryName}>{item.name}</Text>
-        <View style={styles.activityTypes}>
-          {item.activity_types.map((type, index) => (
-            <View key={index} style={styles.activityTypeBadge}>
-              <Text style={styles.activityTypeText}>{type}</Text>
-            </View>
-          ))}
-        </View>
-      </View>
-      {selectedCategory?.id === item.id && (
-        <Ionicons name="checkmark" size={20} color="#10B981" />
-      )}
-    </TouchableOpacity>
-  );
+  const filteredItems = searchTerm
+    ? allItems.filter(({ category, parent }) => {
+        const parentLabel = parent?.name || parentCategories.find((p) => p.id === category.parent_id)?.name;
+        const path = parentLabel ? `${parentLabel} ${category.name}` : category.name;
+        return path.toLowerCase().includes(searchTerm.toLowerCase());
+      })
+    : null;
 
   return (
     <View style={[styles.container, style]}>
@@ -147,7 +124,11 @@ export default function CategoryPicker({
             <View style={[styles.selectedIcon, { backgroundColor: selectedCategory.color }]}>
               <Ionicons name={selectedCategory.icon as any} size={16} color="white" />
             </View>
-            <Text style={styles.selectedText}>{selectedCategory.name}</Text>
+            <Text style={styles.selectedText}>
+              {selectedCategory.parent_id
+                ? `${parentCategories.find((p) => p.id === selectedCategory.parent_id)?.name || 'Category'} › ${selectedCategory.name}`
+                : selectedCategory.name}
+            </Text>
             <TouchableOpacity
               onPress={(e) => {
                 e.stopPropagation();
@@ -195,26 +176,131 @@ export default function CategoryPicker({
             />
           </View>
 
-          <FlatList
-            data={filteredCategories}
-            keyExtractor={(item) => item.id}
-            renderItem={renderCategoryItem}
-            style={styles.categoriesList}
-            showsVerticalScrollIndicator={false}
-            ListEmptyComponent={
-              <View style={styles.emptyContainer}>
-                <Ionicons name="folder-outline" size={48} color="#9CA3AF" />
-                <Text style={styles.emptyText}>
-                  {searchTerm ? 'No categories found' : 'No categories available'}
-                </Text>
-                {!searchTerm && (
-                  <Text style={styles.emptySubtext}>
-                    Create your first category to get started
+          {isLoading ? (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="small" color="#000000" />
+              <Text style={styles.loadingText}>Loading categories...</Text>
+            </View>
+          ) : (
+            <ScrollView style={styles.categoriesList} showsVerticalScrollIndicator={false}>
+              {(filteredItems || parentCategories.map((p) => ({ category: p })) ).map(({ category, parent }) => {
+                const inSearch = !!filteredItems;
+                const parentForItem = parent || parentCategories.find((p) => p.id === category.parent_id);
+
+                if (inSearch) {
+                  const isSelected = selectedCategory?.id === category.id;
+                  return (
+                    <TouchableOpacity
+                      key={category.id}
+                      style={[
+                        styles.categoryItem,
+                        isSelected && styles.selectedCategoryItem,
+                      ]}
+                      onPress={() => handleCategorySelect(category)}
+                    >
+                      <View style={[styles.categoryIcon, { backgroundColor: category.color }]}>
+                        <Ionicons name={category.icon as any} size={20} color="white" />
+                      </View>
+                      <View style={styles.categoryInfo}>
+                        <Text style={styles.categoryName}>
+                          {parentForItem ? `${parentForItem.name} › ${category.name}` : category.name}
+                        </Text>
+                      </View>
+                      {isSelected && <Ionicons name="checkmark" size={20} color="#10B981" />}
+                    </TouchableOpacity>
+                  );
+                }
+
+                const subs = subcategoriesMap.get(category.id) || [];
+                const isExpanded = expandedParentId === category.id;
+                const isSelected = selectedCategory?.id === category.id;
+
+                return (
+                  <View key={category.id} style={styles.parentBlock}>
+                    <TouchableOpacity
+                      style={[
+                        styles.parentRow,
+                        isSelected && styles.selectedCategoryItem,
+                      ]}
+                      onPress={() => setExpandedParentId(isExpanded ? null : category.id)}
+                    >
+                      <View style={[styles.categoryIcon, { backgroundColor: category.color }]}>
+                        <Ionicons name={category.icon as any} size={20} color="white" />
+                      </View>
+                      <View style={styles.categoryInfo}>
+                        <Text style={styles.categoryName}>{category.name}</Text>
+                        <Text style={styles.categorySubtext}>
+                          {subs.length > 0 ? `${subs.length} subcategories` : 'No subcategories'}
+                        </Text>
+                      </View>
+                      <Ionicons
+                        name={isExpanded ? 'chevron-up' : 'chevron-down'}
+                        size={18}
+                        color="#6B7280"
+                      />
+                    </TouchableOpacity>
+
+                    {isExpanded && (
+                      <View style={styles.subList}>
+                        <TouchableOpacity
+                          style={[
+                            styles.subItem,
+                            selectedCategory?.id === category.id && styles.selectedCategoryItem,
+                          ]}
+                          onPress={() => handleCategorySelect(category)}
+                        >
+                          <Ionicons name="remove-outline" size={16} color="#6B7280" style={{ marginRight: 8 }} />
+                          <Text style={styles.subItemText}>Use “{category.name}” (no subcategory)</Text>
+                          {selectedCategory?.id === category.id && (
+                            <Ionicons name="checkmark" size={18} color="#10B981" />
+                          )}
+                        </TouchableOpacity>
+
+                        {subs.map((sub) => {
+                          const isSubSelected = selectedCategory?.id === sub.id;
+                          return (
+                            <TouchableOpacity
+                              key={sub.id}
+                              style={[
+                                styles.subItem,
+                                isSubSelected && styles.selectedCategoryItem,
+                              ]}
+                              onPress={() => handleCategorySelect(sub)}
+                            >
+                              <Ionicons
+                                name={(sub.icon as any) || 'ellipse-outline'}
+                                size={16}
+                                color="#6B7280"
+                                style={{ marginRight: 8 }}
+                              />
+                              <Text style={styles.subItemText}>{category.name} › {sub.name}</Text>
+                              {isSubSelected && (
+                                <Ionicons name="checkmark" size={18} color="#10B981" />
+                              )}
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
+
+              {(filteredItems ? filteredItems.length === 0 : parentCategories.length === 0) && (
+                <View style={styles.emptyContainer}>
+                  <Ionicons name="folder-outline" size={48} color="#9CA3AF" />
+                  <Text style={styles.emptyText}>
+                    {searchTerm ? 'No categories found' : 'No categories available'}
                   </Text>
-                )}
-              </View>
-            }
-          />
+                  {!searchTerm && (
+                    <Text style={styles.emptySubtext}>
+                      Create your first category to get started
+                    </Text>
+                  )}
+                </View>
+              )}
+            </ScrollView>
+          )}
         </View>
       </Modal>
     </View>
@@ -345,6 +431,10 @@ const styles = StyleSheet.create({
     color: '#111827',
     marginBottom: 4,
   },
+  categorySubtext: {
+    fontSize: 12,
+    color: '#6B7280',
+  },
   activityTypes: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -378,5 +468,39 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#9CA3AF',
     marginTop: 4,
+  },
+  parentBlock: {
+    marginBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F3F4F6',
+    paddingBottom: 8,
+  },
+  parentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+  },
+  subList: {
+    marginLeft: 48,
+    paddingVertical: 8,
+    gap: 6,
+  },
+  subItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  subItemText: {
+    flex: 1,
+    fontSize: 14,
+    color: '#111827',
+  },
+  loadingContainer: {
+    paddingVertical: 24,
+    alignItems: 'center',
+    gap: 8,
+  },
+  loadingText: {
+    color: '#111827',
   },
 });

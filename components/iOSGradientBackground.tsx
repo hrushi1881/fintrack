@@ -11,7 +11,7 @@ interface iOSGradientBackgroundProps extends ViewProps {
   style?: any;
 }
 
-export default function iOSGradientBackground({
+export default function IOSGradientBackground({
   children,
   gradientType = 'default',
   animated = true,

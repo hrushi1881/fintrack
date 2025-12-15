@@ -11,7 +11,6 @@ import { formatCurrencyAmount } from '@/utils/currency';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import FundPicker, { FundBucket } from '@/components/FundPicker';
 import GlassCard from '@/components/GlassCard';
-import { adjustFundBalance } from '@/utils/funds';
 
 interface TransferModalProps {
   visible: boolean;
@@ -27,7 +26,7 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
   const { showNotification } = useNotification();
   const { currency } = useSettings();
   const { accounts: realtimeAccounts, globalRefresh, refreshAccounts, refreshTransactions, refreshAccountFunds, recalculateAllBalances } = useRealtimeData();
-  const { convertLiabilityToPersonal } = useLiabilities();
+  const { convertLiabilityToPersonal, getAccountBreakdown } = useLiabilities();
   
   const [transferType, setTransferType] = useState<TransferType>('between_accounts');
   const [amount, setAmount] = useState('');
@@ -190,7 +189,7 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
             p_category: 'Transfer', // Category name for transfer
             p_description: description.trim() || `Transfer from ${accounts.find(acc => acc.id === fromAccount)?.name || 'account'}`,
             p_date: date.toISOString().split('T')[0],
-            p_notes: `Transfer from ${accounts.find(acc => acc.id === fromAccount)?.name || 'account'}`,
+            p_metadata: { notes: `Transfer from ${accounts.find(acc => acc.id === fromAccount)?.name || 'account'}` },
             p_currency: currency
           });
 
@@ -220,7 +219,7 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
             p_category: 'Transfer',
             p_description: description.trim() || `Transfer from ${accounts.find(acc => acc.id === fromAccount)?.name || 'account'}`,
             p_date: date.toISOString().split('T')[0],
-            p_notes: `Transfer from ${accounts.find(acc => acc.id === fromAccount)?.name || 'account'}`,
+            p_metadata: { notes: `Transfer from ${accounts.find(acc => acc.id === fromAccount)?.name || 'account'}` },
             p_currency: currency
           });
           if (receiveError) throw receiveError;
@@ -432,7 +431,7 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
             <Text style={styles.headerTitle}>
               {transferType === 'liability_to_personal' ? 'Convert Funds' : 'Transfer Money'}
             </Text>
-            <View style={styles.closeButton} />
+            <View style={styles.headerPlaceholder} />
           </View>
 
           <ScrollView 
@@ -477,7 +476,7 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
                         Liability → Personal Funds
                       </Text>
                       <Text style={styles.transferTypeSubtext}>
-                        Convert borrowed money to personal (doesn't reduce loan debt)
+                        Convert borrowed money to personal (doesn&apos;t reduce loan debt)
                       </Text>
                     </View>
                   </TouchableOpacity>
@@ -579,7 +578,7 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
                         <View style={styles.infoBox}>
                           <Ionicons name="information-circle-outline" size={20} color="#F59E0B" />
                           <Text style={styles.infoText}>
-                            Your account balance won't change. Your loan debt stays the same. This only changes how you track what's "yours" vs "borrowed".
+                            Your account balance won&apos;t change. Your loan debt stays the same. This only changes how you track what&apos;s &quot;yours&quot; vs &quot;borrowed&quot;.
                           </Text>
                         </View>
                       </GlassCard>
@@ -787,7 +786,7 @@ export default function TransferModal({ visible, onClose, onSuccess, preselected
                 ) : (
                   <GlassCard padding={20} marginVertical={12}>
                     <Text style={styles.placeholderText}>
-                      Select a "From Account" first
+                      Select a &quot;From Account&quot; first
                     </Text>
                   </GlassCard>
                 )}
@@ -973,22 +972,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 12,
+    paddingTop: 12,
+    paddingBottom: 16,
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(0, 0, 0, 0.05)',
   },
   headerTitle: {
-    fontSize: 20,
-    fontFamily: 'HelveticaNeue-Bold',
-    fontWeight: '700',
+    fontSize: 22,
+    fontFamily: 'Archivo Black',
     color: '#000000',
+    letterSpacing: 0.5,
   },
   closeButton: {
     width: 40,
     height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  headerPlaceholder: {
+    width: 40,
   },
   scrollView: {
     flex: 1,
@@ -1001,46 +1005,46 @@ const styles = StyleSheet.create({
     marginTop: 24,
   },
   sectionTitle: {
-    fontSize: 16,
+    fontSize: 13,
     fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
+    color: 'rgba(0, 0, 0, 0.6)',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
     marginBottom: 12,
   },
   amountInputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(0, 0, 0, 0.05)',
-    borderRadius: 12,
-    paddingHorizontal: 16,
+    borderRadius: 16,
+    paddingHorizontal: 20,
     borderWidth: 1,
     borderColor: 'rgba(0, 0, 0, 0.1)',
+    minHeight: 64,
   },
   currencySymbol: {
-    fontSize: 24,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
+    fontSize: 32,
+    fontFamily: 'InstrumentSans-Bold',
     color: '#000000',
-    marginRight: 8,
+    marginRight: 12,
   },
   amountInput: {
     flex: 1,
     paddingVertical: 16,
-    fontSize: 24,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
+    fontSize: 32,
+    fontFamily: 'InstrumentSans-Bold',
     color: '#000000',
   },
   textInput: {
     backgroundColor: 'rgba(0, 0, 0, 0.05)',
-    borderRadius: 12,
+    borderRadius: 16,
     padding: 16,
-    fontSize: 14,
+    fontSize: 16,
     fontFamily: 'InstrumentSerif-Regular',
     color: '#000000',
     borderWidth: 1,
     borderColor: 'rgba(0, 0, 0, 0.1)',
-    minHeight: 80,
+    minHeight: 100,
     textAlignVertical: 'top',
   },
   accountList: {
@@ -1052,9 +1056,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 16,
     backgroundColor: 'rgba(0, 0, 0, 0.05)',
-    borderRadius: 12,
+    borderRadius: 16,
     borderWidth: 2,
     borderColor: 'transparent',
+    marginBottom: 8,
   },
   selectedAccount: {
     backgroundColor: 'rgba(0, 0, 0, 0.08)',
@@ -1066,12 +1071,12 @@ const styles = StyleSheet.create({
   accountName: {
     fontSize: 16,
     fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
+    color: 'rgba(0, 0, 0, 0.7)',
     marginBottom: 4,
   },
   accountBalance: {
     fontSize: 14,
-    fontFamily: 'InstrumentSerif-Regular',
+    fontFamily: 'InstrumentSans-Medium',
     color: 'rgba(0, 0, 0, 0.6)',
   },
   accountBreakdown: {
@@ -1180,11 +1185,12 @@ const styles = StyleSheet.create({
   transferTypeButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 16,
+    padding: 20,
     backgroundColor: 'rgba(0, 0, 0, 0.05)',
-    borderRadius: 12,
+    borderRadius: 16,
     borderWidth: 2,
     borderColor: 'transparent',
+    marginBottom: 12,
   },
   selectedTransferType: {
     backgroundColor: 'rgba(0, 0, 0, 0.08)',
@@ -1193,8 +1199,7 @@ const styles = StyleSheet.create({
   transferTypeText: {
     fontSize: 16,
     fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: 'rgba(0, 0, 0, 0.6)',
+    color: 'rgba(0, 0, 0, 0.7)',
     marginLeft: 12,
     flex: 1,
   },
@@ -1202,7 +1207,7 @@ const styles = StyleSheet.create({
     color: '#000000',
   },
   transferTypeSubtext: {
-    fontSize: 12,
+    fontSize: 13,
     fontFamily: 'InstrumentSerif-Regular',
     color: 'rgba(0, 0, 0, 0.5)',
     marginLeft: 12,
@@ -1271,7 +1276,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     padding: 16,
     backgroundColor: 'rgba(0, 0, 0, 0.05)',
-    borderRadius: 12,
+    borderRadius: 16,
     borderWidth: 1,
     borderColor: 'rgba(0, 0, 0, 0.1)',
     marginTop: 12,
@@ -1324,7 +1329,7 @@ const styles = StyleSheet.create({
   },
   submitButton: {
     backgroundColor: '#000000',
-    borderRadius: 12,
+    borderRadius: 16,
     padding: 18,
     alignItems: 'center',
     justifyContent: 'center',
@@ -1333,11 +1338,11 @@ const styles = StyleSheet.create({
   },
   submitButtonDisabled: {
     backgroundColor: 'rgba(0, 0, 0, 0.2)',
+    opacity: 0.4,
   },
   submitButtonText: {
     fontSize: 18,
     fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
     color: '#FFFFFF',
   },
 });

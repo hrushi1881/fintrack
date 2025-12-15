@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -16,7 +16,6 @@ import Animated, {
   withTiming,
   interpolate,
   runOnJS,
-  useDerivedValue,
 } from 'react-native-reanimated';
 import * as Haptics from 'expo-haptics';
 
@@ -74,15 +73,33 @@ export default function ExpandableTabsAdvanced({
   const [isExpanded, setIsExpanded] = useState(false);
   const [screenReaderEnabled, setScreenReaderEnabled] = useState(false);
   
-  // Create shared values for each tab
-  const tabAnimations = useRef<{ [key: string]: Animated.SharedValue<number> }>({}).current;
+  // Create shared values for each tab (pre-create for reasonable max tabs)
+  const tabAnimation1 = useSharedValue(0);
+  const tabAnimation2 = useSharedValue(0);
+  const tabAnimation3 = useSharedValue(0);
+  const tabAnimation4 = useSharedValue(0);
+  const tabAnimation5 = useSharedValue(0);
+  const tabAnimation6 = useSharedValue(0);
+  const tabAnimation7 = useSharedValue(0);
+  const tabAnimation8 = useSharedValue(0);
+  const tabAnimation9 = useSharedValue(0);
+  const tabAnimation10 = useSharedValue(0);
   
-  // Initialize shared values
-  tabs.forEach(tab => {
-    if (!tabAnimations[tab.id]) {
-      tabAnimations[tab.id] = useSharedValue(0);
-    }
-  });
+  // Map tab IDs to their animation values
+  const tabAnimations: { [key: string]: Animated.SharedValue<number> } = useMemo(() => {
+    const animations: { [key: string]: Animated.SharedValue<number> } = {};
+    const animationRefs = [
+      tabAnimation1, tabAnimation2, tabAnimation3, tabAnimation4, tabAnimation5,
+      tabAnimation6, tabAnimation7, tabAnimation8, tabAnimation9, tabAnimation10
+    ];
+    
+    tabs.forEach((tab, index) => {
+      if (index < animationRefs.length) {
+        animations[tab.id] = animationRefs[index];
+      }
+    });
+    return animations;
+  }, [tabs, tabAnimation1, tabAnimation2, tabAnimation3, tabAnimation4, tabAnimation5, tabAnimation6, tabAnimation7, tabAnimation8, tabAnimation9, tabAnimation10]);
 
   // Check if screen reader is enabled
   useEffect(() => {
@@ -197,7 +214,7 @@ export default function ExpandableTabsAdvanced({
     }
   };
 
-  const getAnimatedTabStyle = (tabId: string) => {
+  const useAnimatedTabStyle = (tabId: string) => {
     return useAnimatedStyle(() => {
       const progress = tabAnimations[tabId].value;
       
@@ -215,7 +232,7 @@ export default function ExpandableTabsAdvanced({
     });
   };
 
-  const getAnimatedLabelStyle = (tabId: string) => {
+  const useAnimatedLabelStyle = (tabId: string) => {
     return useAnimatedStyle(() => {
       const progress = tabAnimations[tabId].value;
       
@@ -233,7 +250,7 @@ export default function ExpandableTabsAdvanced({
     });
   };
 
-  const getAnimatedIconStyle = (tabId: string) => {
+  const useAnimatedIconStyle = (tabId: string) => {
     return useAnimatedStyle(() => {
       const progress = tabAnimations[tabId].value;
       
@@ -247,7 +264,7 @@ export default function ExpandableTabsAdvanced({
     });
   };
 
-  const getAnimatedBadgeStyle = (tabId: string) => {
+  const useAnimatedBadgeStyle = (tabId: string) => {
     return useAnimatedStyle(() => {
       const progress = tabAnimations[tabId].value;
       

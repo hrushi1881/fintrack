@@ -6,7 +6,7 @@
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
 import type { Organization } from '@/types';
-import { formatCurrencyAmount } from '@/utils/currency';
+import { formatCurrencyAmount, DEFAULT_CURRENCY } from '@/utils/currency';
 
 // ============================================================================
 // TYPES & INTERFACES
@@ -68,7 +68,7 @@ export async function createOrganization(
     user_id: userId,
     name: data.name.trim(),
     type: data.type || 'custom',
-    currency: data.currency || 'USD',
+    currency: data.currency || DEFAULT_CURRENCY,
     is_active: true,
   };
 
@@ -162,7 +162,7 @@ export async function getAllOrganizations(
 export async function getOrganizationWithAccounts(
   organizationId: string,
   userId: string,
-  currency: string = 'USD'
+  currency: string = DEFAULT_CURRENCY
 ): Promise<OrganizationWithAccounts | null> {
   const organization = await getOrganizationById(organizationId, userId);
   if (!organization) return null;
@@ -201,7 +201,7 @@ export async function getOrganizationWithAccounts(
  */
 export async function getAllOrganizationsWithAccounts(
   userId: string,
-  currency: string = 'USD',
+  currency: string = DEFAULT_CURRENCY,
   filters?: OrganizationFilters
 ): Promise<OrganizationWithAccounts[]> {
   const organizations = await getAllOrganizations(userId, filters);

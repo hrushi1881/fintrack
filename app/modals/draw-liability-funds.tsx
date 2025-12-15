@@ -56,7 +56,7 @@ export default function DrawLiabilityFundsModal({
   const [liability, setLiability] = useState<any>(null);
   const [date, setDate] = useState(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
-  const [liabilityAccounts, setLiabilityAccounts] = useState<Array<{ account: any; balance: number }>>([]);
+  const [liabilityAccounts, setLiabilityAccounts] = useState<{ account: any; balance: number }[]>([]);
   const [distributions, setDistributions] = useState<Distribution[]>([{ accountId: '', amount: '' }]);
   const [notes, setNotes] = useState('');
   const [category, setCategory] = useState<string>('');
@@ -235,7 +235,7 @@ export default function DrawLiabilityFundsModal({
     if (isOverdraw) {
       Alert.alert(
         'Overdraw Limit',
-        `You're trying to draw ${formatCurrencyAmount(totalDistributed, currency)}, but only ${formatCurrencyAmount(available, currency)} is available.\n\nDo you want to raise your total loan limit by ${formatCurrencyAmount(overdrawAmount, currency)}?`,
+        `You&apos;re trying to draw ${formatCurrencyAmount(totalDistributed, currency)}, but only ${formatCurrencyAmount(available, currency)} is available.\n\nDo you want to raise your total loan limit by ${formatCurrencyAmount(overdrawAmount, currency)}?`,
         [
           {
             text: 'Cancel',

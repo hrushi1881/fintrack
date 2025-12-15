@@ -159,7 +159,7 @@ export default function GoalCelebrationScreen({
                 onPress={onWhatsNext}
               >
                 <Ionicons name="arrow-forward" size={20} color="#10B981" />
-                <Text style={styles.secondaryButtonText}>What's Next?</Text>
+                <Text style={styles.secondaryButtonText}>What&apos;s Next?</Text>
               </TouchableOpacity>
             </View>
 

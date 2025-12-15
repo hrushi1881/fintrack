@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   View,
   Text,
@@ -63,15 +63,33 @@ export default function ExpandableTabsReanimated({
   const [expandedTab, setExpandedTab] = useState<string | null>(null);
   const [isExpanded, setIsExpanded] = useState(false);
   
-  // Create shared values for each tab
-  const tabAnimations = useRef<{ [key: string]: Animated.SharedValue<number> }>({}).current;
+  // Create shared values for each tab (pre-create for reasonable max tabs)
+  const tabAnimation1 = useSharedValue(0);
+  const tabAnimation2 = useSharedValue(0);
+  const tabAnimation3 = useSharedValue(0);
+  const tabAnimation4 = useSharedValue(0);
+  const tabAnimation5 = useSharedValue(0);
+  const tabAnimation6 = useSharedValue(0);
+  const tabAnimation7 = useSharedValue(0);
+  const tabAnimation8 = useSharedValue(0);
+  const tabAnimation9 = useSharedValue(0);
+  const tabAnimation10 = useSharedValue(0);
   
-  // Initialize shared values
-  tabs.forEach(tab => {
-    if (!tabAnimations[tab.id]) {
-      tabAnimations[tab.id] = useSharedValue(0);
-    }
-  });
+  // Map tab IDs to their animation values
+  const tabAnimations: { [key: string]: Animated.SharedValue<number> } = useMemo(() => {
+    const animations: { [key: string]: Animated.SharedValue<number> } = {};
+    const animationRefs = [
+      tabAnimation1, tabAnimation2, tabAnimation3, tabAnimation4, tabAnimation5,
+      tabAnimation6, tabAnimation7, tabAnimation8, tabAnimation9, tabAnimation10
+    ];
+    
+    tabs.forEach((tab, index) => {
+      if (index < animationRefs.length) {
+        animations[tab.id] = animationRefs[index];
+      }
+    });
+    return animations;
+  }, [tabs, tabAnimation1, tabAnimation2, tabAnimation3, tabAnimation4, tabAnimation5, tabAnimation6, tabAnimation7, tabAnimation8, tabAnimation9, tabAnimation10]);
 
   const handleTabPress = (tab: TabItem) => {
     if (hapticFeedback) {
@@ -125,12 +143,29 @@ export default function ExpandableTabsReanimated({
     }
   };
 
-  const getAnimatedTabStyle = (tabId: string) => {
-    return useAnimatedStyle(() => {
-      const progress = tabAnimations[tabId].value;
-      
+  // Helper component to render each tab with its animated styles
+  // This allows us to call hooks at the component level
+  const AnimatedTab = React.memo(function AnimatedTab({ 
+    tab, 
+    isActive, 
+    isExpandedTab, 
+    onPress,
+    tabAnimation,
+    collapsedWidth: cWidth,
+    expandedWidth: eWidth,
+  }: { 
+    tab: TabItem; 
+    isActive: boolean; 
+    isExpandedTab: boolean; 
+    onPress: () => void;
+    tabAnimation: Animated.SharedValue<number>;
+    collapsedWidth: number;
+    expandedWidth: number;
+  }) {
+    const tabStyle = useAnimatedStyle(() => {
+      const progress = tabAnimation.value || 0;
       return {
-        width: interpolate(progress, [0, 1], [collapsedWidth, expandedWidth]),
+        width: interpolate(progress, [0, 1], [cWidth, eWidth]),
         backgroundColor: progress > 0 
           ? `rgba(255, 255, 255, ${0.1 + progress * 0.05})` 
           : 'transparent',
@@ -141,12 +176,9 @@ export default function ExpandableTabsReanimated({
         ],
       };
     });
-  };
 
-  const getAnimatedLabelStyle = (tabId: string) => {
-    return useAnimatedStyle(() => {
-      const progress = tabAnimations[tabId].value;
-      
+    const labelStyle = useAnimatedStyle(() => {
+      const progress = tabAnimation.value || 0;
       return {
         opacity: interpolate(progress, [0, 1], [0, 1]),
         transform: [
@@ -159,12 +191,9 @@ export default function ExpandableTabsReanimated({
         ],
       };
     });
-  };
 
-  const getAnimatedIconStyle = (tabId: string) => {
-    return useAnimatedStyle(() => {
-      const progress = tabAnimations[tabId].value;
-      
+    const iconStyle = useAnimatedStyle(() => {
+      const progress = tabAnimation.value || 0;
       return {
         transform: [
           {
@@ -173,7 +202,41 @@ export default function ExpandableTabsReanimated({
         ],
       };
     });
-  };
+
+    return (
+      <Animated.View style={[styles.tabContainer, tabStyle]}>
+        <TouchableOpacity
+          style={styles.tabButton}
+          onPress={onPress}
+          activeOpacity={0.7}
+          accessibilityLabel={tab.label}
+          accessibilityRole="button"
+          accessibilityState={{ selected: isActive }}
+        >
+          <Animated.View style={[styles.iconContainer, iconStyle]}>
+            <Ionicons
+              name={tab.icon}
+              size={24}
+              color={isActive || isExpandedTab ? '#FFFFFF' : '#9CA3AF'}
+            />
+          </Animated.View>
+          
+          <Animated.View style={[styles.labelContainer, labelStyle]}>
+            <Text
+              style={[
+                styles.label,
+                {
+                  color: isActive || isExpandedTab ? '#FFFFFF' : '#9CA3AF',
+                },
+              ]}
+            >
+              {tab.label}
+            </Text>
+          </Animated.View>
+        </TouchableOpacity>
+      </Animated.View>
+    );
+  });
 
   return (
     <Pressable style={styles.container} onPress={handleOutsidePress}>
@@ -184,47 +247,15 @@ export default function ExpandableTabsReanimated({
           
           return (
             <React.Fragment key={tab.id}>
-              <Animated.View
-                style={[
-                  styles.tabContainer,
-                  getAnimatedTabStyle(tab.id),
-                ]}
-              >
-                <TouchableOpacity
-                  style={styles.tabButton}
-                  onPress={() => handleTabPress(tab)}
-                  activeOpacity={0.7}
-                  accessibilityLabel={tab.label}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: isActive }}
-                >
-                  <Animated.View style={[styles.iconContainer, getAnimatedIconStyle(tab.id)]}>
-                    <Ionicons
-                      name={tab.icon}
-                      size={24}
-                      color={isActive || isExpandedTab ? '#FFFFFF' : '#9CA3AF'}
-                    />
-                  </Animated.View>
-                  
-                  <Animated.View
-                    style={[
-                      styles.labelContainer,
-                      getAnimatedLabelStyle(tab.id),
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.label,
-                        {
-                          color: isActive || isExpandedTab ? '#FFFFFF' : '#9CA3AF',
-                        },
-                      ]}
-                    >
-                      {tab.label}
-                    </Text>
-                  </Animated.View>
-                </TouchableOpacity>
-              </Animated.View>
+              <AnimatedTab
+                tab={tab}
+                isActive={isActive}
+                isExpandedTab={isExpandedTab}
+                onPress={() => handleTabPress(tab)}
+                tabAnimation={tabAnimations[tab.id]}
+                collapsedWidth={collapsedWidth}
+                expandedWidth={expandedWidth}
+              />
               
               {showSeparators && index < tabs.length - 1 && (
                 <View style={styles.separator} />

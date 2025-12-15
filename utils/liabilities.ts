@@ -1,5 +1,6 @@
 import { supabase } from '@/lib/supabase';
 import { Liability } from '@/types';
+import { DEFAULT_CURRENCY } from './currency';
 
 /**
  * Settlement status for a liability
@@ -125,7 +126,7 @@ export async function executeLiabilitySettlement(
     throw new Error(`Liability not found: ${liabilityError?.message}`);
   }
 
-  const currency = liability.currency || 'USD';
+  const currency = liability.currency || DEFAULT_CURRENCY;
 
   // Process each adjustment
   for (const adjustment of adjustments) {

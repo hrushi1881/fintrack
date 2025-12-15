@@ -235,7 +235,7 @@ export default function TransferFundsModal({
         p_category: 'Transfer', // Category name for transfer
         p_description: description.trim() || 'Fund transfer',
         p_date: formatDateForInput(date),
-        p_notes: `Transfer from ${fromFundBucket!.name} to ${toFundBucket!.name}`,
+        p_metadata: { notes: `Transfer from ${fromFundBucket!.name} to ${toFundBucket!.name}` },
         p_currency: currency,
       });
 
@@ -536,7 +536,7 @@ export default function TransferFundsModal({
                 <View style={styles.infoItem}>
                   <Ionicons name="lock-closed-outline" size={16} color="#EF4444" />
                   <Text style={styles.infoText}>
-                    Goal funds cannot participate in normal transfers. Use the "Withdraw from Goal" feature instead.
+                    Goal funds cannot participate in normal transfers. Use the &quot;Withdraw from Goal&quot; feature instead.
                   </Text>
                 </View>
               </View>

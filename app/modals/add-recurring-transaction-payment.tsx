@@ -14,8 +14,6 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useAuth } from '@/contexts/AuthContext';
-import { supabase } from '@/lib/supabase';
-import GlassCard from '@/components/GlassCard';
 import { formatCurrencyAmount, formatCurrencySymbol } from '@/utils/currency';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
@@ -151,26 +149,15 @@ export default function AddRecurringTransactionPaymentModal({
       // Create scheduled payment linked to recurring transaction
       await createScheduledPayment({
         title: `${recurringTransaction.title} - Payment`,
-        description: `Scheduled payment for ${recurringTransaction.title}`,
         category_id: recurringTransaction.category_id || undefined,
         amount: amountValue,
-        currency: recurringTransaction.currency,
+        type: recurringTransaction.type as 'income' | 'expense',
         due_date: dueDateString,
         linked_account_id: linkedAccountId,
-        fund_type: recurringTransaction.fund_type || 'personal',
-        specific_fund_id: recurringTransaction.specific_fund_id || undefined,
+        fund_type: (recurringTransaction.fund_type || 'personal') as 'personal' | 'liability' | 'goal',
         linked_recurring_transaction_id: recurringTransactionId,
-        remind_before: recurringTransaction.remind_before,
-        reminder_days: recurringTransaction.reminder_days || [7, 3, 1],
-        color: recurringTransaction.color,
-        icon: recurringTransaction.icon,
-        tags: recurringTransaction.tags,
+        recurring_transaction_id: recurringTransactionId,
         notes: `Cycle payment for ${recurringTransaction.title}`,
-        metadata: {
-          source_type: 'recurring_transaction',
-          recurring_transaction_id: recurringTransactionId,
-          cycle_number: recurringTransaction.completed_occurrences + 1,
-        },
       });
 
       await new Promise((resolve) => setTimeout(resolve, 500));

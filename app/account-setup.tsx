@@ -93,10 +93,10 @@ export default function AccountSetupScreen() {
     { code: 'AUD', name: 'Australian Dollar', symbol: 'A$' },
   ];
 
-  const colors = [
-    '#3B82F6', '#10B981', '#EF4444', '#8B5CF6', '#F59E0B', '#6B7280',
-    '#EC4899', '#14B8A6', '#F97316', '#84CC16', '#6366F1', '#EF4444'
-  ];
+  // const colors = [
+  //   '#3B82F6', '#10B981', '#EF4444', '#8B5CF6', '#F59E0B', '#6B7280',
+  //   '#EC4899', '#14B8A6', '#F97316', '#84CC16', '#6366F1', '#EF4444'
+  // ];
 
   const steps = [
     {
@@ -208,7 +208,7 @@ export default function AccountSetupScreen() {
             p_category: 'Initial Balance',
             p_description: `Initial balance for ${account.name}`,
             p_date: new Date().toISOString().split('T')[0],
-            p_notes: 'Account setup initial balance',
+            p_metadata: { notes: 'Account setup initial balance' },
             p_currency: account.currency,
           });
 

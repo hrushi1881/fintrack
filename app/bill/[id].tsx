@@ -18,10 +18,10 @@ import { useSettings } from '@/contexts/SettingsContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { formatCurrencyAmount } from '@/utils/currency';
 import GlassCard from '@/components/GlassCard';
-import { fetchBillById, getBillPaymentHistory, getPaymentBillsForContainer, calculateBillStatus, generatePaymentBillFromContainer } from '@/utils/bills';
+import { fetchBillById, getBillPaymentHistory, getPaymentBillsForContainer, calculateBillStatus } from '@/utils/bills';
 import { Bill, BillPayment } from '@/types';
 import PayBillModal from '@/app/modals/pay-bill';
-import BillBulkGenerator from '@/components/bills/BillBulkGenerator';
+import { BillBulkGenerator } from '@/components/bills/BillBulkGenerator';
 
 interface BillRecord {
   id: string;
@@ -54,7 +54,7 @@ const BillDetailScreen: React.FC = () => {
   const [paymentHistory, setPaymentHistory] = useState<BillPayment[]>([]);
   const [paymentBills, setPaymentBills] = useState<Bill[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showPayModal, setShowPayModal] = useState(false);
+  // const [showPayModal, setShowPayModal] = useState(false);
   const [selectedBill, setSelectedBill] = useState<Bill | null>(null);
   const [showPayBillModal, setShowPayBillModal] = useState(false);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
@@ -182,70 +182,70 @@ const BillDetailScreen: React.FC = () => {
     }
   };
 
-  const handleCreateNextPaymentBill = async () => {
-    if (!bill || !user || bill.parent_bill_id) return; // Only for container bills
+  // const handleCreateNextPaymentBill = async () => {
+  //   if (!bill || !user || bill.parent_bill_id) return; // Only for container bills
 
-    try {
-      // Calculate next due date based on frequency
-      const lastPaymentBill = paymentBills
-        .filter(b => b.due_date)
-        .sort((a, b) => new Date(b.due_date).getTime() - new Date(a.due_date).getTime())[0];
+  //   try {
+  //     // Calculate next due date based on frequency
+  //     const lastPaymentBill = paymentBills
+  //       .filter(b => b.due_date)
+  //       .sort((a, b) => new Date(b.due_date).getTime() - new Date(a.due_date).getTime())[0];
 
-      let nextDueDate: Date;
-      if (lastPaymentBill) {
-        nextDueDate = new Date(lastPaymentBill.due_date);
-      } else if (bill.due_date) {
-        nextDueDate = new Date(bill.due_date);
-      } else {
-        nextDueDate = new Date();
-      }
+  //     let nextDueDate: Date;
+  //     if (lastPaymentBill) {
+  //       nextDueDate = new Date(lastPaymentBill.due_date);
+  //     } else if (bill.due_date) {
+  //       nextDueDate = new Date(bill.due_date);
+  //     } else {
+  //       nextDueDate = new Date();
+  //     }
 
-      // Calculate next date based on frequency
-      const frequency = bill.frequency || 'monthly';
-      const interval = bill.recurrence_interval || 1;
+  //     // Calculate next date based on frequency
+  //     const frequency = bill.frequency || 'monthly';
+  //     const interval = bill.recurrence_interval || 1;
 
-      switch (frequency) {
-        case 'daily':
-          nextDueDate.setDate(nextDueDate.getDate() + interval);
-          break;
-        case 'weekly':
-          nextDueDate.setDate(nextDueDate.getDate() + (7 * interval));
-          break;
-        case 'biweekly':
-          nextDueDate.setDate(nextDueDate.getDate() + 14);
-          break;
-        case 'monthly':
-          nextDueDate.setMonth(nextDueDate.getMonth() + interval);
-          break;
-        case 'bimonthly':
-          nextDueDate.setMonth(nextDueDate.getMonth() + 2);
-          break;
-        case 'quarterly':
-          nextDueDate.setMonth(nextDueDate.getMonth() + 3);
-          break;
-        case 'halfyearly':
-          nextDueDate.setMonth(nextDueDate.getMonth() + 6);
-          break;
-        case 'yearly':
-          nextDueDate.setFullYear(nextDueDate.getFullYear() + 1);
-          break;
-        default:
-          nextDueDate.setMonth(nextDueDate.getMonth() + interval);
-      }
+  //     switch (frequency) {
+  //       case 'daily':
+  //         nextDueDate.setDate(nextDueDate.getDate() + interval);
+  //         break;
+  //       case 'weekly':
+  //         nextDueDate.setDate(nextDueDate.getDate() + (7 * interval));
+  //         break;
+  //       case 'biweekly':
+  //         nextDueDate.setDate(nextDueDate.getDate() + 14);
+  //         break;
+  //       case 'monthly':
+  //         nextDueDate.setMonth(nextDueDate.getMonth() + interval);
+  //         break;
+  //       case 'bimonthly':
+  //         nextDueDate.setMonth(nextDueDate.getMonth() + 2);
+  //         break;
+  //       case 'quarterly':
+  //         nextDueDate.setMonth(nextDueDate.getMonth() + 3);
+  //         break;
+  //       case 'halfyearly':
+  //         nextDueDate.setMonth(nextDueDate.getMonth() + 6);
+  //         break;
+  //       case 'yearly':
+  //         nextDueDate.setFullYear(nextDueDate.getFullYear() + 1);
+  //         break;
+  //       default:
+  //         nextDueDate.setMonth(nextDueDate.getMonth() + interval);
+  //     }
 
-      await generatePaymentBillFromContainer(
-        bill.id,
-        nextDueDate.toISOString().split('T')[0]
-      );
+  //     await generatePaymentBillFromContainer(
+  //       bill.id,
+  //       nextDueDate.toISOString().split('T')[0]
+  //     );
 
-      await loadBill();
-      globalRefresh();
-      Alert.alert('Success', 'Payment bill created successfully');
-    } catch (error: any) {
-      console.error('Error creating payment bill:', error);
-      Alert.alert('Error', error.message || 'Failed to create payment bill');
-    }
-  };
+  //     await loadBill();
+  //     globalRefresh();
+  //     Alert.alert('Success', 'Payment bill created successfully');
+  //   } catch (error: any) {
+  //     console.error('Error creating payment bill:', error);
+  //     Alert.alert('Error', error.message || 'Failed to create payment bill');
+  //   }
+  // };
 
   const handleMenuPress = () => {
     if (!bill) return;

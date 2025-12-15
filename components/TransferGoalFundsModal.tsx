@@ -17,7 +17,7 @@ interface TransferGoalFundsModalProps {
   visible: boolean;
   goal: Goal;
   fromAccountId: string;
-  goalAccounts: Array<{ account: Account; balance: number }>;
+  goalAccounts: { account: Account; balance: number }[];
   availableAccounts: Account[];
   onClose: () => void;
   onTransfer: (fromAccountId: string, toAccountId: string, amount: number) => Promise<void>;

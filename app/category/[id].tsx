@@ -15,19 +15,19 @@ import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useRealtimeData } from '../../hooks/useRealtimeData';
 import { useSettings } from '../../contexts/SettingsContext';
-import { Category, CategoryStats } from '../../types';
+import { CategoryStats } from '../../types';
 import { getCategoryStats, getCategoryTransactions, getCategoryConnectedItems } from '../../utils/categories';
 import { formatCurrencyAmount } from '../../utils/currency';
 
 export default function CategoryDetailScreen() {
   const { id } = useLocalSearchParams();
-  const { categories, globalRefresh } = useRealtimeData();
+  const { categories } = useRealtimeData();
   const { currency } = useSettings();
   const [activeTab, setActiveTab] = useState('overview');
   const [categoryStats, setCategoryStats] = useState<CategoryStats[]>([]);
   const [transactions, setTransactions] = useState<any[]>([]);
   const [connectedItems, setConnectedItems] = useState<any>({});
-  const [loading, setLoading] = useState(true);
+  const [, setLoading] = useState(true);
 
   const category = categories.find(c => c.id === id);
 

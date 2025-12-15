@@ -45,7 +45,7 @@ export default function WhatsNextModal({
           >
             {/* Header */}
             <View style={styles.header}>
-              <Text style={styles.title}>What's Next?</Text>
+              <Text style={styles.title}>What&apos;s Next?</Text>
               <TouchableOpacity style={styles.closeButton} onPress={onClose}>
                 <Ionicons name="close" size={24} color="white" />
               </TouchableOpacity>
@@ -136,7 +136,7 @@ export default function WhatsNextModal({
                 <View style={styles.optionContent}>
                   <Text style={styles.optionTitle}>Archive Goal</Text>
                   <Text style={styles.optionDescription}>
-                    We'll save this story for later
+                    We&apos;ll save this story for later
                   </Text>
                 </View>
                 <Ionicons name="chevron-forward" size={20} color="#6B7280" />

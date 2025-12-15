@@ -16,11 +16,9 @@ import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
-import GlassCard from '@/components/GlassCard';
 import { formatCurrencyAmount, formatCurrencySymbol } from '@/utils/currency';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
-import { router } from 'expo-router';
 
 interface AddLiabilityBillModalProps {
   visible: boolean;
@@ -53,7 +51,7 @@ export default function AddLiabilityBillModal({
   const { accounts, refreshTransactions, getFundSummary, refreshAccountFunds } = useRealtimeData();
 
   // Get default due date (today or liability start date, whichever is later)
-  const getDefaultDueDate = (): Date => {
+  const getDefaultDueDate = React.useCallback((): Date => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const startDate = new Date(liabilityStartDate);
@@ -61,7 +59,7 @@ export default function AddLiabilityBillModal({
     
     // Use today if it's after start date, otherwise use start date
     return today >= startDate ? today : startDate;
-  };
+  }, [liabilityStartDate]);
 
   // Initialize with prefill data if provided
   const [amount, setAmount] = useState(prefillAmount ? prefillAmount.toString() : '');
@@ -78,9 +76,9 @@ export default function AddLiabilityBillModal({
     return formatCurrencyAmount(value, currency);
   };
 
-  const formatDateForInput = (date: Date) => {
-    return date.toISOString().split('T')[0];
-  };
+  // const formatDateForInput = (date: Date) => {
+  //   return date.toISOString().split('T')[0];
+  // };
 
   // Filter out goals_savings and liability accounts - these shouldn't be used for bill payments
   const availableAccounts = useMemo(() => {
@@ -354,32 +352,32 @@ export default function AddLiabilityBillModal({
     }
   };
 
-  const handlePayNow = async () => {
-    if (!user) return;
+  // const handlePayNow = async () => {
+  //   if (!user) return;
 
-    try {
-      setSaving(true);
+  //   try {
+  //     setSaving(true);
       
-      // Create the bill first
-      const billId = await handleSave();
+  //     // Create the bill first
+  //     const billId = await handleSave();
       
-      if (billId) {
-        // Close this modal
-        handleClose();
-        
-        // Navigate to unified payment modal with the bill
-        router.push(`/modals/unified-payment-modal?bill_id=${billId}&liability_id=${liabilityId}` as any);
-        
-        // Call onSuccess to refresh parent
-        onSuccess?.();
-      }
-    } catch (error: any) {
-      console.error('Error in pay now:', error);
-      // Error already shown in handleSave
-    } finally {
-      setSaving(false);
-    }
-  };
+  //     if (billId) {
+  //       // Close this modal
+  //       handleClose();
+      
+  //       // Navigate to unified payment modal with the bill
+  //       router.push(`/modals/unified-payment-modal?bill_id=${billId}&liability_id=${liabilityId}` as any);
+      
+  //       // Call onSuccess to refresh parent
+  //       onSuccess?.();
+  //     }
+  //   } catch (error: any) {
+  //     console.error('Error in pay now:', error);
+  //     // Error already shown in handleSave
+  //   } finally {
+  //     setSaving(false);
+  //   }
+  // };
 
   // Initialize default account and refresh funds when modal opens
   useEffect(() => {
@@ -444,7 +442,7 @@ export default function AddLiabilityBillModal({
         }
       }
     }
-  }, [visible, availableAccounts, linkedAccountId, refreshAccountFunds, liabilityStartDate]);
+  }, [visible, availableAccounts, linkedAccountId, refreshAccountFunds, liabilityStartDate, liabilityId, prefillAmount, prefillDueDate, user]);
 
   const handleClose = () => {
     setAmount('');
@@ -723,7 +721,7 @@ export default function AddLiabilityBillModal({
                         },
                       },
                     ]);
-                  } catch (error) {
+                  } catch {
                     // Error already handled in handleSave
                   }
                 }}

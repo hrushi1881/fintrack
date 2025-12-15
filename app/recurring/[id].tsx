@@ -12,8 +12,8 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
+import { useBackNavigation, useAndroidBackButton } from '@/hooks/useBackNavigation';
 
-import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
@@ -30,7 +30,8 @@ const RecurringTransactionDetailScreen: React.FC = () => {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
   const { currency } = useSettings();
-  const { accounts } = useRealtimeData();
+  const handleBack = useBackNavigation();
+  useAndroidBackButton();
 
   const [recurringTransaction, setRecurringTransaction] = useState<RecurringTransaction | null>(null);
   const [bills, setBills] = useState<Bill[]>([]);
@@ -65,7 +66,7 @@ const RecurringTransactionDetailScreen: React.FC = () => {
       const transaction = await fetchRecurringTransactionById(id);
       if (!transaction) {
         Alert.alert('Error', 'Recurring transaction not found');
-        router.back();
+        handleBack();
         return;
       }
       setRecurringTransaction(transaction);
@@ -136,7 +137,7 @@ const RecurringTransactionDetailScreen: React.FC = () => {
     });
     
     return sortedBills[0]?.due_date || recurringTransaction?.next_transaction_date;
-  }, [bills, recurringTransaction, billsRefreshKey]);
+  }, [bills, recurringTransaction]);
 
   const handlePause = async () => {
     if (!recurringTransaction) return;
@@ -228,7 +229,7 @@ const RecurringTransactionDetailScreen: React.FC = () => {
       <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <TouchableOpacity onPress={handleBack} style={styles.backButton}>
             <Ionicons name="arrow-back" size={24} color="#041B11" />
           </TouchableOpacity>
           <View style={styles.headerRight}>

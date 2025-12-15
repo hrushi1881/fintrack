@@ -14,7 +14,6 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useRealtimeData } from '../../hooks/useRealtimeData';
-import { Category } from '../../types';
 import { createCategory, checkCategoryExists } from '../../utils/categories';
 import { supabase } from '../../lib/supabase';
 
@@ -92,7 +91,8 @@ export default function AddCategoryModal() {
       const checkResult = await checkCategoryExists(
         user.user.id,
         name.trim(),
-        selectedActivityTypes
+        selectedActivityTypes,
+        null
       );
 
       if (checkResult.exists) {
@@ -257,7 +257,7 @@ export default function AddCategoryModal() {
                   })}
                 </View>
                 <Text style={styles.activityTypesHint}>
-                  Select how you'll use this category (e.g., Pay for expenses, Set goals, etc.)
+                  Select how you&apos;ll use this category (e.g., Pay for expenses, Set goals, etc.)
                 </Text>
               </View>
 
@@ -304,10 +304,11 @@ export default function AddCategoryModal() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#FFF0F0',
+    backgroundColor: '#FFFFFF',
   },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   scrollView: {
     flex: 1,

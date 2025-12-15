@@ -1198,7 +1198,7 @@ export async function withdrawFromGoal(
     throw new Error(`Failed to spend from goal bucket: ${spendError.message}`);
   }
 
-  const createdWithdrawalTxnId = (spendResult as any)?.id || (spendResult as any)?.transaction_id || null;
+  const createdWithdrawalTxnId = (spendResult as string) || null;
 
   // Receive into destination account (personal funds)
   // Use currency from accounts (they match after validation)

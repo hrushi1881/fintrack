@@ -15,7 +15,7 @@ import { deleteAccount } from '@/utils/accounts';
 
 export default function AccountsScreen() {
   const { user } = useAuth();
-  const { accounts, totalBalance, loading, refreshAccounts, globalRefresh } = useRealtimeData();
+  const { totalBalance, loading, refreshAccounts, globalRefresh } = useRealtimeData();
   const { currency } = useSettings();
   const { organizations, organizationsWithAccounts, createOrganization, defaultOrganizationId } = useOrganizations();
 
@@ -38,7 +38,7 @@ export default function AccountsScreen() {
 
   const organizationChoices = useMemo(() => {
     if (!organizations) return [];
-    const defaults: Array<{ id: string; name: string; currency: string }> = [];
+    const defaults: { id: string; name: string; currency: string }[] = [];
     const defaultOrg = organizations.find((org) => org.id === defaultOrganizationId);
     if (defaultOrg) {
       defaults.push({ id: defaultOrg.id, name: defaultOrg.name, currency: defaultOrg.currency });

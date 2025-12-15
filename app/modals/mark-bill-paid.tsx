@@ -16,8 +16,8 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useRealtimeData } from '../../hooks/useRealtimeData';
 import { useSettings } from '../../contexts/SettingsContext';
 import { useLiabilities } from '../../contexts/LiabilitiesContext';
-import { Bill, BillPayment } from '../../types';
-import { markBillAsPaid, fetchBillById } from '../../utils/bills';
+import { Bill } from '../../types';
+import { fetchBillById } from '../../utils/bills';
 import { formatCurrencyAmount } from '../../utils/currency';
 import { supabase } from '../../lib/supabase';
 import DateTimePicker from '@react-native-community/datetimepicker';
@@ -26,9 +26,8 @@ import FundPicker, { FundBucket } from '../../components/FundPicker';
 export default function MarkBillPaidModal() {
   const { id } = useLocalSearchParams();
   const { user } = useAuth();
-  const { accounts, globalRefresh, refreshAccounts, refreshAccountFunds, refreshTransactions, recalculateAllBalances } = useRealtimeData();
+  const { accounts, globalRefresh, refreshAccounts, refreshAccountFunds, refreshTransactions } = useRealtimeData();
   const { currency } = useSettings();
-  const { getAccountBreakdown } = useLiabilities();
   const [bill, setBill] = useState<Bill | null>(null);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -153,7 +152,7 @@ export default function MarkBillPaidModal() {
       console.log('✅ Data refreshed after bill payment');
 
       // Create bill payment record
-      const { data: payment, error: paymentError } = await supabase
+      const { error: paymentError } = await supabase
         .from('bill_payments')
         .insert({
           bill_id: bill.id,

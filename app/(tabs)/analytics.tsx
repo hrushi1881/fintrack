@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, Dimensions } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useBackgroundMode } from '@/contexts/BackgroundModeContext';
@@ -7,16 +7,15 @@ import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { formatCurrencyAmount } from '@/utils/currency';
-import GlassmorphCard from '@/components/GlassmorphCard';
+import GlassCard from '@/components/GlassCard';
 import IOSGradientBackground from '@/components/iOSGradientBackground';
-import { theme, BACKGROUND_MODES } from '@/theme';
+import { BACKGROUND_MODES } from '@/theme';
 import { supabase } from '@/lib/supabase';
-
-const screenWidth = Dimensions.get('window').width;
+import { Fonts } from '@/utils/fonts';
 
 export default function AnalyticsScreen() {
   const { backgroundMode } = useBackgroundMode();
-  const { accounts, transactions, totalBalance, loading } = useRealtimeData();
+  const { transactions } = useRealtimeData();
   const { currency } = useSettings();
   const { user } = useAuth();
   const [selectedPeriod, setSelectedPeriod] = useState('month');
@@ -140,49 +139,47 @@ export default function AnalyticsScreen() {
     <SafeAreaView style={styles.safeArea}>
       <ScrollView style={styles.scrollView}>
         {/* Header */}
-        <View style={styles.header}>
+        <View style={styles.headerRow}>
           <Text style={styles.headerTitle}>Analytics</Text>
-          <TouchableOpacity style={styles.filterButton}>
-            <Ionicons name="filter" size={24} color="white" />
-          </TouchableOpacity>
         </View>
 
-          {/* Period Selector */}
-          <View style={styles.periodSelector}>
-            {periods.map((period) => (
-              <TouchableOpacity
-                key={period.key}
-                style={[
-                  styles.periodButton,
-                  selectedPeriod === period.key && styles.activePeriodButton
-                ]}
-                onPress={() => setSelectedPeriod(period.key)}
-              >
-                <Text style={[
-                  styles.periodText,
-                  selectedPeriod === period.key && styles.activePeriodText
-                ]}>
-                  {period.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-
-          {/* Key Stats */}
-          <View style={styles.statsGrid}>
+        {/* Summary Card */}
+        <GlassCard padding={24} marginVertical={20}>
+          <View style={styles.summaryGrid}>
             {stats.map((stat, index) => (
-              <GlassmorphCard key={index} style={styles.statCard}>
-                <Text style={styles.statTitle}>{stat.title}</Text>
-                <Text style={styles.statValue}>{stat.value}</Text>
-                <Text style={[styles.statChange, { color: stat.color }]}>
-                  {stat.change}
+              <View key={index} style={styles.summaryItem}>
+                <Text style={styles.summaryLabel}>{stat.title}</Text>
+                <Text style={[styles.summaryValue, { color: stat.color }]}>
+                  {stat.value}
                 </Text>
-              </GlassmorphCard>
+              </View>
             ))}
           </View>
+        </GlassCard>
+
+        {/* Period Selector */}
+        <View style={styles.segmentedControl}>
+          {periods.map((period) => (
+            <TouchableOpacity
+              key={period.key}
+              style={[
+                styles.segmentButton,
+                selectedPeriod === period.key && styles.segmentButtonActive
+              ]}
+              onPress={() => setSelectedPeriod(period.key)}
+            >
+              <Text style={[
+                styles.segmentText,
+                selectedPeriod === period.key && styles.segmentTextActive
+              ]}>
+                {period.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
 
           {/* Expense Trend Chart */}
-          <GlassmorphCard style={styles.chartContainer}>
+          <GlassCard padding={20} marginVertical={12}>
             <Text style={styles.chartTitle}>Expense Trend</Text>
             <View style={styles.simpleChart}>
               <View style={styles.chartBars}>
@@ -199,10 +196,10 @@ export default function AnalyticsScreen() {
                 ))}
               </View>
             </View>
-          </GlassmorphCard>
+          </GlassCard>
 
           {/* Income vs Expenses */}
-          <GlassmorphCard style={styles.chartContainer}>
+          <GlassCard padding={20} marginVertical={12}>
             <Text style={styles.chartTitle}>Income vs Expenses</Text>
             <View style={styles.comparisonChart}>
               <View style={styles.comparisonItem}>
@@ -214,10 +211,10 @@ export default function AnalyticsScreen() {
                 <Text style={styles.comparisonLabel}>Expenses: {formatCurrencyAmount(totals.expenses, currency)}</Text>
               </View>
             </View>
-          </GlassmorphCard>
+          </GlassCard>
 
           {/* Expense Categories */}
-          <GlassmorphCard style={styles.chartContainer}>
+          <GlassCard padding={20} marginVertical={12}>
             <Text style={styles.chartTitle}>Expense Categories</Text>
             <View style={styles.categoriesList}>
               {(fetching ? [] : expenseCategories).map((category, index) => (
@@ -228,10 +225,10 @@ export default function AnalyticsScreen() {
                 </View>
               ))}
             </View>
-          </GlassmorphCard>
+          </GlassCard>
 
           {/* Insights */}
-          <GlassmorphCard style={styles.insightsContainer}>
+          <GlassCard padding={20} marginVertical={12}>
             <Text style={styles.insightsTitle}>Insights</Text>
             <View style={styles.insightItem}>
               <Ionicons name="trending-up" size={20} color="#10B981" />
@@ -248,10 +245,10 @@ export default function AnalyticsScreen() {
             <View style={styles.insightItem}>
               <Ionicons name="checkmark-circle" size={20} color="#10B981" />
               <Text style={styles.insightText}>
-                You're on track to meet your financial goals
+                You&apos;re on track to meet your financial goals
               </Text>
             </View>
-          </GlassmorphCard>
+          </GlassCard>
         </ScrollView>
       </SafeAreaView>
   );
@@ -270,73 +267,63 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 20,
   },
-  header: {
+  headerRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    paddingTop: 20,
-    paddingBottom: 30,
+    justifyContent: 'space-between',
+    paddingTop: 16,
+    paddingBottom: 8,
   },
   headerTitle: {
-    ...theme.typography.h1,
-    color: '#FFFFFF',
+    fontSize: 26,
+    fontFamily: Fonts.archivoBlack,
+    color: '#000000',
   },
-  filterButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 12,
-  },
-  periodSelector: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 4,
-    marginBottom: 30,
-  },
-  periodButton: {
-    flex: 1,
-    paddingVertical: 8,
-    alignItems: 'center',
-    borderRadius: 8,
-  },
-  activePeriodButton: {
-    backgroundColor: '#10B981',
-  },
-  periodText: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  activePeriodText: {
-    color: 'white',
-  },
-  statsGrid: {
+  summaryGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    justifyContent: 'space-between',
-    marginBottom: 30,
+    gap: 16,
   },
-  statCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 16,
-    width: '48%',
-    marginBottom: 12,
+  summaryItem: {
+    flex: 1,
+    minWidth: '45%',
   },
-  statTitle: {
-    fontSize: 12,
-    color: '#9CA3AF',
-    marginBottom: 8,
-  },
-  statValue: {
-    fontSize: 20,
-    color: 'white',
-    fontWeight: 'bold',
+  summaryLabel: {
+    fontSize: 14,
+    fontFamily: Fonts.instrumentSerifRegular,
+    color: 'rgba(0, 0, 0, 0.7)',
     marginBottom: 4,
   },
-  statChange: {
-    fontSize: 12,
-    fontWeight: 'bold',
+  summaryValue: {
+    fontSize: 20,
+    fontFamily: Fonts.poppinsBold,
+    color: '#000000',
+  },
+  segmentedControl: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    padding: 4,
+    marginBottom: 16,
+  },
+  segmentButton: {
+    flex: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  segmentButtonActive: {
+    backgroundColor: '#000000',
+  },
+  segmentText: {
+    fontSize: 14,
+    fontFamily: Fonts.poppinsSemiBold,
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  segmentTextActive: {
+    color: '#FFFFFF',
+    fontFamily: Fonts.poppinsSemiBold,
   },
   chartContainer: {
     backgroundColor: '#000000',
@@ -346,10 +333,9 @@ const styles = StyleSheet.create({
   },
   chartTitle: {
     fontSize: 16,
-    color: 'white',
-    fontWeight: 'bold',
+    color: '#000000',
+    fontFamily: Fonts.poppinsSemiBold,
     marginBottom: 16,
-    textAlign: 'center',
   },
   chart: {
     borderRadius: 16,
@@ -379,8 +365,9 @@ const styles = StyleSheet.create({
     minHeight: 4,
   },
   chartLabel: {
-    color: '#9CA3AF',
+    color: 'rgba(0, 0, 0, 0.5)',
     fontSize: 10,
+    fontFamily: Fonts.instrumentSerifRegular,
   },
   comparisonChart: {
     height: 120,
@@ -395,8 +382,9 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   comparisonLabel: {
-    color: 'white',
     fontSize: 12,
+    fontFamily: Fonts.instrumentSerifRegular,
+    color: 'rgba(0, 0, 0, 0.7)',
   },
   categoriesList: {
     marginTop: 16,
@@ -405,6 +393,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 12,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0, 0, 0, 0.08)',
   },
   categoryColor: {
     width: 16,
@@ -413,36 +404,35 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   categoryName: {
-    color: 'white',
     flex: 1,
     fontSize: 14,
+    fontFamily: Fonts.instrumentSerifRegular,
+    color: '#000000',
   },
   categoryPercentage: {
-    color: '#9CA3AF',
     fontSize: 14,
-    fontWeight: 'bold',
-  },
-  insightsContainer: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 30,
+    fontFamily: Fonts.poppinsSemiBold,
+    color: '#000000',
   },
   insightsTitle: {
     fontSize: 18,
-    color: 'white',
-    fontWeight: 'bold',
+    fontFamily: Fonts.poppinsSemiBold,
+    color: '#000000',
     marginBottom: 16,
   },
   insightItem: {
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 12,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0, 0, 0, 0.08)',
   },
   insightText: {
-    color: 'white',
-    marginLeft: 12,
     flex: 1,
     fontSize: 14,
+    fontFamily: Fonts.instrumentSerifRegular,
+    color: '#000000',
+    marginLeft: 12,
   },
 });

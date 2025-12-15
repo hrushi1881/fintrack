@@ -142,11 +142,11 @@ const AddOrganizationModal: React.FC<AddOrganizationModalProps> = ({
     onClose();
   };
 
-  const ORGANIZATION_TYPES: Array<{
+  const ORGANIZATION_TYPES: {
     value: 'bank' | 'wallet' | 'investment' | 'cash' | 'custom';
     label: string;
     icon: keyof typeof Ionicons.glyphMap;
-  }> = [
+  }[] = [
     { value: 'bank', label: 'Bank', icon: 'business-outline' },
     { value: 'wallet', label: 'Wallet', icon: 'wallet-outline' },
     { value: 'investment', label: 'Investment', icon: 'trending-up-outline' },

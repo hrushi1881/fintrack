@@ -1,6 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, Alert } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import React, { useState, useEffect, useMemo } from 'react';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Calendar } from 'react-native-calendars';
 import { router } from 'expo-router';
@@ -8,43 +7,23 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useBackgroundMode } from '@/contexts/BackgroundModeContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { useSettings } from '@/contexts/SettingsContext';
-import { useLiabilities } from '@/contexts/LiabilitiesContext';
 import { formatCurrencyAmount } from '@/utils/currency';
-import { fetchUpcomingSchedules } from '@/utils/liabilitySchedules';
 import { supabase } from '@/lib/supabase';
 import { calculateBillStatus } from '@/utils/bills';
 import GlassCard from '@/components/GlassCard';
+import LiquidGlassCard from '@/components/LiquidGlassCard';
 import TransactionCard from '@/components/TransactionCard';
 import IOSGradientBackground from '@/components/iOSGradientBackground';
-import { theme, BACKGROUND_MODES } from '@/theme';
+import { BACKGROUND_MODES } from '@/theme';
 import PayModal from '../modals/pay';
 import ReceiveModal from '../modals/receive';
 import TransferModal from '../modals/transfer';
-
-interface Transaction {
-  id: string;
-  amount: number;
-  type: string;
-  description: string;
-  date: string;
-  account_id: string;
-  category_id: string;
-  account?: {
-    name: string;
-    color: string;
-    icon: string;
-  };
-  category?: {
-    name: string;
-  };
-}
 
 export default function TransactionsScreen() {
   const { user } = useAuth();
   const { backgroundMode } = useBackgroundMode();
   const { transactions, loading, refreshTransactions, refreshAccounts } = useRealtimeData();
   const { currency } = useSettings();
-  const { liabilities } = useLiabilities();
   const [selectedDate, setSelectedDate] = useState('');
   const [viewMode, setViewMode] = useState('list'); // 'list' or 'calendar'
   const [filterType, setFilterType] = useState('all'); // 'all', 'income', 'expense', 'transfer'
@@ -105,17 +84,13 @@ export default function TransactionsScreen() {
     return filtered;
   })();
 
+  // Calculate summary statistics
+  const totalIncome = transactions.filter(t => t.type === 'income').reduce((sum, t) => sum + t.amount, 0);
+  const totalExpenses = transactions.filter(t => t.type === 'expense').reduce((sum, t) => sum + t.amount, 0);
+  const netAmount = totalIncome - totalExpenses;
+
   const formatCurrency = (amount: number) => {
     return formatCurrencyAmount(amount, currency);
-  };
-
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    });
   };
 
 
@@ -128,98 +103,207 @@ export default function TransactionsScreen() {
       );
     } else {
       return (
-        <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
+        <View style={[styles.container, styles.whiteBackground]}>
           {renderContent()}
-        </LinearGradient>
+        </View>
       );
     }
+  };
+
+  // Group transactions by date
+  const groupedTransactions = useMemo(() => {
+    const groups: { [key: string]: typeof transactions } = {};
+    filteredTransactions.forEach(transaction => {
+      const date = transaction.date;
+      if (!groups[date]) {
+        groups[date] = [];
+      }
+      groups[date].push(transaction);
+    });
+    return Object.entries(groups)
+      .sort(([a], [b]) => new Date(b).getTime() - new Date(a).getTime());
+  }, [filteredTransactions]);
+
+  const formatDateHeader = (dateString: string) => {
+    const date = new Date(dateString);
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    if (date.toDateString() === today.toDateString()) {
+      return 'Today';
+    } else if (date.toDateString() === yesterday.toDateString()) {
+      return 'Yesterday';
+    }
+
+    return date.toLocaleDateString('en-US', {
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+    });
   };
 
   const renderContent = () => (
     <>
     <SafeAreaView style={styles.safeArea}>
-      <ScrollView style={styles.scrollView}>
+      <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
         {/* Header */}
-        <View style={styles.header}>
+        <View style={styles.headerRow}>
+          <View>
           <Text style={styles.headerTitle}>Transactions</Text>
+            <Text style={styles.headerSubtitle}>
+              {transactions.length} total transactions
+            </Text>
+          </View>
+          <View style={styles.headerActions}>
           <TouchableOpacity 
-            style={styles.addButton}
+            style={styles.iconButton}
             onPress={() => setPayModalVisible(true)}
           >
-            <Ionicons name="add" size={24} color="white" />
+              <Ionicons name="add" size={22} color="#000000" />
           </TouchableOpacity>
+          </View>
         </View>
 
-          {/* Segmented Control */}
+        {/* Summary Card - Liquid Glass */}
+        {transactions.length > 0 && (
+          <LiquidGlassCard
+            variant="frosted"
+            size="lg"
+            elevation="medium"
+            shimmer
+            marginVertical={16}
+          >
+            {/* Net Amount - Hero Display */}
+            <View style={styles.netHero}>
+              <Text style={styles.netLabel}>Net Balance</Text>
+              <Text style={[styles.netValue, { color: netAmount >= 0 ? '#10B981' : '#EF4444' }]}>
+                {netAmount >= 0 ? '+' : ''}{formatCurrency(netAmount)}
+              </Text>
+            </View>
+
+            {/* Income & Expense Row */}
+            <View style={styles.summaryRow}>
+              <Pressable style={styles.summaryCard}>
+                <View style={[styles.summaryIconContainer, { backgroundColor: 'rgba(16, 185, 129, 0.12)' }]}>
+                  <Ionicons name="trending-up" size={18} color="#10B981" />
+                </View>
+                <View style={styles.summaryTextContainer}>
+                <Text style={styles.summaryLabel}>Income</Text>
+                <Text style={[styles.summaryValue, { color: '#10B981' }]}>
+                  {formatCurrency(totalIncome)}
+                </Text>
+              </View>
+              </Pressable>
+
+              <View style={styles.summaryDivider} />
+
+              <Pressable style={styles.summaryCard}>
+                <View style={[styles.summaryIconContainer, { backgroundColor: 'rgba(239, 68, 68, 0.12)' }]}>
+                  <Ionicons name="trending-down" size={18} color="#EF4444" />
+                </View>
+                <View style={styles.summaryTextContainer}>
+                <Text style={styles.summaryLabel}>Expenses</Text>
+                <Text style={[styles.summaryValue, { color: '#EF4444' }]}>
+                  {formatCurrency(totalExpenses)}
+                </Text>
+              </View>
+              </Pressable>
+              </View>
+          </LiquidGlassCard>
+        )}
+
+        {/* View Mode Toggle - Liquid Glass Pill */}
+        <LiquidGlassCard
+          variant="light"
+          padding={4}
+          borderRadius={16}
+          elevation="low"
+          marginVertical={8}
+        >
           <View style={styles.segmentedControl}>
             <TouchableOpacity 
-              style={[styles.segment, viewMode === 'list' && styles.activeSegment]}
+              style={[styles.segmentButton, viewMode === 'list' && styles.segmentButtonActive]}
               onPress={() => setViewMode('list')}
             >
-              <Ionicons name="list" size={18} color={viewMode === 'list' ? '#10B981' : 'rgba(255,255,255,0.7)'} />
-              <Text style={[styles.segmentText, viewMode === 'list' && styles.activeSegmentText]}>
+              <Ionicons 
+                name="list-outline" 
+                size={16} 
+                color={viewMode === 'list' ? '#FFFFFF' : 'rgba(0, 0, 0, 0.6)'} 
+              />
+              <Text style={[styles.segmentText, viewMode === 'list' && styles.segmentTextActive]}>
                 List
               </Text>
             </TouchableOpacity>
-            
-            {/* Divider */}
-            <View style={styles.segmentDivider} />
-            
             <TouchableOpacity 
-              style={[styles.segment, viewMode === 'calendar' && styles.activeSegment]}
+              style={[styles.segmentButton, viewMode === 'calendar' && styles.segmentButtonActive]}
               onPress={() => setViewMode('calendar')}
             >
-              <Ionicons name="calendar" size={18} color={viewMode === 'calendar' ? '#10B981' : 'rgba(255,255,255,0.7)'} />
-              <Text style={[styles.segmentText, viewMode === 'calendar' && styles.activeSegmentText]}>
+              <Ionicons 
+                name="calendar-outline" 
+                size={16} 
+                color={viewMode === 'calendar' ? '#FFFFFF' : 'rgba(0, 0, 0, 0.6)'} 
+              />
+              <Text style={[styles.segmentText, viewMode === 'calendar' && styles.segmentTextActive]}>
                 Calendar
               </Text>
             </TouchableOpacity>
           </View>
+        </LiquidGlassCard>
 
-          {/* Transaction Type Filter */}
-          <View style={styles.filterContainer}>
-            <Text style={styles.filterLabel}>Filter by type:</Text>
-            <View style={styles.filterButtons}>
+        {/* Transaction Type Filter - Scrollable Pills */}
+        <ScrollView 
+          horizontal 
+          showsHorizontalScrollIndicator={false} 
+          style={styles.filterContainer}
+          contentContainerStyle={styles.filterContent}
+        >
               {[
-                { key: 'all', label: 'All', icon: 'list' },
-                { key: 'income', label: 'Income', icon: 'arrow-down' },
-                { key: 'expense', label: 'Expense', icon: 'arrow-up' },
+            { key: 'all', label: 'All', icon: 'apps' },
+            { key: 'income', label: 'Income', icon: 'trending-up' },
+            { key: 'expense', label: 'Expense', icon: 'trending-down' },
                 { key: 'transfer', label: 'Transfer', icon: 'swap-horizontal' },
               ].map((filter) => (
-                <TouchableOpacity
+            <Pressable
                   key={filter.key}
-                  style={[
-                    styles.filterButton,
-                    filterType === filter.key && styles.activeFilterButton
+              style={({ pressed }) => [
+                styles.filterPill,
+                filterType === filter.key && styles.filterPillActive,
+                { opacity: pressed ? 0.8 : 1 },
                   ]}
                   onPress={() => setFilterType(filter.key)}
                 >
                   <Ionicons 
                     name={filter.icon as any} 
-                    size={16} 
-                    color={filterType === filter.key ? '#10B981' : 'rgba(255,255,255,0.7)'} 
+                size={14} 
+                    color={filterType === filter.key ? '#FFFFFF' : 'rgba(0, 0, 0, 0.6)'} 
                   />
                   <Text style={[
-                    styles.filterButtonText,
-                    filterType === filter.key && styles.activeFilterButtonText
+                styles.filterPillText,
+                filterType === filter.key && styles.filterPillTextActive
                   ]}>
                     {filter.label}
                   </Text>
-                </TouchableOpacity>
+            </Pressable>
               ))}
-            </View>
-          </View>
+        </ScrollView>
 
           {/* Calendar View */}
           {viewMode === 'calendar' && (
-            <View style={styles.calendarContainer}>
+            <LiquidGlassCard
+              variant="frosted"
+              size="lg"
+              elevation="medium"
+              marginVertical={12}
+            >
               <Calendar
                 onDayPress={onDayPress}
+                markingType="multi-dot"
                 markedDates={(() => {
                   const markedDates: any = {};
                   
                   // First, collect all dots for each date
-                  const dateDots: { [key: string]: Array<{ color: string; key: string }> } = {};
+                  const dateDots: { [key: string]: { color: string; key: string }[] } = {};
                   
                   // Mark dates with transactions
                   transactions.forEach(transaction => {
@@ -266,7 +350,7 @@ export default function TransactionsScreen() {
                       dots: dateDots[date],
                       ...(selectedDate === date && {
                         selected: true,
-                        selectedColor: '#10B981',
+                        selectedColor: '#000000',
                         selectedTextColor: '#ffffff'
                       })
                     };
@@ -276,7 +360,7 @@ export default function TransactionsScreen() {
                   if (selectedDate && !markedDates[selectedDate]) {
                     markedDates[selectedDate] = {
                       selected: true,
-                      selectedColor: '#10B981',
+                      selectedColor: '#000000',
                       selectedTextColor: '#ffffff'
                     };
                   } else if (selectedDate && markedDates[selectedDate]) {
@@ -284,7 +368,7 @@ export default function TransactionsScreen() {
                     markedDates[selectedDate] = {
                       ...markedDates[selectedDate],
                       selected: true,
-                      selectedColor: '#10B981',
+                      selectedColor: '#000000',
                       selectedTextColor: '#ffffff'
                     };
                   }
@@ -292,42 +376,81 @@ export default function TransactionsScreen() {
                   return markedDates;
                 })()}
                 theme={{
-                  backgroundColor: '#000000',
-                  calendarBackground: '#000000',
-                  textSectionTitleColor: '#ffffff',
-                  selectedDayBackgroundColor: '#10B981',
-                  selectedDayTextColor: '#ffffff',
+                  backgroundColor: 'transparent',
+                  calendarBackground: 'transparent',
+                  textSectionTitleColor: 'rgba(0, 0, 0, 0.6)',
+                  selectedDayBackgroundColor: '#000000',
+                  selectedDayTextColor: '#FFFFFF',
                   todayTextColor: '#10B981',
-                  dayTextColor: '#ffffff',
-                  textDisabledColor: '#6B7280',
-                  dotColor: '#10B981',
-                  selectedDotColor: '#ffffff',
-                  arrowColor: '#10B981',
-                  monthTextColor: '#ffffff',
-                  indicatorColor: '#10B981',
+                  todayBackgroundColor: 'rgba(16, 185, 129, 0.1)',
+                  dayTextColor: '#000000',
+                  textDisabledColor: 'rgba(0, 0, 0, 0.25)',
+                  dotColor: '#000000',
+                  selectedDotColor: '#FFFFFF',
+                  arrowColor: '#000000',
+                  monthTextColor: '#000000',
+                  indicatorColor: '#000000',
+                  textDayFontFamily: 'Poppins-Medium',
+                  textMonthFontFamily: 'Poppins-Bold',
+                  textDayHeaderFontFamily: 'Poppins-Medium',
+                  textDayFontSize: 15,
+                  textMonthFontSize: 17,
+                  textDayHeaderFontSize: 12,
                 }}
                 style={styles.calendar}
               />
-            </View>
+            </LiquidGlassCard>
           )}
 
           {/* Selected Date Info */}
           {selectedDate && viewMode === 'calendar' && (
-            <View style={styles.selectedDateInfo}>
+            <LiquidGlassCard
+              variant="mint"
+              size="md"
+              elevation="low"
+              marginVertical={8}
+            >
+              <View style={styles.selectedDateContainer}>
+                <View style={styles.selectedDateIcon}>
+                  <Ionicons name="calendar" size={20} color="#10B981" />
+                </View>
+                <View style={styles.selectedDateInfo}>
               <Text style={styles.selectedDateText}>
-                {new Date(selectedDate).toLocaleDateString()}
+                {new Date(selectedDate).toLocaleDateString('en-US', {
+                  weekday: 'long',
+                  month: 'long',
+                  day: 'numeric',
+                })}
               </Text>
+                  <View style={styles.selectedDateStats}>
               {filteredTransactions.length > 0 && (
+                      <View style={styles.selectedDateStatItem}>
+                        <Ionicons name="receipt-outline" size={12} color="rgba(0, 0, 0, 0.5)" />
                 <Text style={styles.selectedDateCount}>
                   {filteredTransactions.length} transaction{filteredTransactions.length !== 1 ? 's' : ''}
                 </Text>
+                      </View>
               )}
               {bills.filter(b => b.due_date === selectedDate && b.status !== 'paid' && b.status !== 'cancelled').length > 0 && (
-                <Text style={styles.selectedDateCount}>
+                      <View style={styles.selectedDateStatItem}>
+                        <Ionicons name="alert-circle-outline" size={12} color="#F59E0B" />
+                        <Text style={[styles.selectedDateCount, { color: '#F59E0B' }]}>
                   {bills.filter(b => b.due_date === selectedDate && b.status !== 'paid' && b.status !== 'cancelled').length} bill{bills.filter(b => b.due_date === selectedDate && b.status !== 'paid' && b.status !== 'cancelled').length !== 1 ? 's' : ''} due
                 </Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+                {selectedDate && (
+                  <TouchableOpacity 
+                    style={styles.clearDateButton}
+                    onPress={() => setSelectedDate('')}
+                  >
+                    <Ionicons name="close-circle" size={20} color="rgba(0, 0, 0, 0.4)" />
+                  </TouchableOpacity>
               )}
-            </View>
+              </View>
+            </LiquidGlassCard>
           )}
 
           {/* Bills for Selected Date */}
@@ -340,53 +463,86 @@ export default function TransactionsScreen() {
                   return b.due_date === selectedDate && billStatus !== 'paid' && billStatus !== 'cancelled';
                 })
                 .map((bill) => (
-                  <TouchableOpacity
+                  <Pressable
                     key={bill.id}
-                    style={[
-                      styles.billCard,
-                      bill.status === 'overdue' && styles.billCardOverdue,
-                    ]}
-                    onPress={() => {
-                      // Navigate to bill or liability detail page
-                      if (bill.liability_id) {
-                        router.push(`/liability/${bill.liability_id}`);
-                      } else {
-                        router.push(`/bill/${bill.id}` as any);
-                      }
-                    }}
+                      onPress={() => {
+                        if (bill.liability_id) {
+                          router.push(`/liability/${bill.liability_id}`);
+                        } else {
+                          router.push(`/bill/${bill.id}` as any);
+                        }
+                      }}
+                    style={({ pressed }) => [{ opacity: pressed ? 0.9 : 1 }]}
                   >
-                    <View style={styles.billIcon}>
-                      <Ionicons 
-                        name={bill.icon as any || 'receipt-outline'} 
-                        size={20} 
-                        color={bill.status === 'overdue' ? '#EF4444' : '#F59E0B'} 
-                      />
-                    </View>
-                    <View style={styles.billInfo}>
-                      <Text style={styles.billTitle}>{bill.title}</Text>
-                      <Text style={styles.billAmount}>{formatCurrency(bill.amount || 0)}</Text>
-                      {bill.principal_amount && bill.interest_amount && bill.interest_amount > 0 && (
-                        <Text style={styles.billBreakdown}>
-                          Principal: {formatCurrency(bill.principal_amount)} • Interest: {formatCurrency(bill.interest_amount)}
-                        </Text>
-                      )}
-                      <Text style={[
-                        styles.billStatus,
-                        bill.status === 'overdue' && styles.billStatusOverdue,
-                        bill.status === 'due_today' && styles.billStatusDueToday,
-                      ]}>
-                        {bill.status === 'overdue' ? '⚠️ Overdue' : bill.status === 'due_today' ? 'Due Today' : 'Upcoming'}
-                      </Text>
-                    </View>
-                    <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.4)" />
-                  </TouchableOpacity>
+                    <LiquidGlassCard
+                      variant="light"
+                      size="md"
+                      elevation="low"
+                      marginVertical={6}
+                    >
+                      <View style={styles.billCard}>
+                        <View style={[styles.billIcon, { backgroundColor: (bill.status === 'overdue' ? '#EF4444' : '#F59E0B') + '12' }]}>
+                          <Ionicons 
+                            name={bill.icon as any || 'receipt-outline'} 
+                            size={20} 
+                            color={bill.status === 'overdue' ? '#EF4444' : '#F59E0B'} 
+                          />
+                        </View>
+                        <View style={styles.billInfo}>
+                          <Text style={styles.billTitle}>{bill.title}</Text>
+                          <Text style={styles.billAmount}>{formatCurrency(bill.amount || 0)}</Text>
+                          {bill.principal_amount && bill.interest_amount && bill.interest_amount > 0 && (
+                            <Text style={styles.billBreakdown}>
+                              Principal: {formatCurrency(bill.principal_amount)} • Interest: {formatCurrency(bill.interest_amount)}
+                            </Text>
+                          )}
+                        </View>
+                        <View style={styles.billStatusContainer}>
+                          <View style={[
+                            styles.billStatusBadge,
+                            { backgroundColor: bill.status === 'overdue' ? 'rgba(239, 68, 68, 0.12)' : 'rgba(245, 158, 11, 0.12)' }
+                          ]}>
+                          <Text style={[
+                              styles.billStatusText,
+                              { color: bill.status === 'overdue' ? '#EF4444' : '#F59E0B' }
+                          ]}>
+                              {bill.status === 'overdue' ? 'Overdue' : bill.status === 'due_today' ? 'Today' : 'Due'}
+                          </Text>
+                        </View>
+                          <Ionicons name="chevron-forward" size={16} color="rgba(0, 0, 0, 0.3)" />
+                      </View>
+                      </View>
+                    </LiquidGlassCard>
+                  </Pressable>
                 ))}
             </View>
           )}
 
-          {/* Transactions List */}
+          {/* Transactions List - Grouped by Date */}
           <View style={styles.transactionsList}>
-            {filteredTransactions.length > 0 ? (
+            {viewMode === 'list' && groupedTransactions.length > 0 ? (
+              groupedTransactions.map(([date, dayTransactions]) => (
+                <View key={date} style={styles.transactionGroup}>
+                  <View style={styles.dateHeaderContainer}>
+                    <Text style={styles.dateHeader}>{formatDateHeader(date)}</Text>
+                    <View style={styles.dateHeaderLine} />
+                  </View>
+                  {dayTransactions.map((transaction) => (
+                    <TransactionCard
+                      key={transaction.id}
+                      id={transaction.id}
+                      amount={transaction.amount}
+                      type={transaction.type as 'income' | 'expense' | 'transfer'}
+                      category={transaction.category?.name || 'Other'}
+                      description={transaction.description}
+                      date={transaction.date}
+                      metadata={(transaction as any).metadata}
+                      onPress={() => router.push(`/transaction/${transaction.id}`)}
+                    />
+                  ))}
+                </View>
+              ))
+            ) : viewMode === 'calendar' && filteredTransactions.length > 0 ? (
               filteredTransactions.map((transaction) => (
                 <TransactionCard
                   key={transaction.id}
@@ -401,56 +557,88 @@ export default function TransactionsScreen() {
                 />
               ))
             ) : (!selectedDate || (selectedDate && filteredTransactions.length === 0 && bills.filter(b => b.due_date === selectedDate && b.status !== 'paid' && b.status !== 'cancelled').length === 0)) ? (
-              <GlassCard padding={24} marginVertical={12}>
+              <LiquidGlassCard
+                variant="crystal"
+                size="xl"
+                elevation="medium"
+                marginVertical={20}
+              >
                 <View style={styles.emptyStateContent}>
-                  <Ionicons name="receipt-outline" size={48} color="rgba(0, 0, 0, 0.4)" />
+                  <View style={styles.emptyIconContainer}>
+                    <Ionicons name="receipt-outline" size={40} color="rgba(0, 0, 0, 0.3)" />
+                  </View>
                   <Text style={styles.emptyTransactionsTitle}>No Transactions Yet</Text>
                   <Text style={styles.emptyTransactionsDescription}>
-                    Start by adding money or making a transaction
+                    Start tracking your finances by adding your first transaction
                   </Text>
                 </View>
                 <View style={styles.emptyActions}>
-                  <TouchableOpacity
-                    style={styles.emptyActionButton}
+                  <Pressable
+                    style={({ pressed }) => [styles.emptyActionButton, styles.emptyActionButtonPrimary, { opacity: pressed ? 0.9 : 1 }]}
                     onPress={() => setReceiveModalVisible(true)}
                   >
-                    <Text style={styles.emptyActionButtonText}>Add Money</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.emptyActionButton}
+                    <Ionicons name="add-circle-outline" size={18} color="#FFFFFF" />
+                    <Text style={styles.emptyActionButtonTextPrimary}>Add Money</Text>
+                  </Pressable>
+                  <Pressable
+                    style={({ pressed }) => [styles.emptyActionButton, styles.emptyActionButtonSecondary, { opacity: pressed ? 0.9 : 1 }]}
                     onPress={() => setPayModalVisible(true)}
                   >
-                    <Text style={styles.emptyActionButtonText}>Spend Money</Text>
-                  </TouchableOpacity>
+                    <Ionicons name="arrow-up-circle-outline" size={18} color="#000000" />
+                    <Text style={styles.emptyActionButtonTextSecondary}>Spend Money</Text>
+                  </Pressable>
                 </View>
-              </GlassCard>
+              </LiquidGlassCard>
             ) : null}
           </View>
 
-          {/* Quick Actions */}
+          {/* Quick Actions - Floating Action Bar */}
+          <LiquidGlassCard
+            variant="dark"
+            size="md"
+            elevation="high"
+            marginVertical={20}
+            borderRadius={20}
+          >
           <View style={styles.quickActions}>
-            <TouchableOpacity 
-              style={styles.actionButton}
+              <Pressable 
+                style={({ pressed }) => [styles.actionButton, { opacity: pressed ? 0.8 : 1 }]}
               onPress={() => setReceiveModalVisible(true)}
             >
-              <Ionicons name="arrow-down-circle" size={24} color="#10B981" />
+                <View style={[styles.actionIconContainer, { backgroundColor: 'rgba(16, 185, 129, 0.2)' }]}>
+                  <Ionicons name="arrow-down" size={20} color="#10B981" />
+                </View>
               <Text style={styles.actionText}>Receive</Text>
-            </TouchableOpacity>
-            <TouchableOpacity 
-              style={styles.actionButton}
+              </Pressable>
+
+              <View style={styles.actionDivider} />
+
+              <Pressable 
+                style={({ pressed }) => [styles.actionButton, { opacity: pressed ? 0.8 : 1 }]}
               onPress={() => setPayModalVisible(true)}
             >
-              <Ionicons name="arrow-up-circle" size={24} color="#EF4444" />
+                <View style={[styles.actionIconContainer, { backgroundColor: 'rgba(239, 68, 68, 0.2)' }]}>
+                  <Ionicons name="arrow-up" size={20} color="#EF4444" />
+                </View>
               <Text style={styles.actionText}>Pay</Text>
-            </TouchableOpacity>
-            <TouchableOpacity 
-              style={styles.actionButton}
+              </Pressable>
+
+              <View style={styles.actionDivider} />
+
+              <Pressable 
+                style={({ pressed }) => [styles.actionButton, { opacity: pressed ? 0.8 : 1 }]}
               onPress={() => setTransferModalVisible(true)}
             >
-              <Ionicons name="swap-horizontal" size={24} color="#3B82F6" />
+                <View style={[styles.actionIconContainer, { backgroundColor: 'rgba(59, 130, 246, 0.2)' }]}>
+                  <Ionicons name="swap-horizontal" size={20} color="#3B82F6" />
+                </View>
               <Text style={styles.actionText}>Transfer</Text>
-            </TouchableOpacity>
+              </Pressable>
           </View>
+          </LiquidGlassCard>
+
+          {/* Bottom Spacing */}
+          <View style={{ height: 100 }} />
         </ScrollView>
       </SafeAreaView>
 
@@ -490,13 +678,13 @@ export default function TransactionsScreen() {
 
   if (loading) {
     return (
-      <LinearGradient colors={['#99D795', '#99D795', '#99D795']} style={styles.container}>
+      <View style={[styles.container, styles.whiteBackground]}>
         <SafeAreaView style={styles.safeArea}>
           <GlassCard padding={24} marginVertical={12}>
             <Text style={styles.loadingText}>Loading transactions...</Text>
           </GlassCard>
         </SafeAreaView>
-      </LinearGradient>
+      </View>
     );
   }
 
@@ -506,184 +694,417 @@ export default function TransactionsScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
+  whiteBackground: {
+    backgroundColor: '#FFFFFF',
   },
   safeArea: {
     flex: 1,
+    backgroundColor: 'transparent',
   },
   scrollView: {
     flex: 1,
     paddingHorizontal: 20,
   },
-  header: {
+  // Header Styles
+  headerRow: {
     flexDirection: 'row',
+    alignItems: 'flex-start',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingTop: 20,
-    paddingBottom: 20,
-    marginBottom: 10,
+    paddingTop: 16,
+    paddingBottom: 12,
   },
   headerTitle: {
-    ...theme.typography.h1,
-    color: '#FFFFFF',
+    fontSize: 28,
+    fontFamily: 'Archivo Black',
+    color: '#000000',
+    letterSpacing: -0.5,
   },
-  addButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 12,
+  headerSubtitle: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginTop: 4,
   },
-  segmentedControl: {
+  headerActions: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 4,
-    marginBottom: 20,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
+    gap: 8,
   },
-  segment: {
+  iconButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // Summary Card Styles
+  netHero: {
+    alignItems: 'center',
+    marginBottom: 20,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0, 0, 0, 0.06)',
+  },
+  netLabel: {
+    fontSize: 13,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginBottom: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  netValue: {
+    fontSize: 32,
+    fontFamily: 'Poppins-Bold',
+    fontWeight: '700',
+    letterSpacing: -0.5,
+  },
+  summaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  summaryCard: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-    position: 'relative',
+    paddingVertical: 8,
+    paddingHorizontal: 4,
   },
-  activeSegment: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.3)',
+  summaryIconContainer: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  summaryTextContainer: {
+    flex: 1,
+  },
+  summaryDivider: {
+    width: 1,
+    height: 40,
+    backgroundColor: 'rgba(0, 0, 0, 0.08)',
+    marginHorizontal: 12,
+  },
+  summaryLabel: {
+    fontSize: 12,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginBottom: 2,
+  },
+  summaryValue: {
+    fontSize: 17,
+    fontFamily: 'Poppins-Bold',
+    fontWeight: '700',
+  },
+  // Segmented Control Styles
+  segmentedControl: {
+    flexDirection: 'row',
+  },
+  segmentButton: {
+    flex: 1,
+    flexDirection: 'row',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  segmentButtonActive: {
+    backgroundColor: '#000000',
   },
   segmentText: {
-    color: 'rgba(255,255,255,0.7)',
     fontSize: 14,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  segmentTextActive: {
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
-    marginLeft: 6,
   },
-  activeSegmentText: {
-    color: '#10B981',
+  // Filter Styles
+  filterContainer: {
+    marginVertical: 12,
   },
-  segmentDivider: {
-    width: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-    marginVertical: 8,
+  filterContent: {
+    paddingVertical: 4,
+    gap: 8,
+    flexDirection: 'row',
   },
-  calendarContainer: {
+  filterPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    gap: 6,
+  },
+  filterPillActive: {
     backgroundColor: '#000000',
-    borderRadius: 16,
-    marginBottom: 20,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.05)',
   },
+  filterPillText: {
+    fontSize: 13,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.6)',
+  },
+  filterPillTextActive: {
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+  },
+  // Calendar Styles
   calendar: {
     borderRadius: 16,
   },
-  selectedDateInfo: {
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+  // Selected Date Styles
+  selectedDateContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  selectedDateIcon: {
+    width: 40,
+    height: 40,
     borderRadius: 12,
-    padding: 16,
-    marginBottom: 20,
+    backgroundColor: 'rgba(16, 185, 129, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  selectedDateInfo: {
+    flex: 1,
   },
   selectedDateText: {
-    color: '#10B981',
     fontSize: 16,
-    fontWeight: 'bold',
-    textAlign: 'center',
-  },
-  selectedDateCount: {
-    color: 'rgba(16, 185, 129, 0.7)',
-    fontSize: 14,
-    textAlign: 'center',
-    marginTop: 4,
-  },
-  transactionsList: {
-    marginBottom: 30,
-  },
-  quickActions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 20,
-  },
-  actionButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 16,
-    flex: 1,
-    marginHorizontal: 8,
-    alignItems: 'center',
-  },
-  actionText: {
-    color: 'white',
-    marginTop: 8,
-    fontSize: 12,
-  },
-  loadingContainer: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  loadingText: {
-    fontSize: 16,
-    color: 'rgba(0,0,0,0.7)',
-  },
-  transactionAccount: {
-    fontSize: 10,
-    color: '#6B7280',
-    marginTop: 2,
-  },
-  emptyTransactionsContainer: {
-    alignItems: 'center',
-    paddingVertical: 40,
-    backgroundColor: '#99D795',
-    borderRadius: 12,
-    marginBottom: 20,
-  },
-  emptyTransactionsTitle: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#000000',
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  emptyStateContent: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 16,
-  },
-  emptyTransactionsTitle: {
-    fontSize: 20,
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
     color: '#000000',
   },
+  selectedDateStats: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 4,
+  },
+  selectedDateStatItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  selectedDateCount: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.55)',
+  },
+  clearDateButton: {
+    padding: 4,
+  },
+  // Transaction List Styles
+  transactionsList: {
+    marginTop: 8,
+  },
+  transactionGroup: {
+    marginBottom: 16,
+  },
+  dateHeaderContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+    marginTop: 8,
+  },
+  dateHeader: {
+    fontSize: 13,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.45)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginRight: 12,
+  },
+  dateHeaderLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.08)',
+  },
+  // Quick Actions Styles
+  quickActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+  },
+  actionButton: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 4,
+  },
+  actionIconContainer: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  actionDivider: {
+    width: 1,
+    height: 50,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  actionText: {
+    color: 'rgba(255, 255, 255, 0.9)',
+    fontSize: 12,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+  },
+  // Empty State Styles
+  emptyStateContent: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 20,
+  },
+  emptyIconContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 24,
+    backgroundColor: 'rgba(0, 0, 0, 0.04)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
+  emptyTransactionsTitle: {
+    fontSize: 18,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 8,
+  },
   emptyTransactionsDescription: {
     fontSize: 14,
     fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
+    color: 'rgba(0, 0, 0, 0.5)',
     textAlign: 'center',
+    maxWidth: 260,
+    lineHeight: 20,
   },
   emptyActions: {
     flexDirection: 'row',
     gap: 12,
-    marginTop: 16,
+    marginTop: 24,
+    justifyContent: 'center',
   },
   emptyActionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 14,
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    gap: 8,
+  },
+  emptyActionButtonPrimary: {
     backgroundColor: '#000000',
+  },
+  emptyActionButtonSecondary: {
+    backgroundColor: 'rgba(0, 0, 0, 0.06)',
+  },
+  emptyActionButtonTextPrimary: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+  },
+  emptyActionButtonTextSecondary: {
+    color: '#000000',
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+  },
+  // Bills Section Styles
+  billsSection: {
+    marginTop: 8,
+    marginBottom: 8,
+  },
+  billsSectionTitle: {
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.7)',
+    marginBottom: 8,
+    marginLeft: 4,
+  },
+  billCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  billIcon: {
+    width: 44,
+    height: 44,
     borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  billInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  billTitle: {
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  billAmount: {
+    fontSize: 17,
+    fontFamily: 'Poppins-Bold',
+    fontWeight: '700',
+    color: '#000000',
+  },
+  billBreakdown: {
+    fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.45)',
+    marginTop: 2,
+  },
+  billStatusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  billStatusBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+  },
+  billStatusText: {
+    fontSize: 11,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  // Loading Styles
+  loadingText: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
+    textAlign: 'center',
+  },
+  // Legacy styles (kept for compatibility)
+  emptyTransactionsContainer: {
+    alignItems: 'center',
+    paddingVertical: 40,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    marginBottom: 20,
   },
   emptyActionButtonText: {
     color: '#FFFFFF',
@@ -691,68 +1112,14 @@ const styles = StyleSheet.create({
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
   },
-  billsSection: {
-    marginTop: 24,
-    marginBottom: 16,
-    paddingHorizontal: 20,
-  },
-  billsSectionTitle: {
-    fontSize: 18,
-    fontFamily: 'HelveticaNeue-Bold',
-    fontWeight: '700',
-    color: '#000000',
-    marginBottom: 12,
-  },
-  billCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
-    backgroundColor: '#FFFFFF',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(0, 0, 0, 0.1)',
-    marginBottom: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  billCardOverdue: {
-    borderColor: '#EF4444',
-    borderWidth: 2,
-    backgroundColor: 'rgba(239, 68, 68, 0.05)',
-  },
-  billIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(245, 158, 11, 0.1)',
+  loadingContainer: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 12,
   },
-  billInfo: {
-    flex: 1,
-    gap: 4,
-  },
-  billTitle: {
-    fontSize: 16,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
-  },
-  billAmount: {
-    fontSize: 18,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
-  },
-  billBreakdown: {
-    fontSize: 12,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.5)',
+  transactionAccount: {
+    fontSize: 10,
+    color: '#6B7280',
     marginTop: 2,
   },
   billStatus: {
@@ -768,15 +1135,6 @@ const styles = StyleSheet.create({
   billStatusDueToday: {
     color: '#F59E0B',
   },
-  filterContainer: {
-    marginBottom: 20,
-  },
-  filterLabel: {
-    color: 'rgba(255,255,255,0.8)',
-    fontSize: 14,
-    marginBottom: 8,
-    fontWeight: '500',
-  },
   filterButtons: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -785,31 +1143,33 @@ const styles = StyleSheet.create({
   filterButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 20,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
     paddingHorizontal: 12,
     paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
+    gap: 6,
   },
   activeFilterButton: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    borderColor: '#10B981',
+    backgroundColor: '#000000',
   },
   filterButtonText: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 12,
-    marginLeft: 4,
+    fontSize: 13,
+    fontFamily: 'Poppins-Medium',
     fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.6)',
   },
   activeFilterButtonText: {
-    color: '#10B981',
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
   },
-  loadingText: {
-    fontSize: 16,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: '#000000',
-    textAlign: 'center',
+  summaryItem: {
+    flex: 1,
+    minWidth: '30%',
+  },
+  summaryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 16,
   },
 });

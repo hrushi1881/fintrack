@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, TextInput, Alert, SafeAreaView } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
@@ -42,11 +41,11 @@ export default function AddSubcategoryModal() {
   };
 
   return (
-    <LinearGradient colors={["#99D795", "#99D795", "#99D795"]} style={styles.container}>
+    <View style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.header}>
           <TouchableOpacity style={styles.closeButton} onPress={() => router.back()}>
-            <Ionicons name="close" size={24} color="white" />
+            <Ionicons name="close" size={24} color="#0E401C" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Add Subcategory</Text>
           <View style={{ width: 40 }} />
@@ -67,13 +66,13 @@ export default function AddSubcategoryModal() {
           </TouchableOpacity>
         </View>
       </SafeAreaView>
-    </LinearGradient>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  safeArea: { flex: 1 },
+  container: { flex: 1, backgroundColor: '#FFFFFF' },
+  safeArea: { flex: 1, backgroundColor: '#FFFFFF' },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -83,12 +82,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
   },
   closeButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
     borderRadius: 12,
     padding: 8,
   },
   headerTitle: {
-    color: 'white',
+    color: '#000000',
     fontSize: 18,
     fontWeight: 'bold',
   },

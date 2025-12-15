@@ -13,6 +13,7 @@ export interface CreateCategoryData {
   color: string;
   icon: string;
   activity_types: ('income' | 'expense' | 'goal' | 'bill' | 'liability' | 'budget')[];
+  parent_id?: string | null; // Optional parent category ID for subcategories
 }
 
 export interface UpdateCategoryData extends Partial<CreateCategoryData> {
@@ -72,16 +73,25 @@ export async function fetchCategories(
 export async function checkCategoryExists(
   userId: string, 
   name: string, 
-  requestedActivityTypes: string[]
+  requestedActivityTypes: string[],
+  parentId?: string | null
 ): Promise<{ exists: boolean; existingCategory?: Category; suggestion?: string }> {
   try {
-    const { data: existing } = await supabase
+    let query = supabase
       .from('categories')
       .select('*')
       .eq('user_id', userId)
-      .eq('name', name)
-      .eq('is_deleted', false)
-      .single();
+      .eq('name', name.trim())
+      .eq('is_deleted', false);
+
+    // Parent scoping: allow same name under different parents
+    if (parentId) {
+      query = query.eq('parent_id', parentId);
+    } else {
+      query = query.is('parent_id', null);
+    }
+
+    const { data: existing } = await query.maybeSingle();
 
     if (!existing) {
       return { exists: false };
@@ -119,13 +129,20 @@ export async function createCategory(data: CreateCategoryData): Promise<Category
     if (!user.user) throw new Error('User not authenticated');
 
     // Check for duplicate name
-    const { data: existing } = await supabase
+    let dupQuery = supabase
       .from('categories')
       .select('id, activity_types')
       .eq('user_id', user.user.id)
-      .eq('name', data.name)
-      .eq('is_deleted', false)
-      .single();
+      .eq('name', data.name.trim())
+      .eq('is_deleted', false);
+
+    if (data.parent_id) {
+      dupQuery = dupQuery.eq('parent_id', data.parent_id);
+    } else {
+      dupQuery = dupQuery.is('parent_id', null);
+    }
+
+    const { data: existing } = await dupQuery.maybeSingle();
 
     if (existing) {
       // Check if the existing category already has the requested activity types
@@ -148,6 +165,7 @@ export async function createCategory(data: CreateCategoryData): Promise<Category
         color: data.color,
         icon: data.icon,
         activity_types: data.activity_types,
+        parent_id: data.parent_id || null,
       })
       .select()
       .single();
@@ -280,7 +298,9 @@ export async function getCategoryTransactions(
       .from('transactions')
       .select(`
         *,
-        accounts!inner(name, type, color, icon)
+        account:accounts!transactions_account_id_fkey(id, name, type, color, icon),
+        from_account:accounts!transactions_from_account_id_fkey(id, name, type, color, icon),
+        to_account:accounts!transactions_to_account_id_fkey(id, name, type, color, icon)
       `)
       .eq('category_id', categoryId)
       .order('date', { ascending: false });
@@ -418,6 +438,235 @@ export async function getCategoriesByActivityType(
   activityType: 'income' | 'expense' | 'goal' | 'bill' | 'liability' | 'budget'
 ): Promise<Category[]> {
   return fetchCategories(userId, { activityType });
+}
+
+/**
+ * Get parent categories (main categories) - categories without a parent
+ */
+export async function getParentCategories(
+  userId: string,
+  activityType?: 'income' | 'expense' | 'goal' | 'bill' | 'liability' | 'budget'
+): Promise<Category[]> {
+  try {
+    let query = supabase
+      .from('categories')
+      .select('*')
+      .eq('user_id', userId)
+      .is('parent_id', null) // Only parent categories
+      .eq('is_deleted', false)
+      .order('name');
+
+    // Apply activity type filter if provided
+    if (activityType) {
+      query = query.contains('activity_types', [activityType]);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error('Error fetching parent categories:', error);
+      throw error;
+    }
+
+    return data || [];
+  } catch (error) {
+    console.error('Error in getParentCategories:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get subcategories for a parent category
+ */
+export async function getSubcategories(
+  userId: string,
+  parentCategoryId: string
+): Promise<Category[]> {
+  try {
+    const { data, error } = await supabase
+      .from('categories')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('parent_id', parentCategoryId)
+      .eq('is_deleted', false)
+      .order('name');
+
+    if (error) {
+      console.error('Error fetching subcategories:', error);
+      throw error;
+    }
+
+    return data || [];
+  } catch (error) {
+    console.error('Error in getSubcategories:', error);
+    throw error;
+  }
+}
+
+/**
+ * Get categories grouped by parent (hierarchical structure)
+ * Returns a map of parent category ID -> array of subcategories
+ */
+export async function getCategoriesGroupedByParent(
+  userId: string,
+  activityType?: 'income' | 'expense' | 'goal' | 'bill' | 'liability' | 'budget'
+): Promise<Map<string, { parent: Category; subcategories: Category[] }>> {
+  try {
+    // Get all parent categories
+    const parents = await getParentCategories(userId, activityType);
+    
+    // Get all categories (including subcategories)
+    const allCategories = await fetchCategories(userId, activityType ? { activityType } : {});
+    
+    // Group subcategories by parent
+    const grouped = new Map<string, { parent: Category; subcategories: Category[] }>();
+    
+    parents.forEach(parent => {
+      const subcategories = allCategories.filter(cat => cat.parent_id === parent.id);
+      grouped.set(parent.id, {
+        parent,
+        subcategories,
+      });
+    });
+    
+    return grouped;
+  } catch (error) {
+    console.error('Error in getCategoriesGroupedByParent:', error);
+    throw error;
+  }
+}
+
+/**
+ * Find or create a category with parent relationship
+ * If category exists, returns it. If not, creates it with parent_id if provided.
+ */
+export async function findOrCreateCategory(
+  userId: string,
+  categoryName: string,
+  activityTypes: ('income' | 'expense' | 'goal' | 'bill' | 'liability' | 'budget')[],
+  options?: {
+    color?: string;
+    icon?: string;
+    parent_id?: string | null;
+  }
+): Promise<Category> {
+  try {
+    // Check if category already exists
+    let existingQuery = supabase
+      .from('categories')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('name', categoryName.trim())
+      .eq('is_deleted', false);
+
+    if (options?.parent_id) {
+      existingQuery = existingQuery.eq('parent_id', options.parent_id);
+    } else {
+      existingQuery = existingQuery.is('parent_id', null);
+    }
+
+    const { data: existing } = await existingQuery.maybeSingle();
+
+    if (existing) {
+      // Check if we need to update activity types or parent_id
+      const existingTypes = existing.activity_types || [];
+      const mergedTypes = Array.from(new Set([...existingTypes, ...activityTypes]));
+      const needsUpdate = 
+        mergedTypes.length !== existingTypes.length ||
+        (options?.parent_id !== undefined && existing.parent_id !== options.parent_id);
+
+      if (needsUpdate) {
+        const updateData: any = {};
+        if (mergedTypes.length !== existingTypes.length) {
+          updateData.activity_types = mergedTypes;
+        }
+        if (options?.parent_id !== undefined && existing.parent_id !== options.parent_id) {
+          updateData.parent_id = options.parent_id;
+        }
+
+        const { data: updated, error: updateError } = await supabase
+          .from('categories')
+          .update(updateData)
+          .eq('id', existing.id)
+          .select()
+          .single();
+
+        if (updateError) throw updateError;
+        return updated;
+      }
+
+      return existing;
+    }
+
+    // Create new category
+    const { data: user } = await supabase.auth.getUser();
+    if (!user.user) throw new Error('User not authenticated');
+
+    const { data: newCategory, error: createError } = await supabase
+      .from('categories')
+      .insert({
+        user_id: userId,
+        name: categoryName.trim(),
+        color: options?.color || '#3B82F6',
+        icon: options?.icon || 'folder',
+        activity_types: activityTypes,
+        parent_id: options?.parent_id || null,
+      })
+      .select()
+      .single();
+
+    if (createError) {
+      console.error('Error creating category:', createError);
+      throw createError;
+    }
+
+    return newCategory;
+  } catch (error) {
+    console.error('Error in findOrCreateCategory:', error);
+    throw error;
+  }
+}
+
+/**
+ * Delete a category and all its subcategories (cascade delete)
+ */
+export async function deleteCategoryWithSubcategories(categoryId: string): Promise<void> {
+  try {
+    const { data: user } = await supabase.auth.getUser();
+    if (!user.user) throw new Error('User not authenticated');
+
+    // Get all subcategories
+    const { data: subcategories } = await supabase
+      .from('categories')
+      .select('id')
+      .eq('parent_id', categoryId)
+      .eq('is_deleted', false);
+
+    // Delete all subcategories first
+    if (subcategories && subcategories.length > 0) {
+      const subcategoryIds = subcategories.map(sub => sub.id);
+      const { error: subError } = await supabase
+        .from('categories')
+        .update({
+          is_deleted: true,
+          deleted_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .in('id', subcategoryIds)
+        .eq('user_id', user.user.id);
+
+      if (subError) {
+        console.error('Error deleting subcategories:', subError);
+        throw subError;
+      }
+    }
+
+    // Delete parent category
+    await deleteCategory(categoryId);
+  } catch (error) {
+    console.error('Error in deleteCategoryWithSubcategories:', error);
+    throw error;
+  }
 }
 
 /**

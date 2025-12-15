@@ -45,11 +45,51 @@ if (Platform.OS !== 'web') {
   };
 }
 
+// Create Supabase client with proper configuration
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     storage: asyncStorageAdapter,
     autoRefreshToken: true,
     persistSession: true,
     detectSessionInUrl: Platform.OS === 'web', // Only detect URL for web
+    flowType: 'pkce', // Use PKCE flow for better security, especially on web
+  },
+  db: {
+    schema: 'public',
+  },
+  realtime: {
+    params: {
+      eventsPerSecond: 10,
+    },
   },
 });
+
+// Add error logging in development to help debug network issues
+if (process.env.NODE_ENV !== 'production' && Platform.OS === 'web') {
+  // Test connectivity on web platform
+  const testConnection = async () => {
+    try {
+      const response = await fetch(`${supabaseUrl}/rest/v1/`, {
+        method: 'HEAD',
+        headers: {
+          'apikey': supabaseAnonKey,
+        },
+      });
+      if (!response.ok && response.status !== 404) {
+        console.warn('⚠️ Supabase connection test failed:', response.status, response.statusText);
+        console.warn('💡 Make sure CORS is enabled in your Supabase project settings');
+        console.warn('💡 Check that your Supabase URL is correct:', supabaseUrl);
+      }
+    } catch (error: any) {
+      console.error('❌ Network request failed. Possible causes:');
+      console.error('   1. CORS not configured in Supabase dashboard');
+      console.error('   2. Network connectivity issues');
+      console.error('   3. Supabase project might be paused or unavailable');
+      console.error('   Error:', error.message);
+      console.error('   URL:', supabaseUrl);
+    }
+  };
+  
+  // Test connection after a short delay to avoid blocking app startup
+  setTimeout(testConnection, 1000);
+}

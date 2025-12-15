@@ -51,12 +51,12 @@ interface LiabilitySettlementModalProps {
   onComplete: () => void;
 }
 
-const ADJUSTMENT_TYPES: Array<{
+const ADJUSTMENT_TYPES: {
   type: SettlementAdjustmentType;
   label: string;
   icon: string;
   description: string;
-}> = [
+}[] = [
   {
     type: 'repayment',
     label: 'Repayment',
@@ -428,7 +428,7 @@ export default function LiabilitySettlementModal({
             {/* Header Message */}
             <View style={styles.headerSection}>
               <Text style={styles.headerMessage}>
-                Let's make sure your numbers are exact before deleting this liability.
+                Let&apos;s make sure your numbers are exact before deleting this liability.
               </Text>
               <Text style={styles.headerSubtext}>
                 You still owe {formatCurrency(settlementStatus.remainingOwed)} and have{' '}

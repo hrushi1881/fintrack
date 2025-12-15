@@ -15,7 +15,7 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { Bill } from '@/types';
-import BillBulkGenerator from '@/components/bills/BillBulkGenerator';
+import { BillBulkGenerator } from '@/components/bills/BillBulkGenerator';
 
 type RecurringNature = 'subscription' | 'bill' | 'payment' | 'income' | 'custom';
 type AmountType = 'fixed' | 'variable';

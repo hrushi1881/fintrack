@@ -15,6 +15,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { formatCurrencyAmount } from '@/utils/currency';
+import { useBackNavigation, useAndroidBackButton } from '@/hooks/useBackNavigation';
 import { 
   archiveGoal,
   calculateGoalProgress, 
@@ -46,13 +47,15 @@ const GoalDetailScreen: React.FC = () => {
   const { id } = useLocalSearchParams();
   const { user } = useAuth();
   const { currency } = useSettings();
-  const { goals, budgets, refreshGoals, accounts, globalRefresh, refreshAccountFunds, refreshAccounts } = useRealtimeData();
+  const { goals, budgets, refreshGoals, accounts, globalRefresh, refreshAccountFunds } = useRealtimeData();
+  const handleBack = useBackNavigation();
+  useAndroidBackButton();
 
   const goal = useMemo(() => goals.find((item) => item.id === id), [goals, id]);
 
   const [contributions, setContributions] = useState<GoalContributionWithTransaction[]>([]);
   const [loadingContributions, setLoadingContributions] = useState(false);
-  const [goalAccounts, setGoalAccounts] = useState<Array<{ account: Account; balance: number }>>([]);
+  const [goalAccounts, setGoalAccounts] = useState<{ account: Account; balance: number }[]>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
   const [activeTab, setActiveTab] = useState<'transactions' | 'accounts' | 'analytics' | 'cycles'>('transactions');
   
@@ -109,7 +112,6 @@ const GoalDetailScreen: React.FC = () => {
       fetchContributions();
       fetchGoalAccounts();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [goal?.id]); // Only depend on goal.id to prevent infinite loops
 
   // NOTE: Goal completion is MANUAL - user decides when to complete
@@ -481,7 +483,7 @@ const GoalDetailScreen: React.FC = () => {
           <Text style={styles.emptyMessage}>
             The goal you’re looking for may have been deleted or moved.
               </Text>
-          <TouchableOpacity style={styles.primaryButton} onPress={() => router.back()}>
+          <TouchableOpacity style={styles.primaryButton} onPress={handleBack}>
             <Text style={styles.primaryButtonText}>Go Back</Text>
           </TouchableOpacity>
             </View>
@@ -497,7 +499,7 @@ const GoalDetailScreen: React.FC = () => {
           contentContainerStyle={styles.scrollContent}
         >
           <View style={styles.headerBar}>
-            <TouchableOpacity style={styles.iconButton} onPress={() => router.back()}>
+            <TouchableOpacity style={styles.iconButton} onPress={handleBack}>
               <Ionicons name="arrow-back" size={20} color="#0E401C" />
             </TouchableOpacity>
             <Text style={styles.headerTitle}>{goal.title}</Text>

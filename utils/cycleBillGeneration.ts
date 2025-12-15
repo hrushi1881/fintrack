@@ -9,6 +9,7 @@ import { supabase } from '@/lib/supabase';
 import { generateCycles, Cycle } from './cycles';
 import { createBill, CreateBillData } from './bills';
 import { generateAmortizationSchedule, AmortizationBill } from './liabilityAmortization';
+import { DEFAULT_CURRENCY } from './currency';
 
 export interface CycleBillGenerationOptions {
   liabilityId: string;
@@ -36,12 +37,45 @@ export async function generateBillsFromCycles(
     const { data: user } = await supabase.auth.getUser();
     if (!user.user) throw new Error('User not authenticated');
 
+    if (!options.linkedAccountId) {
+      throw new Error('linkedAccountId is required to create payable bills for cycles');
+    }
+
+    // Normalize frequency/interval to the cycles engine vocabulary
+    const mapFrequency = (
+      freq: CycleBillGenerationOptions['frequency']
+    ): { frequency: 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'yearly' | 'custom'; interval: number } => {
+      const f = freq.toLowerCase();
+      switch (f) {
+        case 'daily':
+          return { frequency: 'daily', interval: 1 };
+        case 'weekly':
+          return { frequency: 'weekly', interval: 1 };
+        case 'biweekly':
+          return { frequency: 'weekly', interval: 2 };
+        case 'bimonthly':
+          return { frequency: 'monthly', interval: 2 };
+        case 'quarterly':
+          return { frequency: 'quarterly', interval: 1 };
+        case 'halfyearly':
+          return { frequency: 'monthly', interval: 6 };
+        case 'yearly':
+          return { frequency: 'yearly', interval: 1 };
+        case 'custom':
+          return { frequency: 'custom', interval: options.interval || 1 };
+        default:
+          return { frequency: 'monthly', interval: options.interval || 1 };
+      }
+    };
+
+    const { frequency: normalizedFrequency, interval: normalizedInterval } = mapFrequency(options.frequency);
+
     // Generate cycles
     const cycles = generateCycles({
       startDate: options.startDate,
       endDate: options.endDate || null,
-      frequency: options.frequency,
-      interval: options.interval,
+      frequency: normalizedFrequency,
+      interval: normalizedInterval,
       dueDay: options.dueDay,
       amount: options.paymentAmount,
       maxCycles: options.maxCycles || 12,
@@ -91,6 +125,19 @@ export async function generateBillsFromCycles(
     for (let i = 0; i < cycles.length; i++) {
       const cycle = cycles[i];
       
+      // Skip if a bill already exists for this liability + cycle
+      const { data: existingBill, error: existingBillError } = await supabase
+        .from('bills')
+        .select('id, metadata')
+        .eq('liability_id', options.liabilityId)
+        .eq('user_id', options.userId)
+        .limit(1)
+        .contains('metadata', { cycle_number: cycle.cycleNumber });
+
+      if (!existingBillError && existingBill && existingBill.length > 0) {
+        continue;
+      }
+      
       // Calculate principal and interest for this cycle
       // Priority: Use cycle's calculated interest breakdown if available, then amortization schedule, then estimate
       let principalAmount = 0;
@@ -138,9 +185,9 @@ export async function generateBillsFromCycles(
         bill_type: 'liability_linked',
         liability_id: options.liabilityId,
         category_id: options.categoryId || liability.category_id || null,
-        linked_account_id: options.linkedAccountId || null,
-        frequency: options.frequency,
-        recurrence_interval: options.interval,
+        linked_account_id: options.linkedAccountId,
+        frequency: normalizedFrequency,
+        recurrence_interval: normalizedInterval,
         interest_amount: interestAmount,
         principal_amount: principalAmount,
         interest_included: true,
@@ -237,7 +284,7 @@ export async function regenerateBillsFromCycles(
       dueDay,
       paymentAmount: Number(liability.periodical_payment),
       interestRate: Number(liability.interest_rate_apy || 0),
-      currency: liability.currency || 'USD',
+      currency: liability.currency || DEFAULT_CURRENCY,
       categoryId: liability.category_id || undefined,
       linkedAccountId: liability.linked_account_id || undefined,
       maxCycles: options?.maxCycles,

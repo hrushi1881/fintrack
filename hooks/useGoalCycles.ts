@@ -100,6 +100,23 @@ export const useGoalCycles = (options: UseGoalCyclesOptions) => {
     let frequency: any = 'monthly';
     let interval = 1;
     let endDate: string | null = null;
+    let customUnit: string | undefined = undefined;
+
+    const goalFrequency = String(
+      (goal as any)?.frequency ||
+      (goal.metadata as any)?.frequency ||
+      'monthly'
+    ).toLowerCase();
+    const goalCustomUnit = (goal.metadata as any)?.custom_frequency_unit;
+    const goalCustomInterval = Number((goal.metadata as any)?.custom_frequency_interval || interval);
+
+    if (goalFrequency === 'custom') {
+      frequency = 'custom';
+      interval = goalCustomInterval > 0 ? goalCustomInterval : 1;
+      customUnit = goalCustomUnit;
+    } else {
+      frequency = goalFrequency as any;
+    }
 
     if (goal.target_date) {
       const startDate = new Date(goal.created_at);
@@ -125,6 +142,7 @@ export const useGoalCycles = (options: UseGoalCyclesOptions) => {
       dueDay: 1, // Default to 1st of month
       amount: contributionAmount,
       maxCycles,
+      customUnit,
     });
 
     // Match contributions to cycles

@@ -170,7 +170,7 @@ export function calculatePaymentIntelligence(
   let icon = 'information-circle';
 
   if (impact.daysAhead && impact.daysAhead > 0) {
-    message = `Your ₹${paymentAmount.toLocaleString('en-IN')} payment reduced your total by ₹${principalReduction.toLocaleString('en-IN')} (₹${interestPaid.toLocaleString('en-IN')} interest). You're now ${impact.daysAhead} day${impact.daysAhead > 1 ? 's' : ''} ahead.`;
+    message = `Your ₹${paymentAmount.toLocaleString('en-IN')} payment reduced your total by ₹${principalReduction.toLocaleString('en-IN')} (₹${interestPaid.toLocaleString('en-IN')} interest). You&apos;re now ${impact.daysAhead} day${impact.daysAhead > 1 ? 's' : ''} ahead.`;
     
     if (impact.newNextDueDate) {
       const newDate = new Date(impact.newNextDueDate);

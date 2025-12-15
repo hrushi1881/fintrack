@@ -12,6 +12,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
+import { useBackNavigation, useAndroidBackButton } from '@/hooks/useBackNavigation';
 
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
@@ -27,13 +28,13 @@ import EditLiabilityModal from '@/app/modals/edit-liability';
 import PayBillModal from '@/app/modals/pay-bill';
 // AddLiabilityBillModal replaced with UnifiedPaymentModal
 import { checkLiabilitySettlementStatus } from '@/utils/liabilities';
-import GlassCard from '@/components/GlassCard';
 import { fetchLiabilitySchedules, LiabilitySchedule } from '@/utils/liabilitySchedules';
 import { fetchBills, calculateBillStatus } from '@/utils/bills';
 import { Bill } from '@/types';
 import LiabilityCycles from '@/components/cycles/LiabilityCycles';
-import UnifiedPaymentModal from '@/app/modals/unified-payment-modal';
+import LiabilityPaymentModal from '@/app/modals/liability-payment-modal';
 import { regenerateBillsFromCycles } from '@/utils/cycleBillGeneration';
+import { useLiabilityCycles } from '@/hooks/useLiabilityCycles';
 
 interface LiabilityPayment {
   id: string;
@@ -77,6 +78,8 @@ const LiabilityDetailScreen: React.FC = () => {
   const { currency } = useSettings();
   const { accounts } = useRealtimeData();
   const { fetchLiabilityAllocations } = useLiabilities();
+  const handleBack = useBackNavigation();
+  useAndroidBackButton();
 
   const [liability, setLiability] = useState<LiabilityRecord | null>(null);
   const [paymentHistory, setPaymentHistory] = useState<LiabilityPayment[]>([]);
@@ -97,13 +100,48 @@ const LiabilityDetailScreen: React.FC = () => {
   const [showPayBillModal, setShowPayBillModal] = useState(false);
   // showAddBillModal removed - using unified payment modal instead
   const [showUnifiedPayModal, setShowUnifiedPayModal] = useState(false);
-  const [viewMode, setViewMode] = useState<'bills' | 'cycles'>('bills');
+  const [viewMode, setViewMode] = useState<'bills' | 'payments' | 'cycles'>('bills');
   const [cyclesRefreshKey, setCyclesRefreshKey] = useState(0); // Force cycles refresh
+
+  // Cycles as source of truth for next due and statuses
+  const {
+    cycles,
+    loading: cyclesLoading,
+    refresh: refreshCycles,
+  } = useLiabilityCycles({ liabilityId: id as string, maxCycles: 24 });
 
   useEffect(() => {
     if (id && user) {
       loadLiability();
     }
+  }, [id, user]);
+
+  // Realtime refresh: reload when payments/bills/liability rows change
+  useEffect(() => {
+    if (!id || !user) return;
+
+    const channel = supabase
+      .channel(`liability-detail-${id}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'liability_payments', filter: `liability_id=eq.${id}` },
+        () => loadLiability()
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'bills', filter: `liability_id=eq.${id}` },
+        () => loadLiability()
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'liabilities', filter: `id=eq.${id}` },
+        () => loadLiability()
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [id, user]);
 
   // Refresh when screen comes into focus (e.g., after returning from payment modal)
@@ -148,7 +186,7 @@ const LiabilityDetailScreen: React.FC = () => {
           .eq('liability_id', id)
           .order('created_at', { ascending: false });
         setActivityLog((activityRows as LiabilityActivity[]) || []);
-      } catch (error) {
+      } catch {
         setActivityLog([]);
       }
 
@@ -229,44 +267,19 @@ const LiabilityDetailScreen: React.FC = () => {
     return paymentHistory.reduce((sum, payment) => sum + Number(payment.principal_component ?? 0), 0);
   }, [paymentHistory]);
 
-  // Calculate next payment due from bills (most accurate and updates dynamically)
+  // Next payment due from cycles (source of truth; fallback to liability metadata)
   const nextPaymentDue = useMemo(() => {
-    if (!bills || bills.length === 0) {
-      return liability?.next_due_date;
+    if (cycles && cycles.length > 0) {
+      const upcoming = cycles
+        .filter(c => c.status !== 'paid' && c.status !== 'skipped')
+        .sort((a, b) => new Date(a.expectedDate).getTime() - new Date(b.expectedDate).getTime());
+      if (upcoming.length > 0) {
+        return upcoming[0].expectedDate;
+      }
     }
-
-    // Filter out paid, cancelled, and skipped bills
-    const upcomingBills = bills.filter(b => {
-      const status = b.status?.toLowerCase();
-      const isUpcoming = status !== 'paid' && status !== 'cancelled' && status !== 'skipped';
-      return isUpcoming;
-    });
-
-    if (upcomingBills.length === 0) {
-      return liability?.next_due_date;
-    }
-
-    // Sort by due date (earliest first)
-    const sortedBills = [...upcomingBills].sort((a, b) => {
-      const dateA = new Date(a.due_date).getTime();
-      const dateB = new Date(b.due_date).getTime();
-      return dateA - dateB;
-    });
-    
-    const nextDue = sortedBills[0]?.due_date || liability?.next_due_date;
-    
-    // Debug logging (remove in production if needed)
-    if (__DEV__) {
-      console.log('Next Payment Due Calculation:', {
-        totalBills: bills.length,
-        upcomingBills: upcomingBills.length,
-        nextDue,
-        billsStatuses: bills.map(b => ({ id: b.id, status: b.status, due_date: b.due_date })),
-      });
-    }
-    
-    return nextDue;
-  }, [bills, liability, billsRefreshKey]);
+    // fallback to liability metadata if cycles unavailable
+    return liability?.next_due_date || null;
+  }, [cycles, liability?.next_due_date]);
 
   const handlePayBill = (bill: Bill) => {
     setSelectedBill(bill);
@@ -464,7 +477,7 @@ const LiabilityDetailScreen: React.FC = () => {
           <Text style={styles.emptyMessage}>
             This liability may have been deleted or is no longer accessible.
           </Text>
-          <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+          <TouchableOpacity style={styles.backButton} onPress={handleBack}>
             <Text style={styles.backButtonText}>Go Back</Text>
           </TouchableOpacity>
         </View>
@@ -481,7 +494,7 @@ const LiabilityDetailScreen: React.FC = () => {
         >
           {/* Header */}
           <View style={styles.headerRow}>
-            <TouchableOpacity style={styles.headerButton} onPress={() => router.back()}>
+            <TouchableOpacity style={styles.headerButton} onPress={handleBack}>
               <Ionicons name="arrow-back" size={24} color="#000000" />
             </TouchableOpacity>
             <Text style={styles.pageTitle} numberOfLines={1}>
@@ -501,7 +514,7 @@ const LiabilityDetailScreen: React.FC = () => {
           </View>
 
           {/* Hero Section - Current Balance */}
-          <GlassCard padding={24} marginVertical={20}>
+          <View style={[styles.card, { padding: 24, marginVertical: 20 }]}>
             <Text style={styles.heroLabel}>Current Outstanding Balance</Text>
             <Text style={styles.heroAmount}>{formatCurrency(outstanding)}</Text>
             <View style={styles.progressSection}>
@@ -512,178 +525,94 @@ const LiabilityDetailScreen: React.FC = () => {
                 {Math.round(paidProgress * 100)}% paid ({formatCurrency(paidAmount)} of {formatCurrency(totalOwed)})
               </Text>
             </View>
-          </GlassCard>
+          </View>
 
           {/* Key Metrics */}
           <View style={styles.metricsGrid}>
-            <GlassCard padding={20}>
+            <View style={[styles.card, { padding: 20 }]}>
               <Text style={styles.metricLabel}>Monthly Payment</Text>
               <Text style={styles.metricValue}>
                 {minPayment ? formatCurrency(minPayment) : '—'}
               </Text>
-            </GlassCard>
-            <GlassCard padding={20}>
+            </View>
+            <View style={[styles.card, { padding: 20 }]}>
               <Text style={styles.metricLabel}>Interest Rate</Text>
               <Text style={styles.metricValue}>
                 {liability.interest_rate_apy ? `${liability.interest_rate_apy}%` : '—'}
               </Text>
-            </GlassCard>
-            <GlassCard padding={20}>
+            </View>
+            <View style={[styles.card, { padding: 20 }]}>
               <Text style={styles.metricLabel}>Next Payment Due</Text>
               <Text style={styles.metricValue}>
-                {formatDate(nextPaymentDue)}
+                {cyclesLoading ? 'Loading...' : formatDate(nextPaymentDue ?? undefined)}
               </Text>
-            </GlassCard>
-            <GlassCard padding={20}>
+            </View>
+            <View style={[styles.card, { padding: 20 }]}>
               <Text style={styles.metricLabel}>Total Interest Paid</Text>
               <Text style={styles.metricValue}>{formatCurrency(totalInterestPaid)}</Text>
-            </GlassCard>
-          </View>
-
-          {/* Payment Breakdown */}
-          {paymentHistory.length > 0 && (
-            <GlassCard padding={24} marginVertical={12}>
-              <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>Payment Breakdown</Text>
-              </View>
-              <View style={styles.breakdownRow}>
-                <View style={styles.breakdownItem}>
-                  <Text style={styles.breakdownLabel}>Principal Paid</Text>
-                  <Text style={styles.breakdownValue}>{formatCurrency(totalPrincipalPaid)}</Text>
-                </View>
-                <View style={styles.breakdownDivider} />
-                <View style={styles.breakdownItem}>
-                  <Text style={styles.breakdownLabel}>Interest Paid</Text>
-                  <Text style={styles.breakdownValue}>{formatCurrency(totalInterestPaid)}</Text>
-                </View>
-              </View>
-            </GlassCard>
-          )}
-
-          {/* Payment History - Only show if there are payments */}
-          {paymentHistory.length > 0 && (
-            <GlassCard padding={24} marginVertical={12}>
-              <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>Payment History</Text>
-                {paymentHistory.length > 5 && (
-                <TouchableOpacity>
-                    <Text style={styles.sectionAction}>View All</Text>
-                </TouchableOpacity>
-                )}
-              </View>
-              <View style={styles.paymentList}>
-                {paymentHistory.slice(0, 5).map((payment) => (
-                  <View key={payment.id} style={styles.paymentItem}>
-                    <View style={styles.paymentIcon}>
-                      <Ionicons name="checkmark-circle" size={20} color="rgba(0, 0, 0, 0.6)" />
-                    </View>
-                    <View style={styles.paymentInfo}>
-                      <Text style={styles.paymentAmount}>{formatCurrency(payment.amount)}</Text>
-                      <Text style={styles.paymentDate}>{formatDate(payment.payment_date)}</Text>
-                      {payment.principal_component && payment.interest_component && (
-                        <Text style={styles.paymentBreakdown}>
-                          Principal: {formatCurrency(payment.principal_component)} • Interest: {formatCurrency(payment.interest_component)}
-                        </Text>
-                      )}
-                      {payment.description && (
-                        <Text style={styles.paymentDescription}>{payment.description}</Text>
-                      )}
             </View>
           </View>
-                ))}
-              </View>
-            </GlassCard>
-          )}
 
-          {/* Linked Accounts */}
-          {allocations.length > 0 && (
-            <GlassCard padding={24} marginVertical={12}>
-              <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Linked Accounts</Text>
-              </View>
-              <View style={styles.allocationList}>
-                {allocations.map((allocation) => {
-                  const account = accounts.find((acct) => acct.id === allocation.accountId);
-                  return (
-                    <View key={allocation.accountId} style={styles.allocationItem}>
-                      <View style={styles.allocationIcon}>
-                        <Ionicons name="wallet-outline" size={20} color="rgba(0, 0, 0, 0.6)" />
-                      </View>
-                      <View style={styles.allocationInfo}>
-                        <Text style={styles.allocationName}>{account?.name || 'Account'}</Text>
-                        {allocation.liabilityName && (
-                          <Text style={styles.allocationSubtext}>{allocation.liabilityName}</Text>
-            )}
-          </View>
-                      <Text style={styles.allocationAmount}>
-                        {formatCurrency(Number(allocation.amount ?? 0))}
-                      </Text>
-                    </View>
-                  );
-                })}
-              </View>
-            </GlassCard>
-          )}
-
-          {/* Bills & Cycles Section */}
-          <GlassCard padding={24} marginVertical={12}>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Payment Schedule</Text>
-              <View style={styles.headerActions}>
-                {/* View Mode Toggle */}
-                <View style={styles.viewModeToggle}>
-                  <TouchableOpacity
-                    style={[styles.viewModeButton, viewMode === 'bills' && styles.viewModeButtonActive]}
-                    onPress={() => setViewMode('bills')}
-                  >
-                    <Ionicons 
-                      name="receipt-outline" 
-                      size={18} 
-                      color={viewMode === 'bills' ? '#000000' : 'rgba(0, 0, 0, 0.5)'} 
-                    />
-                    <Text style={[styles.viewModeText, viewMode === 'bills' && styles.viewModeTextActive]}>
-                      Bills
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.viewModeButton, viewMode === 'cycles' && styles.viewModeButtonActive]}
-                    onPress={() => setViewMode('cycles')}
-                  >
-                    <Ionicons 
-                      name="calendar-outline" 
-                      size={18} 
-                      color={viewMode === 'cycles' ? '#000000' : 'rgba(0, 0, 0, 0.5)'} 
-                    />
-                    <Text style={[styles.viewModeText, viewMode === 'cycles' && styles.viewModeTextActive]}>
-                      Cycles
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
+          {/* Schedule Segmented Control */}
+          <View style={styles.segmentedWrapper}>
+            <View style={styles.viewModeToggle}>
+              <TouchableOpacity
+                style={[styles.viewModeButton, viewMode === 'bills' && styles.viewModeButtonActive]}
+                onPress={() => setViewMode('bills')}
+              >
+                <Ionicons
+                  name="receipt-outline"
+                  size={18}
+                  color={viewMode === 'bills' ? '#000000' : 'rgba(0, 0, 0, 0.5)'}
+                />
+                <Text style={[styles.viewModeText, viewMode === 'bills' && styles.viewModeTextActive]}>
+                  Bills
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.viewModeButton, viewMode === 'payments' && styles.viewModeButtonActive]}
+                onPress={() => setViewMode('payments')}
+              >
+                <Ionicons
+                  name="card-outline"
+                  size={18}
+                  color={viewMode === 'payments' ? '#000000' : 'rgba(0, 0, 0, 0.5)'}
+                />
+                <Text style={[styles.viewModeText, viewMode === 'payments' && styles.viewModeTextActive]}>
+                  Payments
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.viewModeButton, viewMode === 'cycles' && styles.viewModeButtonActive]}
+                onPress={() => setViewMode('cycles')}
+              >
+                <Ionicons
+                  name="calendar-outline"
+                  size={18}
+                  color={viewMode === 'cycles' ? '#000000' : 'rgba(0, 0, 0, 0.5)'}
+                />
+                <Text style={[styles.viewModeText, viewMode === 'cycles' && styles.viewModeTextActive]}>
+                  Cycles
+                </Text>
+              </TouchableOpacity>
             </View>
-            {viewMode === 'bills' ? (
-              <>
-                <View style={styles.billsHeaderRow}>
-                  <Text style={styles.sectionSubtitle}>
-                    {bills.length > 0 
-                      ? `${bills.filter(b => b.status !== 'paid' && b.status !== 'cancelled').length} upcoming bills`
-                      : '0 upcoming bills'
-                    }
-                  </Text>
-                  {bills.length === 0 && liability && liability.periodical_payment && liability.periodical_frequency && (
-                    <TouchableOpacity
-                      style={styles.generateBillsButton}
-                      onPress={handleGenerateBills}
-                      activeOpacity={0.7}
-                    >
-                      <Ionicons name="refresh-outline" size={18} color="#000000" />
-                      <Text style={styles.generateBillsButtonText}>Generate Bills</Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-                  
-                {/* Interest Summary */}
-                {bills.some(b => b.interest_amount && b.interest_amount > 0) && (
+          </View>
+
+          {/* Bills View */}
+          {viewMode === 'bills' && (
+            <View style={[styles.card, { padding: 24, marginVertical: 12 }]}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>Payment Schedule</Text>
+              </View>
+              <View style={styles.billsHeaderRow}>
+                <Text style={styles.sectionSubtitle}>
+                  {bills.length > 0
+                    ? `${bills.filter(b => b.status !== 'paid' && b.status !== 'cancelled').length} upcoming bills`
+                    : '0 upcoming bills'}
+                </Text>
+              </View>
+
+              {bills.some(b => b.interest_amount && b.interest_amount > 0) && (
                 <View style={styles.interestSummary}>
                   <View style={styles.interestItem}>
                     <Text style={styles.interestLabel}>Total Interest</Text>
@@ -695,31 +624,33 @@ const LiabilityDetailScreen: React.FC = () => {
                   <View style={styles.interestItem}>
                     <Text style={styles.interestLabel}>Interest Paid</Text>
                     <Text style={styles.interestValuePaid}>
-                      {formatCurrency(bills.filter(b => b.status === 'paid').reduce((sum, b) => sum + (b.interest_amount || 0), 0))}
+                      {formatCurrency(
+                        bills.filter(b => b.status === 'paid').reduce((sum, b) => sum + (b.interest_amount || 0), 0)
+                      )}
                     </Text>
                     <Text style={styles.interestSubtext}>So far</Text>
                   </View>
                   <View style={styles.interestItem}>
                     <Text style={styles.interestLabel}>Interest Remaining</Text>
                     <Text style={styles.interestValue}>
-                      {formatCurrency(bills.filter(b => b.status !== 'paid').reduce((sum, b) => sum + (b.interest_amount || 0), 0))}
+                      {formatCurrency(
+                        bills.filter(b => b.status !== 'paid').reduce((sum, b) => sum + (b.interest_amount || 0), 0)
+                      )}
                     </Text>
                     <Text style={styles.interestSubtext}>To be paid</Text>
                   </View>
                 </View>
               )}
 
-              {/* Bills List */}
               <View style={styles.billsList}>
                 {bills.length === 0 ? (
                   <View style={styles.emptyBills}>
                     <Ionicons name="receipt-outline" size={48} color="rgba(0, 0, 0, 0.3)" />
                     <Text style={styles.emptyBillsText}>No bills created yet</Text>
                     <Text style={styles.emptyBillsSubtext}>Create your first bill to start tracking payments</Text>
-                    <TouchableOpacity 
+                    <TouchableOpacity
                       style={styles.createFirstBillButton}
                       onPress={() => {
-                        // Open unified payment modal for creating a bill
                         setShowUnifiedPayModal(true);
                       }}
                     >
@@ -729,19 +660,15 @@ const LiabilityDetailScreen: React.FC = () => {
                   </View>
                 ) : (
                   <>
-                    {/* Show paid bills count if any */}
-                    {bills.filter((b) => b.status === 'paid').length > 0 && (
+                    {bills.filter(b => b.status === 'paid').length > 0 && (
                       <View style={styles.paidBillsSummary}>
                         <Ionicons name="checkmark-circle" size={16} color="#10B981" />
-                        <Text style={styles.paidBillsText}>
-                          {bills.filter((b) => b.status === 'paid').length} paid
-                        </Text>
+                        <Text style={styles.paidBillsText}>{bills.filter(b => b.status === 'paid').length} paid</Text>
                       </View>
                     )}
-                    
+
                     {bills
                       .sort((a, b) => {
-                        // Sort by due date, then by status (overdue first)
                         const dateA = new Date(a.due_date).getTime();
                         const dateB = new Date(b.due_date).getTime();
                         if (dateA !== dateB) return dateA - dateB;
@@ -751,31 +678,27 @@ const LiabilityDetailScreen: React.FC = () => {
                         if (b.status === 'due_today') return 1;
                         return 0;
                       })
-                      .filter((bill) => bill.status !== 'paid' && bill.status !== 'cancelled')
+                      .filter(bill => bill.status !== 'paid' && bill.status !== 'cancelled')
                       .slice(0, 10)
-                      .map((bill) => {
+                      .map(bill => {
                         const statusColor = getStatusColor(bill.status);
                         const statusIcon = getStatusIcon(bill.status);
                         const isOverdue = bill.status === 'overdue';
                         const isDueToday = bill.status === 'due_today';
-                        
+
                         return (
-                    <TouchableOpacity
-                      key={bill.id}
-                      style={[
-                        styles.billCard,
-                        isOverdue && styles.billCardOverdue,
-                        isDueToday && styles.billCardDueToday,
-                      ]}
-                      onPress={() => handlePayBill(bill)}
-                    >
+                          <TouchableOpacity
+                            key={bill.id}
+                            style={[
+                              styles.billCard,
+                              isOverdue && styles.billCardOverdue,
+                              isDueToday && styles.billCardDueToday,
+                            ]}
+                            onPress={() => handlePayBill(bill)}
+                          >
                             <View style={styles.billCardLeft}>
                               <View style={[styles.billStatus, { backgroundColor: statusColor }]}>
-                                <Ionicons 
-                                  name={statusIcon} 
-                                  size={20} 
-                                  color="#FFFFFF" 
-                                />
+                                <Ionicons name={statusIcon} size={20} color="#FFFFFF" />
                               </View>
                               <View style={styles.billInfo}>
                                 {bill.payment_number && (
@@ -788,7 +711,8 @@ const LiabilityDetailScreen: React.FC = () => {
                                 </Text>
                                 {bill.principal_amount && bill.interest_amount && bill.interest_amount > 0 ? (
                                   <Text style={styles.billBreakdown}>
-                                    {formatCurrency(bill.principal_amount)} principal + {formatCurrency(bill.interest_amount)} interest
+                                    {formatCurrency(bill.principal_amount)} principal +{' '}
+                                    {formatCurrency(bill.interest_amount)} interest
                                   </Text>
                                 ) : bill.principal_amount ? (
                                   <Text style={styles.billBreakdown}>
@@ -801,9 +725,9 @@ const LiabilityDetailScreen: React.FC = () => {
                             </View>
                             <View style={styles.billCardRight}>
                               <Text style={styles.billAmount}>{formatCurrency(bill.amount || 0)}</Text>
-                              <TouchableOpacity 
-                                style={[styles.payButton, isOverdue && styles.payButtonOverdue]} 
-                                onPress={(e) => {
+                              <TouchableOpacity
+                                style={[styles.payButton, isOverdue && styles.payButtonOverdue]}
+                                onPress={e => {
                                   e.stopPropagation();
                                   handlePayBill(bill);
                                 }}
@@ -814,9 +738,8 @@ const LiabilityDetailScreen: React.FC = () => {
                           </TouchableOpacity>
                         );
                       })}
-                
-                    {/* Show "All Paid" message if all are paid but bills exist */}
-                    {bills.filter((b) => b.status !== 'paid' && b.status !== 'cancelled').length === 0 && bills.length > 0 && (
+
+                    {bills.filter(b => b.status !== 'paid' && b.status !== 'cancelled').length === 0 && bills.length > 0 && (
                       <View style={styles.emptyBills}>
                         <Ionicons name="checkmark-circle-outline" size={48} color="#10B981" />
                         <Text style={styles.emptyBillsText}>All payments completed! 🎉</Text>
@@ -827,16 +750,14 @@ const LiabilityDetailScreen: React.FC = () => {
                 )}
               </View>
 
-              {/* View All Bills Button */}
-              {bills.filter((b) => b.status !== 'paid' && b.status !== 'cancelled').length > 10 && (
-                <TouchableOpacity 
-                  style={styles.viewAllButton} 
+              {bills.filter(b => b.status !== 'paid' && b.status !== 'cancelled').length > 10 && (
+                <TouchableOpacity
+                  style={styles.viewAllButton}
                   onPress={() => {
-                    // Show all bills in an expanded view or modal
                     const paidCount = bills.filter(b => b.status === 'paid').length;
                     const upcomingCount = bills.filter(b => b.status !== 'paid' && b.status !== 'cancelled').length;
                     const overdueCount = bills.filter(b => b.status === 'overdue').length;
-                    
+
                     Alert.alert(
                       'All Bills',
                       `Total: ${bills.length} bills\n\nPaid: ${paidCount}\nUpcoming: ${upcomingCount}\nOverdue: ${overdueCount}\n\nScroll to see all bills.`,
@@ -848,24 +769,124 @@ const LiabilityDetailScreen: React.FC = () => {
                   <Ionicons name="chevron-forward" size={20} color="#000000" />
                 </TouchableOpacity>
               )}
-              </>
-            ) : (
-              /* Cycles View */
+            </View>
+          )}
+
+          {/* Payments View */}
+          {viewMode === 'payments' && (
+            <>
+              {paymentHistory.length > 0 ? (
+                <>
+                  <View style={[styles.card, { padding: 24, marginVertical: 12 }]}>
+                    <View style={styles.sectionHeader}>
+                      <Text style={styles.sectionTitle}>Payment Breakdown</Text>
+                    </View>
+                    <View style={styles.breakdownRow}>
+                      <View style={styles.breakdownItem}>
+                        <Text style={styles.breakdownLabel}>Principal Paid</Text>
+                        <Text style={styles.breakdownValue}>{formatCurrency(totalPrincipalPaid)}</Text>
+                      </View>
+                      <View style={styles.breakdownDivider} />
+                      <View style={styles.breakdownItem}>
+                        <Text style={styles.breakdownLabel}>Interest Paid</Text>
+                        <Text style={styles.breakdownValue}>{formatCurrency(totalInterestPaid)}</Text>
+                      </View>
+                    </View>
+                  </View>
+
+                  <View style={[styles.card, { padding: 24, marginVertical: 12 }]}>
+                    <View style={styles.sectionHeader}>
+                      <Text style={styles.sectionTitle}>Payment History</Text>
+                      {paymentHistory.length > 5 && (
+                        <TouchableOpacity>
+                          <Text style={styles.sectionAction}>View All</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                    <View style={styles.paymentList}>
+                      {paymentHistory.slice(0, 5).map(payment => (
+                        <View key={payment.id} style={styles.paymentItem}>
+                          <View style={styles.paymentIcon}>
+                            <Ionicons name="checkmark-circle" size={20} color="rgba(0, 0, 0, 0.6)" />
+                          </View>
+                          <View style={styles.paymentInfo}>
+                            <Text style={styles.paymentAmount}>{formatCurrency(payment.amount)}</Text>
+                            <Text style={styles.paymentDate}>{formatDate(payment.payment_date)}</Text>
+                            {payment.principal_component && payment.interest_component && (
+                              <Text style={styles.paymentBreakdown}>
+                                Principal: {formatCurrency(payment.principal_component)} • Interest:{' '}
+                                {formatCurrency(payment.interest_component)}
+                              </Text>
+                            )}
+                            {payment.description ? (
+                              <Text style={styles.paymentDescription}>{payment.description}</Text>
+                            ) : null}
+                          </View>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                </>
+              ) : (
+                <View style={[styles.card, { padding: 24, marginVertical: 12 }]}>
+                  <View style={styles.sectionHeader}>
+                    <Text style={styles.sectionTitle}>Payments</Text>
+                  </View>
+                  <Text style={styles.emptyText}>No payments recorded yet.</Text>
+                </View>
+              )}
+            </>
+          )}
+
+          {/* Cycles View */}
+          {viewMode === 'cycles' && (
+            <View style={[styles.card, { padding: 24, marginVertical: 12 }]}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>Cycles</Text>
+              </View>
               <View style={styles.cyclesContainer}>
                 {liability && (
-                  <LiabilityCycles 
-                    key={cyclesRefreshKey}
+                  <LiabilityCycles
+                    key={`cycles-${liability.id}-${cyclesRefreshKey}`}
                     liabilityId={liability.id}
                     maxCycles={12}
                   />
                 )}
               </View>
-            )}
-          </GlassCard>
+            </View>
+          )}
+
+          {/* Linked Accounts */}
+          {allocations.length > 0 && (
+            <View style={[styles.card, { padding: 24, marginVertical: 12 }]}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>Linked Accounts</Text>
+              </View>
+              <View style={styles.allocationList}>
+                {allocations.map(allocation => {
+                  const account = accounts.find(acct => acct.id === allocation.accountId);
+                  return (
+                    <View key={allocation.accountId} style={styles.allocationItem}>
+                      <View style={styles.allocationIcon}>
+                        <Ionicons name="wallet-outline" size={20} color="rgba(0, 0, 0, 0.6)" />
+                      </View>
+                      <View style={styles.allocationInfo}>
+                        <Text style={styles.allocationName}>{account?.name || 'Account'}</Text>
+                        {allocation.liabilityName && (
+                          <Text style={styles.allocationSubtext}>{allocation.liabilityName}</Text>
+                        )}
+                      </View>
+                      <Text style={styles.allocationAmount}>{formatCurrency(Number(allocation.amount ?? 0))}</Text>
+                    </View>
+                  );
+                })}
+              </View>
+            </View>
+          )}
 
           {/* Recent Activity */}
           {activityLog.length > 0 && (
-            <GlassCard padding={24} marginVertical={12}>
+            <View style={[styles.card, { padding: 24, marginVertical: 12 }]}>
               <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>Recent Activity</Text>
               </View>
@@ -887,7 +908,7 @@ const LiabilityDetailScreen: React.FC = () => {
                 </View>
               ))}
             </View>
-            </GlassCard>
+            </View>
           )}
 
           <View style={{ height: 100 }} />
@@ -964,22 +985,22 @@ const LiabilityDetailScreen: React.FC = () => {
           }}
         />
 
-        {/* Unified Payment Modal */}
-        <UnifiedPaymentModal
+        {/* Save/Pay Modal (cycles & bills) */}
+        <LiabilityPaymentModal
           visible={showUnifiedPayModal}
           onClose={() => {
             setShowUnifiedPayModal(false);
             setSelectedBill(null);
           }}
-          billId={selectedBill?.id}
+          billId={selectedBill?.id || undefined}
           liabilityId={liability?.id}
+          prefillAmount={selectedBill?.total_amount || selectedBill?.amount}
+          prefillDate={selectedBill?.due_date ? new Date(selectedBill.due_date) : undefined}
           onSuccess={async () => {
             setShowUnifiedPayModal(false);
             setSelectedBill(null);
-            // Small delay to ensure database updates are committed
             await new Promise(resolve => setTimeout(resolve, 300));
             await loadLiability();
-            // Refresh cycles to update payment status
             setCyclesRefreshKey(prev => prev + 1);
           }}
         />
@@ -1010,11 +1031,11 @@ const LiabilityDetailScreen: React.FC = () => {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#F7F9F2',
   },
   container: {
     flex: 1,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#F7F9F2',
   },
   scrollContent: {
     paddingHorizontal: 20,
@@ -1029,7 +1050,7 @@ const styles = StyleSheet.create({
   loadingText: {
     fontSize: 16,
     fontFamily: 'InstrumentSerif-Regular',
-    color: '#000000',
+    color: '#0E401C',
   },
   emptyContainer: {
     flex: 1,
@@ -1040,14 +1061,13 @@ const styles = StyleSheet.create({
   },
   emptyTitle: {
     fontSize: 24,
-    fontFamily: 'HelveticaNeue-Bold',
-    fontWeight: '700',
-    color: '#000000',
+    fontFamily: 'Archivo Black',
+    color: '#0E401C',
   },
   emptyMessage: {
     fontSize: 16,
     fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
+    color: '#637050',
     textAlign: 'center',
     lineHeight: 24,
   },
@@ -1056,12 +1076,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     paddingVertical: 12,
     borderRadius: 12,
-    backgroundColor: '#000000',
+    backgroundColor: '#0E401C',
   },
   backButtonText: {
     fontSize: 15,
     fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
     color: '#FFFFFF',
   },
   headerRow: {
@@ -1075,33 +1094,41 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    backgroundColor: '#EEF3E4',
     alignItems: 'center',
     justifyContent: 'center',
   },
   pageTitle: {
     flex: 1,
-    fontSize: 32,
-    fontFamily: 'HelveticaNeue-Bold',
-    fontWeight: '700',
-    color: '#000000',
+    fontSize: 28,
+    fontFamily: 'Archivo Black',
+    color: '#0E401C',
     textAlign: 'center',
     marginHorizontal: 12,
-    letterSpacing: -0.5,
+    letterSpacing: -0.3,
+  },
+  card: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#E5ECD6',
+    shadowColor: '#1A331F',
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
+    elevation: 2,
   },
   heroLabel: {
     fontSize: 14,
     fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
+    color: '#6B7280',
     marginBottom: 8,
   },
   heroAmount: {
     fontSize: 40,
-    fontFamily: 'HelveticaNeue-Bold',
-    fontWeight: '700',
-    color: '#000000',
+    fontFamily: 'Archivo Black',
+    color: '#0E401C',
     marginBottom: 16,
-    letterSpacing: -1,
+    letterSpacing: -0.5,
   },
   progressSection: {
     gap: 8,
@@ -1109,18 +1136,18 @@ const styles = StyleSheet.create({
   progressBarContainer: {
     height: 8,
     borderRadius: 4,
-    backgroundColor: 'rgba(0, 0, 0, 0.08)',
+    backgroundColor: '#EEF3E4',
     overflow: 'hidden',
   },
   progressBarFill: {
     height: '100%',
     borderRadius: 4,
-    backgroundColor: '#000000',
+    backgroundColor: '#4F6F3E',
   },
   progressText: {
     fontSize: 13,
     fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
+    color: '#637050',
   },
   metricsGrid: {
     flexDirection: 'row',
@@ -1128,17 +1155,20 @@ const styles = StyleSheet.create({
     gap: 12,
     marginBottom: 12,
   },
+  segmentedWrapper: {
+    marginTop: 8,
+    marginBottom: 8,
+  },
   metricLabel: {
     fontSize: 12,
     fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
+    color: '#6B7280',
     marginBottom: 8,
   },
   metricValue: {
     fontSize: 18,
     fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
+    color: '#0E401C',
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -1149,245 +1179,12 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: 20,
     fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
+    color: '#0E401C',
   },
   sectionAction: {
     fontSize: 14,
     fontFamily: 'Poppins-Medium',
-    fontWeight: '500',
-    color: 'rgba(0, 0, 0, 0.6)',
-  },
-  sectionSubtitle: {
-    fontSize: 14,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
-    marginBottom: 16,
-  },
-  billsHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 16,
-  },
-  generateBillsButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 12,
-    backgroundColor: 'rgba(0, 0, 0, 0.05)',
-  },
-  generateBillsButtonText: {
-    fontSize: 13,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
-  },
-  breakdownRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 16,
-  },
-  breakdownItem: {
-    flex: 1,
-  },
-  breakdownLabel: {
-    fontSize: 13,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
-    marginBottom: 4,
-  },
-  breakdownValue: {
-    fontSize: 20,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
-  },
-  breakdownDivider: {
-    width: 1,
-    height: 40,
-    backgroundColor: 'rgba(0, 0, 0, 0.1)',
-  },
-  paymentList: {
-    gap: 16,
-  },
-  paymentItem: {
-    flexDirection: 'row',
-    gap: 12,
-    paddingBottom: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
-  },
-  paymentIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0, 0, 0, 0.05)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  paymentInfo: {
-    flex: 1,
-    gap: 4,
-  },
-  paymentAmount: {
-    fontSize: 16,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
-  },
-  paymentDate: {
-    fontSize: 13,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
-  },
-  paymentBreakdown: {
-    fontSize: 12,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.5)',
-    marginTop: 2,
-  },
-  paymentDescription: {
-    fontSize: 12,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.5)',
-    marginTop: 2,
-  },
-  allocationList: {
-    gap: 12,
-  },
-  allocationItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
-  },
-  allocationIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0, 0, 0, 0.05)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  allocationInfo: {
-    flex: 1,
-    gap: 2,
-  },
-  allocationName: {
-    fontSize: 15,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
-  },
-  allocationSubtext: {
-    fontSize: 12,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.5)',
-  },
-  allocationAmount: {
-    fontSize: 16,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
-  },
-  activityList: {
-    gap: 12,
-  },
-  activityItem: {
-    flexDirection: 'row',
-    gap: 12,
-    paddingBottom: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
-  },
-  activityIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0, 0, 0, 0.05)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  activityInfo: {
-    flex: 1,
-    gap: 4,
-  },
-  activityTitle: {
-    fontSize: 15,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
-  },
-  activityDate: {
-    fontSize: 12,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
-  },
-  activityNotes: {
-    fontSize: 12,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.5)',
-    marginTop: 2,
-  },
-  scheduleList: {
-    gap: 12,
-  },
-  scheduleItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 16,
-    backgroundColor: 'rgba(0, 0, 0, 0.03)',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(0, 0, 0, 0.05)',
-  },
-  scheduleInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    gap: 12,
-  },
-  scheduleIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0, 0, 0, 0.05)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  scheduleDetails: {
-    flex: 1,
-    gap: 4,
-  },
-  scheduleDate: {
-    fontSize: 14,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
-  },
-  scheduleAmount: {
-    fontSize: 16,
-    fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
-  },
-  scheduleBreakdown: {
-    fontSize: 12,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.5)',
-  },
-  emptyText: {
-    fontSize: 14,
-    fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
-    textAlign: 'center',
-    paddingVertical: 24,
+    color: '#637050',
   },
   // Bills Section Styles
   interestSummary: {
@@ -1421,12 +1218,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
-    color: '#10B981',
+    color: '#4F6F3E',
   },
   interestSubtext: {
     fontSize: 10,
     fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.4)',
+    color: '#637050',
   },
   billsList: {
     gap: 12,
@@ -1440,8 +1237,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: 'rgba(0, 0, 0, 0.08)',
-    shadowColor: '#000',
+    borderColor: '#E5ECD6',
+    shadowColor: '#1A331F',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.05,
     shadowRadius: 4,
@@ -1477,8 +1274,7 @@ const styles = StyleSheet.create({
   billDate: {
     fontSize: 14,
     fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
+    color: '#0E401C',
   },
   overdueText: {
     color: '#EF4444',
@@ -1493,12 +1289,12 @@ const styles = StyleSheet.create({
   billBreakdown: {
     fontSize: 12,
     fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
+    color: '#637050',
   },
   billDescription: {
     fontSize: 12,
     fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.5)',
+    color: 'rgba(14, 64, 28, 0.45)',
   },
   billCardRight: {
     alignItems: 'flex-end',
@@ -1507,13 +1303,12 @@ const styles = StyleSheet.create({
   billAmount: {
     fontSize: 18,
     fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
+    color: '#0E401C',
   },
   payButton: {
     paddingHorizontal: 20,
     paddingVertical: 8,
-    backgroundColor: '#000000',
+    backgroundColor: '#0E401C',
     borderRadius: 12,
   },
   payButtonOverdue: {
@@ -1536,7 +1331,7 @@ const styles = StyleSheet.create({
   emptyBillsText: {
     fontSize: 14,
     fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.5)',
+    color: '#637050',
   },
   viewAllButton: {
     flexDirection: 'row',
@@ -1545,14 +1340,13 @@ const styles = StyleSheet.create({
     marginTop: 16,
     paddingVertical: 12,
     borderTopWidth: 1,
-    borderTopColor: 'rgba(0, 0, 0, 0.1)',
+    borderTopColor: '#E5ECD6',
     gap: 8,
   },
   viewAllButtonText: {
     fontSize: 14,
     fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
+    color: '#0E401C',
   },
   bottomBar: {
     position: 'absolute',
@@ -1567,7 +1361,7 @@ const styles = StyleSheet.create({
     gap: 12,
     alignItems: 'center',
     borderTopWidth: 1,
-    borderTopColor: 'rgba(0, 0, 0, 0.05)',
+    borderTopColor: '#E5ECD6',
   },
   actionButton: {
     flexDirection: 'row',
@@ -1576,19 +1370,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 14,
     borderRadius: 12,
-    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    backgroundColor: '#EEF3E4',
   },
   actionButtonText: {
     fontSize: 15,
     fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#000000',
+    color: '#0E401C',
   },
   primaryButton: {
     flex: 1,
     paddingVertical: 14,
     borderRadius: 12,
-    backgroundColor: '#000000',
+    backgroundColor: '#0E401C',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1605,31 +1398,29 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8,
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    backgroundColor: '#EEF3E4',
   },
   createBillButtonText: {
     fontSize: 14,
     fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#10B981',
+    color: '#0E401C',
   },
   sectionSubtitle: {
     fontSize: 13,
     fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.6)',
+    color: '#637050',
     marginBottom: 12,
   },
   billPaymentNumber: {
     fontSize: 11,
     fontFamily: 'Poppins-Medium',
-    fontWeight: '500',
-    color: 'rgba(0, 0, 0, 0.5)',
+    color: '#637050',
     marginBottom: 4,
   },
   emptyBillsSubtext: {
     fontSize: 13,
     fontFamily: 'InstrumentSerif-Regular',
-    color: 'rgba(0, 0, 0, 0.4)',
+    color: '#637050',
     marginTop: 4,
     textAlign: 'center',
   },
@@ -1640,13 +1431,12 @@ const styles = StyleSheet.create({
     marginTop: 16,
     paddingHorizontal: 20,
     paddingVertical: 12,
-    backgroundColor: '#10B981',
+    backgroundColor: '#4F6F3E',
     borderRadius: 12,
   },
   createFirstBillButtonText: {
     fontSize: 15,
     fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
     color: '#FFFFFF',
   },
   headerActions: {
@@ -1656,7 +1446,7 @@ const styles = StyleSheet.create({
   },
   viewModeToggle: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    backgroundColor: '#EEF3E4',
     borderRadius: 8,
     padding: 2,
   },
@@ -1674,12 +1464,11 @@ const styles = StyleSheet.create({
   viewModeText: {
     fontSize: 13,
     fontFamily: 'Poppins-Medium',
-    fontWeight: '500',
-    color: 'rgba(0, 0, 0, 0.5)',
+    color: '#637050',
   },
   viewModeTextActive: {
-    color: '#000000',
-    fontWeight: '600',
+    color: '#0E401C',
+    fontWeight: '700',
   },
   cyclesContainer: {
     marginTop: 12,
@@ -1691,15 +1480,14 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingVertical: 12,
     paddingHorizontal: 16,
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    backgroundColor: '#F0F5E7',
     borderRadius: 12,
     marginBottom: 12,
   },
   paidBillsText: {
     fontSize: 14,
     fontFamily: 'Poppins-SemiBold',
-    fontWeight: '600',
-    color: '#10B981',
+    color: '#0E401C',
   },
   fab: {
     position: 'absolute',
@@ -1708,7 +1496,7 @@ const styles = StyleSheet.create({
     width: 56,
     height: 56,
     borderRadius: 28,
-    backgroundColor: '#10B981',
+    backgroundColor: '#4F6F3E',
     alignItems: 'center',
     justifyContent: 'center',
     elevation: 8,

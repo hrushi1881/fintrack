@@ -16,7 +16,6 @@ import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
-import { formatCurrencyAmount } from '@/utils/currency';
 import GlassCard from '@/components/GlassCard';
 import {
   fetchScheduledPaymentById,

@@ -5,6 +5,7 @@
 
 import { supabase } from '@/lib/supabase';
 import type { Account } from '@/types';
+import { DEFAULT_CURRENCY } from './currency';
 
 // ============================================================================
 // TYPES & INTERFACES
@@ -69,7 +70,7 @@ export async function createAccount(data: CreateAccountData, userId: string): Pr
     name: data.name.trim(),
     type: data.type,
     balance: data.balance ?? 0,
-    currency: data.currency || 'USD',
+    currency: data.currency || DEFAULT_CURRENCY,
     include_in_totals: data.include_in_totals ?? true,
     is_active: true,
     is_deleted: false,

@@ -618,11 +618,14 @@ export interface Category {
   color: string;
   icon: string;
   is_default: boolean;
+  parent_id?: string | null;
   activity_types: ('income' | 'expense' | 'goal' | 'bill' | 'liability' | 'budget')[];
   total_spent: number;
   total_received: number;
   total_saved: number;
   transaction_count: number;
+  is_deleted: boolean;
+  deleted_at?: string | null;
   created_at: string;
   updated_at: string;
 }

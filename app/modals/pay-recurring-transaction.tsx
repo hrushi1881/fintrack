@@ -97,9 +97,14 @@ export default function PayRecurringTransactionModal({
   const handlePay = async () => {
     if (!user || !scheduledPayment) return;
 
+    const isVariable = scheduledPayment.amount === null || scheduledPayment.amount === undefined;
     const amountValue = parseFloat(amount);
     if (isNaN(amountValue) || amountValue <= 0) {
       Alert.alert('Error', 'Please enter a valid payment amount');
+      return;
+    }
+    if (isVariable && !amount) {
+      Alert.alert('Error', 'Please enter the actual amount for this variable payment.');
       return;
     }
 
@@ -135,7 +140,7 @@ export default function PayRecurringTransactionModal({
 
       if (transactionError) throw transactionError;
 
-      const transactionId = rpcData?.transaction_id;
+      const transactionId = rpcData as string | null;
 
       // Mark scheduled payment as paid
       await markScheduledPaymentPaid(scheduledPaymentId, transactionId);

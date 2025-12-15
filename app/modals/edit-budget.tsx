@@ -7,7 +7,6 @@ import {
   TextInput,
   ScrollView,
   StyleSheet,
-  Alert,
   Switch,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -36,7 +35,7 @@ const RECURRENCE_OPTIONS = [
   { id: 'custom', label: 'Custom' },
 ];
 
-export const EditBudgetModal: React.FC<EditBudgetModalProps> = ({ 
+const EditBudgetModal: React.FC<EditBudgetModalProps> = ({ 
   visible, 
   budget, 
   onClose, 
@@ -44,9 +43,8 @@ export const EditBudgetModal: React.FC<EditBudgetModalProps> = ({
   onDelete 
 }) => {
   const { user } = useAuth();
-  const { currency } = useSettings();
   const { showNotification } = useNotification();
-  const { accounts, goals, categories } = useRealtimeData();
+  const { accounts, goals } = useRealtimeData();
 
   const [formData, setFormData] = useState({
     name: '',
@@ -1042,4 +1040,6 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
 });
+
+export default EditBudgetModal;
 

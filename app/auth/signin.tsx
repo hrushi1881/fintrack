@@ -6,7 +6,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { supabase } from '@/lib/supabase';
 
 export default function SignInScreen() {
-  const { signIn, resetPassword, user } = useAuth();
+  const { signIn, resetPassword } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -83,7 +83,7 @@ export default function SignInScreen() {
       } else {
         Alert.alert('Success', 'Password reset email sent! Check your inbox.');
       }
-    } catch (error) {
+    } catch {
       Alert.alert('Error', 'An unexpected error occurred');
     }
   };
@@ -173,7 +173,7 @@ export default function SignInScreen() {
 
             {/* Sign Up Link */}
             <View style={styles.signUpContainer}>
-              <Text style={styles.signUpText}>Don't have an account? </Text>
+              <Text style={styles.signUpText}>Don&apos;t have an account? </Text>
               <TouchableOpacity onPress={() => router.push('/auth/signup')}>
                 <Text style={styles.signUpLink}>Sign Up</Text>
               </TouchableOpacity>

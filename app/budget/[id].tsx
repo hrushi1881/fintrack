@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, TextInput, Modal, Alert } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, TextInput, Modal } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { useSettings } from '@/contexts/SettingsContext';
 import { useNotification } from '@/contexts/NotificationContext';
 import { formatCurrencyAmount } from '@/utils/currency';
+import { useBackNavigation, useAndroidBackButton } from '@/hooks/useBackNavigation';
 import { 
   updateBudgetProgress, 
   getBudgetTransactions, 
@@ -14,28 +14,28 @@ import {
   includeTransactionInBudget,
   calculateDailyPace,
   checkBudgetAlerts,
-  closeBudgetPeriod,
   getBudgetAccountIds
 } from '@/utils/budgets';
-import { Budget, BudgetTransaction } from '@/types';
-import { EditBudgetModal } from '@/app/modals/edit-budget';
-import { BudgetReflectionModal } from '@/app/modals/budget-reflection';
-import { useAuth } from '@/contexts/AuthContext';
+import { BudgetTransaction } from '@/types';
+import EditBudgetModal from '@/app/modals/edit-budget';
+import BudgetReflectionModal from '@/app/modals/budget-reflection';
 
 export default function BudgetDetailScreen() {
   const { id } = useLocalSearchParams();
+  const handleBack = useBackNavigation();
+  useAndroidBackButton();
   const [activeTab, setActiveTab] = useState('overview');
   const [showExcludeModal, setShowExcludeModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showReflectionModal, setShowReflectionModal] = useState(false);
   const [selectedTransaction, setSelectedTransaction] = useState<BudgetTransaction | null>(null);
   const [excludeReason, setExcludeReason] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [, setLoading] = useState(false);
   
   const { budgets, accounts, transactions, goals, categories, refreshBudgets } = useRealtimeData();
   const { currency } = useSettings();
   const { showNotification } = useNotification();
-  const { user } = useAuth();
+  // const { user } = useAuth();
 
   // Find the current budget and linked goal
   const budget = budgets.find(b => b.id === id);
@@ -292,28 +292,28 @@ export default function BudgetDetailScreen() {
     }
   };
 
-  const handleEndPeriod = async () => {
-    // Check if period has ended (end_date is in the past)
-    if (budget && new Date(budget.end_date) <= new Date()) {
-      // Show reflection modal
-      setShowReflectionModal(true);
-    } else {
-      // Period hasn't ended yet, show alert
-      Alert.alert(
-        'End Budget Period',
-        'Are you sure you want to end this budget period early?',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'End Period', onPress: () => setShowReflectionModal(true) },
-        ]
-      );
-    }
-  };
+  // const handleEndPeriod = async () => {
+  //   // Check if period has ended (end_date is in the past)
+  //   if (budget && new Date(budget.end_date) <= new Date()) {
+  //     // Show reflection modal
+  //     setShowReflectionModal(true);
+  //   } else {
+  //     // Period hasn't ended yet, show alert
+  //     Alert.alert(
+  //       'End Budget Period',
+  //       'Are you sure you want to end this budget period early?',
+  //       [
+  //         { text: 'Cancel', style: 'cancel' },
+  //         { text: 'End Period', onPress: () => setShowReflectionModal(true) },
+  //       ]
+  //     );
+  //   }
+  // };
 
   const handleReflectionComplete = async () => {
     await refreshBudgets();
     // Optionally navigate back or refresh the current view
-    router.back();
+    handleBack();
   };
 
 
@@ -324,9 +324,9 @@ export default function BudgetDetailScreen() {
           <View style={styles.errorContainer}>
             <Text style={styles.errorTitle}>Budget Not Found</Text>
             <Text style={styles.errorDescription}>
-              The budget you're looking for doesn't exist or has been deleted.
+              The budget you&apos;re looking for doesn&apos;t exist or has been deleted.
             </Text>
-            <TouchableOpacity style={styles.errorBackButton} onPress={() => router.back()}>
+            <TouchableOpacity style={styles.errorBackButton} onPress={handleBack}>
               <Text style={styles.errorBackButtonText}>Go Back</Text>
             </TouchableOpacity>
           </View>
@@ -337,7 +337,7 @@ export default function BudgetDetailScreen() {
 
   const renderOverview = () => {
     const percentage = budget.amount > 0 ? (budget.spent_amount / budget.amount) * 100 : 0;
-    const status = getBudgetStatus(percentage);
+    // const status = getBudgetStatus(percentage);
     const isSaveTarget = (budget.budget_mode || 'spend_cap') === 'save_target'; // Default to spend_cap if not set
     
     return (
@@ -408,7 +408,7 @@ export default function BudgetDetailScreen() {
           <View style={styles.paceCard}>
             <Text style={styles.paceTitle}>Pace Guidance</Text>
             <Text style={styles.paceText}>
-              You're spending {formatCurrency(dailyPace.actual)}/day - you need {formatCurrency(dailyPace.ideal)}/day to stay on track.
+              You&apos;re spending {formatCurrency(dailyPace.actual)}/day - you need {formatCurrency(dailyPace.ideal)}/day to stay on track.
             </Text>
           </View>
         )}
@@ -524,7 +524,7 @@ export default function BudgetDetailScreen() {
               <Ionicons name="receipt-outline" size={64} color="#D1D5DB" />
               <Text style={styles.emptyTitle}>No Transactions</Text>
               <Text style={styles.emptyDescription}>
-                Transactions will appear here when they're added to this budget
+                Transactions will appear here when they&apos;re added to this budget
               </Text>
             </View>
           )}
@@ -1383,6 +1383,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 40,
+    backgroundColor: '#FFFFFF',
   },
   errorTitle: {
     fontSize: 24,
@@ -1411,13 +1412,6 @@ const styles = StyleSheet.create({
     fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
     fontWeight: '400',
     color: '#FFFFFF', // White text on button
-  },
-  errorContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 40,
-    backgroundColor: '#FFFFFF',
   },
   alertBanner: {
     backgroundColor: '#FEF3C7',

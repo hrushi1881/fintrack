@@ -14,8 +14,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useRealtimeData } from '../../hooks/useRealtimeData';
-import { Category } from '../../types';
-import { updateCategory, deleteCategory, checkCategoryExists } from '../../utils/categories';
+import { updateCategory, deleteCategory } from '../../utils/categories';
 import { supabase } from '../../lib/supabase';
 
 const PRESET_COLORS = [
@@ -105,14 +104,21 @@ export default function EditCategoryModal() {
 
       // Only check for duplicates if the name has changed
       if (name.trim() !== category.name) {
-        const { data: existing } = await supabase
+        let dupQuery = supabase
           .from('categories')
           .select('id, activity_types')
           .eq('user_id', user.user.id)
           .eq('name', name.trim())
           .eq('is_deleted', false)
-          .neq('id', category.id)
-          .maybeSingle();
+          .neq('id', category.id);
+
+        if (category.parent_id) {
+          dupQuery = dupQuery.eq('parent_id', category.parent_id);
+        } else {
+          dupQuery = dupQuery.is('parent_id', null);
+        }
+
+        const { data: existing } = await dupQuery.maybeSingle();
 
         if (existing) {
           const existingTypes = existing.activity_types || [];
@@ -331,7 +337,7 @@ export default function EditCategoryModal() {
                   })}
                 </View>
                 <Text style={styles.activityTypesHint}>
-                  Select how you'll use this category (e.g., Pay for expenses, Set goals, etc.)
+                  Select how you&apos;ll use this category (e.g., Pay for expenses, Set goals, etc.)
                 </Text>
               </View>
 
@@ -390,10 +396,11 @@ export default function EditCategoryModal() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#FFF0F0',
+    backgroundColor: '#FFFFFF',
   },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   scrollView: {
     flex: 1,

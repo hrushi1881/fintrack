@@ -5,16 +5,19 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useOrganizations } from '@/contexts/OrganizationsContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { formatCurrencyAmount } from '@/utils/currency';
+import { useBackNavigation, useAndroidBackButton } from '@/hooks/useBackNavigation';
 import AddAccountModal from '../modals/add-account';
 
 const OrganizationDetailScreen: React.FC = () => {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { organizations, organizationsWithAccounts, getOrganizationById, defaultOrganizationId } = useOrganizations();
   const { refreshAccounts } = useRealtimeData();
+  const handleBack = useBackNavigation();
+  useAndroidBackButton();
 
   const organization = useMemo(
     () => (id ? getOrganizationById(id) : undefined),
-    [getOrganizationById, id, organizationsWithAccounts]
+    [getOrganizationById, id]
   );
   const [addAccountVisible, setAddAccountVisible] = useState(false);
 
@@ -43,21 +46,7 @@ const OrganizationDetailScreen: React.FC = () => {
     }
   };
 
-  if (!organization) {
-    return (
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.emptyState}>
-          <Ionicons name="business-outline" size={48} color="#8BA17B" />
-          <Text style={styles.emptyTitle}>Organization not found</Text>
-          <TouchableOpacity style={styles.primaryButton} onPress={() => router.back()}>
-            <Text style={styles.primaryButtonText}>Go Back</Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  const formattedBalance = formatCurrencyAmount(organization.totalBalance, organization.currency);
+  const formattedBalance = organization ? formatCurrencyAmount(organization.totalBalance, organization.currency) : '';
 
   const organizationOptions = useMemo(() => {
     if (!organizations) return [];
@@ -68,12 +57,26 @@ const OrganizationDetailScreen: React.FC = () => {
     }));
   }, [organizations]);
 
+  if (!organization) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.emptyState}>
+          <Ionicons name="business-outline" size={48} color="#8BA17B" />
+          <Text style={styles.emptyTitle}>Organization not found</Text>
+          <TouchableOpacity style={styles.primaryButton} onPress={handleBack}>
+            <Text style={styles.primaryButtonText}>Go Back</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.container}>
         <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
           <View style={styles.headerBar}>
-            <TouchableOpacity style={styles.iconButton} onPress={() => router.back()}>
+            <TouchableOpacity style={styles.iconButton} onPress={handleBack}>
               <Ionicons name="arrow-back" size={20} color="#0E401C" />
             </TouchableOpacity>
             <Text style={styles.headerTitle}>{organization.name}</Text>
@@ -420,21 +423,6 @@ const styles = StyleSheet.create({
     fontSize: 18,
     color: '#0E401C',
     fontFamily: 'Archivo Black',
-  },
-  primaryButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    backgroundColor: '#4F6F3E',
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-    borderRadius: 16,
-  },
-  primaryButtonText: {
-    fontSize: 14,
-    color: '#FFFFFF',
-    fontFamily: 'Poppins-SemiBold',
   },
 });
 

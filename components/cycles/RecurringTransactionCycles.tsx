@@ -1,12 +1,14 @@
-import React, { useState } from 'react';
-import { StyleSheet, Text, View, ScrollView, ActivityIndicator, TouchableOpacity, TextInput, Modal } from 'react-native';
+import React, { useMemo, useState } from 'react';
+import { StyleSheet, Text, View, ActivityIndicator, TouchableOpacity, TextInput, Modal } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRecurringTransactionCycles } from '@/hooks/useRecurringTransactionCycles';
-import CycleCard from './CycleCard';
+import CycleSnapshot from './CycleSnapshot';
 import { Transaction } from '@/types';
 import { Cycle } from '@/utils/cycles';
-import GlassmorphCard from '../GlassmorphCard';
 import UnifiedPaymentModal from '@/app/modals/unified-payment-modal';
+import ScheduleCyclePaymentModal from '@/app/modals/schedule-cycle-payment';
+import SetCycleOverrideModal from '@/app/modals/set-cycle-override';
+import { useAuth } from '@/contexts/AuthContext';
 
 interface RecurringTransactionCyclesProps {
   recurringTransactionId: string;
@@ -24,7 +26,11 @@ export default function RecurringTransactionCycles({
     statistics,
     loading,
     error,
+    refresh,
     updateCycleNote,
+    scheduleCyclePayment,
+    setCycleOverride,
+    removeCycleOverride,
   } = useRecurringTransactionCycles({ recurringTransactionId, maxCycles });
 
   const [selectedCycleForNote, setSelectedCycleForNote] = useState<number | null>(null);
@@ -33,6 +39,11 @@ export default function RecurringTransactionCycles({
   const [savingNote, setSavingNote] = useState(false);
   const [selectedCycleForBill, setSelectedCycleForBill] = useState<Cycle | null>(null);
   const [showBillModal, setShowBillModal] = useState(false);
+  const [selectedBillId, setSelectedBillId] = useState<string | null>(null);
+  const [selectedCycleForSchedule, setSelectedCycleForSchedule] = useState<Cycle | null>(null);
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
+  const [selectedCycleForOverride, setSelectedCycleForOverride] = useState<Cycle | null>(null);
+  const [showOverrideModal, setShowOverrideModal] = useState(false);
 
   const handleAddNote = (cycleNumber: number, currentNote: string) => {
     setSelectedCycleForNote(cycleNumber);
@@ -64,17 +75,77 @@ export default function RecurringTransactionCycles({
 
   const handleCreateBill = (cycle: Cycle) => {
     setSelectedCycleForBill(cycle);
+    setSelectedBillId(null);
     setShowBillModal(true);
   };
 
   const handleBillModalClose = () => {
     setShowBillModal(false);
     setSelectedCycleForBill(null);
+    setSelectedBillId(null);
   };
 
-  const handleBillSuccess = () => {
+  const handleBillSuccess = async () => {
+    // Refresh cycles data after bill is created or payment is made
+    console.log('[RecurringTransactionCycles] Bill success - refreshing cycles data');
+    await refresh();
     handleBillModalClose();
+    // Force a small delay then refresh again to ensure all data is updated
+    setTimeout(() => {
+      refresh();
+    }, 500);
   };
+
+  const handleSchedulePayment = (cycle: Cycle) => {
+    setSelectedCycleForSchedule(cycle);
+    setShowScheduleModal(true);
+  };
+
+  const handleScheduleSuccess = async () => {
+    // Refresh cycles data after payment is scheduled
+    console.log('[RecurringTransactionCycles] Schedule success - refreshing cycles data');
+    await refresh();
+    setShowScheduleModal(false);
+    setSelectedCycleForSchedule(null);
+  };
+
+  const handleSetOverride = (cycle: Cycle) => {
+    setSelectedCycleForOverride(cycle);
+    setShowOverrideModal(true);
+  };
+
+  const handleOverrideSuccess = async () => {
+    // Refresh cycles data after override is saved
+    console.log('[RecurringTransactionCycles] Override success - refreshing cycles data');
+    await refresh();
+    setShowOverrideModal(false);
+    setSelectedCycleForOverride(null);
+  };
+
+  const getCycleOverride = (cycle: Cycle) => {
+    if (!recurringTransaction) return undefined;
+    const { getCycleOverrides } = require('@/utils/recurringCycleScheduling');
+    const overrides = getCycleOverrides(recurringTransaction);
+    return overrides[cycle.cycleNumber];
+  };
+
+  const paymentsForCycle = (cycle?: Cycle) =>
+    cycle?.transactions?.map((tx: Transaction) => ({
+      id: tx.id,
+      amount: tx.amount,
+      date: tx.date,
+      status: tx.metadata?.payment_status || tx.metadata?.status || 'paid',
+      cycleNumber: tx.metadata?.cycle_number,
+    })) || [];
+
+  const selectedBill = useMemo(() => {
+    if (!selectedBillId) return null;
+    for (const c of cycles) {
+      const bill = c.bills?.find((b) => b.id === selectedBillId);
+      if (bill) return bill;
+    }
+    return null;
+  }, [selectedBillId, cycles]);
 
   if (loading) {
     return (
@@ -113,83 +184,37 @@ export default function RecurringTransactionCycles({
         </Text>
       </View>
 
-      {/* Statistics Card */}
-      <GlassmorphCard
-        style={styles.statsCard}
-        overlayColor="rgba(99, 102, 241, 0.05)"
-        borderRadius={16}
-      >
-        <View style={styles.statsGrid}>
-          <View style={styles.statItem}>
-            <Text style={styles.statValue}>{statistics.total}</Text>
-            <Text style={styles.statLabel}>Total</Text>
-          </View>
-          <View style={styles.statItem}>
-            <Text style={[styles.statValue, { color: '#10B981' }]}>
-              {statistics.paid}
-            </Text>
-            <Text style={styles.statLabel}>Paid</Text>
-          </View>
-          <View style={styles.statItem}>
-            <Text style={[styles.statValue, { color: '#EF4444' }]}>
-              {statistics.notPaid}
-            </Text>
-            <Text style={styles.statLabel}>Not Paid</Text>
-          </View>
-          <View style={styles.statItem}>
-            <Text style={[styles.statValue, { color: '#6B7280' }]}>
-              {statistics.upcoming}
-            </Text>
-            <Text style={styles.statLabel}>Upcoming</Text>
-          </View>
-        </View>
-
-        <View style={styles.statsRow}>
-          <View style={styles.statsRowItem}>
-            <Text style={styles.statsRowLabel}>Completion Rate</Text>
-            <Text style={styles.statsRowValue}>{statistics.completionRate}%</Text>
-          </View>
-          <View style={styles.statsRowItem}>
-            <Text style={styles.statsRowLabel}>On-Time Rate</Text>
-            <Text style={styles.statsRowValue}>{statistics.onTimeRate}%</Text>
-          </View>
-        </View>
-      </GlassmorphCard>
-
-      {/* Current Cycle Highlight */}
-      {currentCycle && (
-        <View style={styles.currentCycleContainer}>
-          <View style={styles.currentCycleHeader}>
-            <Ionicons name="time" size={20} color="#6366F1" />
-            <Text style={styles.currentCycleTitle}>Current Cycle</Text>
-          </View>
-          <CycleCard
-            cycle={currentCycle}
-            onAddNote={handleAddNote}
-            onViewTransactions={handleViewTransactions}
-            onCreateBill={handleCreateBill}
-            expanded={true}
-          />
-        </View>
-      )}
-
-      {/* All Cycles List */}
-      <View style={styles.cyclesListContainer}>
-        <Text style={styles.cyclesListTitle}>All Cycles</Text>
-        <ScrollView
-          style={styles.cyclesList}
-          showsVerticalScrollIndicator={false}
-        >
+      {/* Stacked Cycle Snapshots */}
+      <View style={{ paddingHorizontal: 16, paddingBottom: 16 }}>
+        <Text style={styles.title}>Cycles</Text>
+        <Text style={styles.subtitle}>
+          {recurringTransaction?.type === 'income' 
+            ? 'Expected vs received income per cycle.' 
+            : 'Target vs paid, bills, and payments per cycle.'}
+        </Text>
+        <View style={styles.snapshotStack}>
           {cycles.map((cycle) => (
-            <CycleCard
-              key={cycle.cycleNumber}
-              cycle={cycle}
-              onAddNote={handleAddNote}
-              onViewTransactions={handleViewTransactions}
-              onCreateBill={handleCreateBill}
-            />
+            <View key={`${cycle.cycleNumber}-${cycle.startDate}-${cycle.endDate}`} style={{ marginBottom: 16 }}>
+              <CycleSnapshot
+                cycle={cycle}
+                bills={cycle.bills}
+                payments={paymentsForCycle(cycle)}
+                onViewSchedule={() => {
+                  handleCreateBill(cycle);
+                }}
+                onGenerateBill={() => handleCreateBill(cycle)}
+                onPayBill={(bill) => {
+                  setSelectedCycleForBill(cycle);
+                  setSelectedBillId(bill.id);
+                  setShowBillModal(true);
+                }}
+                onSeeAllPayments={() => {}}
+                onEditRules={() => handleSetOverride(cycle)}
+                transactionType={recurringTransaction?.type as 'income' | 'expense'}
+              />
+          </View>
           ))}
-        </ScrollView>
+        </View>
       </View>
 
       {/* Note Modal */}
@@ -252,20 +277,63 @@ export default function RecurringTransactionCycles({
         </View>
       </Modal>
 
-      {/* Create Bill Modal */}
+      {/* Save/Pay Modal */}
       {selectedCycleForBill && recurringTransaction && (
         <UnifiedPaymentModal
           visible={showBillModal}
           onClose={handleBillModalClose}
           onSuccess={handleBillSuccess}
-          createBillFromCycle={{
+          billId={selectedBillId || undefined}
+          createBillFromCycle={
+            selectedBillId
+              ? undefined
+              : {
             cycleNumber: selectedCycleForBill.cycleNumber,
             expectedAmount: selectedCycleForBill.expectedAmount,
             expectedDate: selectedCycleForBill.expectedDate,
             recurringTransactionId: recurringTransaction.id,
+                }
+          }
+          recurringTransactionId={recurringTransaction.id}
+          prefillAmount={selectedBill?.totalAmount ?? selectedCycleForBill.expectedAmount}
+          prefillDate={
+            selectedBill?.dueDate
+              ? new Date(selectedBill.dueDate)
+              : new Date(selectedCycleForBill.expectedDate)
+          }
+        />
+      )}
+
+      {/* Schedule Payment Modal */}
+      {selectedCycleForSchedule && recurringTransaction && (
+        <ScheduleCyclePaymentModal
+          visible={showScheduleModal}
+          onClose={handleScheduleSuccess}
+          cycle={selectedCycleForSchedule}
+          recurringTransaction={recurringTransaction}
+          onSuccess={handleScheduleSuccess}
+        />
+      )}
+
+      {/* Set Cycle Override Modal */}
+      {selectedCycleForOverride && recurringTransaction && (
+        <SetCycleOverrideModal
+          visible={showOverrideModal}
+          onClose={handleOverrideSuccess}
+          cycle={selectedCycleForOverride}
+          currentOverride={getCycleOverride(selectedCycleForOverride)}
+          onSuccess={handleOverrideSuccess}
+          onSave={async (override) => {
+            await setCycleOverride(selectedCycleForOverride.cycleNumber, {
+              date: override.expectedDate,
+              amount: override.expectedAmount,
+              minimumAmount: override.minimumAmount,
+              notes: override.notes,
+            });
           }}
-          prefillAmount={selectedCycleForBill.expectedAmount}
-          prefillDate={new Date(selectedCycleForBill.expectedDate)}
+          onRemove={async () => {
+            await removeCycleOverride(selectedCycleForOverride.cycleNumber);
+          }}
         />
       )}
     </View>
@@ -291,6 +359,10 @@ const styles = StyleSheet.create({
     fontFamily: 'Poppins-Bold',
     color: '#1F2937',
     marginBottom: 4,
+  },
+  snapshotStack: {
+    gap: 12,
+    marginTop: 12,
   },
   subtitle: {
     fontSize: 14,
@@ -319,6 +391,16 @@ const styles = StyleSheet.create({
   statsCard: {
     marginHorizontal: 16,
     marginBottom: 16,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 2,
   },
   statsGrid: {
     flexDirection: 'row',

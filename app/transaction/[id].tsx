@@ -1,15 +1,28 @@
 import React, { useState, useEffect } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, Modal, Alert } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+import { 
+  StyleSheet, 
+  Text, 
+  View, 
+  TouchableOpacity, 
+  ScrollView, 
+  SafeAreaView, 
+  Modal, 
+  Alert,
+  Pressable,
+  StatusBar,
+} from 'react-native';
+import { BlurView } from 'expo-blur';
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
 import { supabase } from '@/lib/supabase';
 import { formatCurrencyAmount } from '@/utils/currency';
+import { useBackNavigation, useAndroidBackButton } from '@/hooks/useBackNavigation';
 import EditTransactionModal from '../modals/edit-transaction';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { useLiabilities } from '@/contexts/LiabilitiesContext';
+import LiquidGlassCard from '@/components/LiquidGlassCard';
 
 interface Transaction {
   id: string;
@@ -38,6 +51,8 @@ interface Transaction {
   };
   category?: {
     name: string;
+    color?: string;
+    icon?: string;
   };
 }
 
@@ -45,7 +60,9 @@ export default function TransactionDetailScreen() {
   const { id } = useLocalSearchParams();
   const { user } = useAuth();
   const { currency } = useSettings();
-  const { accounts, refreshAccounts, getFundsForAccount, goals, refreshGoals, globalRefresh } = useRealtimeData();
+  const handleBack = useBackNavigation();
+  useAndroidBackButton();
+  const { accounts, refreshAccounts, goals, refreshGoals } = useRealtimeData();
   const { liabilities, fetchLiabilities } = useLiabilities();
   const [transaction, setTransaction] = useState<Transaction | null>(null);
   const [loading, setLoading] = useState(true);
@@ -67,35 +84,18 @@ export default function TransactionDetailScreen() {
       const account = accounts.find(acc => acc.id === transaction.account_id);
       if (account) {
         const newBalance = Number(account.balance) || 0;
-        console.log('✅ Updating current account balance from real-time data:', {
-          accountId: transaction.account_id,
-          accountName: account.name,
-          oldBalance: currentAccountBalance,
-          newBalance: newBalance,
-          afterBalance: afterBalance,
-          matchesAfter: Math.abs(newBalance - (afterBalance || 0)) < 0.01
-        });
         setCurrentAccountBalance(newBalance);
-      } else {
-        console.warn('⚠️ Account not found in real-time data:', transaction.account_id);
       }
-    } else if (transaction?.account_id && (!accounts || accounts.length === 0)) {
-      console.warn('⚠️ Accounts data not available yet, will retry when available');
     }
   }, [transaction?.account_id, accounts]);
 
-  // Update balance when accounts data changes or transaction loads
   useEffect(() => {
     updateCurrentAccountBalance();
   }, [updateCurrentAccountBalance]);
 
-  // Refresh account balance when page is focused (to get latest balance)
   useFocusEffect(
     React.useCallback(() => {
-      // Refresh accounts to ensure we have the latest balance
-      refreshAccounts().then(() => {
-        // Balance will be updated via useEffect after accounts are refreshed
-      });
+      refreshAccounts();
     }, [refreshAccounts])
   );
 
@@ -107,7 +107,6 @@ export default function TransactionDetailScreen() {
 
   const fetchTransactionDetails = async () => {
     try {
-      // Fetch the main transaction (including created_at, balance_before, balance_after)
       const { data: transactionData, error: transactionError } = await supabase
         .from('transactions')
         .select(`
@@ -125,22 +124,16 @@ export default function TransactionDetailScreen() {
         return;
       }
 
-      // Ensure created_at exists
       if (transactionData && !transactionData.created_at) {
         transactionData.created_at = transactionData.date;
       }
 
       setTransaction(transactionData);
 
-      // Refresh liabilities and goals first to ensure we have the names
       if (transactionData?.metadata?.bucket_type && transactionData.metadata.bucket_type !== 'personal') {
-        await Promise.all([
-          fetchLiabilities(),
-          refreshGoals(),
-        ]);
+        await Promise.all([fetchLiabilities(), refreshGoals()]);
       }
 
-      // Extract and fetch fund information from metadata
       if (transactionData?.metadata) {
         const bucketType = transactionData.metadata.bucket_type;
         const bucketId = transactionData.metadata.bucket_id;
@@ -148,9 +141,7 @@ export default function TransactionDetailScreen() {
         if (bucketType && bucketType !== 'personal') {
           let fundName = 'Unknown Fund';
           
-          // Re-fetch liabilities/goals after refresh
           if (bucketType === 'liability' && bucketId) {
-            // Try to fetch liability directly if not in cache
             const { data: liabilityData } = await supabase
               .from('liabilities')
               .select('title')
@@ -164,7 +155,6 @@ export default function TransactionDetailScreen() {
                 ? `Liability Fund (${liabilities.find(l => l.id === bucketId)!.title})`
                 : 'Liability Fund');
           } else if (bucketType === 'goal' && bucketId) {
-            // Try to fetch goal directly if not in cache
             const { data: goalData } = await supabase
               .from('goals')
               .select('title')
@@ -192,7 +182,6 @@ export default function TransactionDetailScreen() {
           });
         }
       } else {
-        // No metadata means it's from Personal Fund (default)
         setFundInfo({
           fundName: 'Personal Fund',
           fundType: 'personal',
@@ -200,17 +189,12 @@ export default function TransactionDetailScreen() {
         });
       }
 
-      // Refresh accounts to ensure we have the latest balance
       await refreshAccounts();
 
-      // Calculate before and after balance
       if (transactionData) {
         await calculateBalanceImpact(transactionData);
       }
       
-      // Current account balance will be updated via useEffect when accounts data is available
-
-      // Fetch related transactions (same day)
       if (transactionData) {
         const { data: relatedData, error: relatedError } = await supabase
           .from('transactions')
@@ -229,7 +213,6 @@ export default function TransactionDetailScreen() {
           setRelatedTransactions(relatedData || []);
         }
 
-        // Count total transactions for the day
         const { count } = await supabase
           .from('transactions')
           .select('*', { count: 'exact', head: true })
@@ -248,20 +231,13 @@ export default function TransactionDetailScreen() {
 
   const calculateBalanceImpact = async (transaction: Transaction) => {
     try {
-      // Use stored balance_before and balance_after if available (for new transactions)
       if (transaction.balance_before !== null && transaction.balance_before !== undefined &&
           transaction.balance_after !== null && transaction.balance_after !== undefined) {
         setBeforeBalance(Number(transaction.balance_before));
         setAfterBalance(Number(transaction.balance_after));
-        console.log('Using stored balance values:', {
-          balance_before: transaction.balance_before,
-          balance_after: transaction.balance_after,
-        });
         return;
       }
 
-      // Fallback: For old transactions without stored balances, calculate from history
-      // Get all transactions for this account with type information, ordered chronologically
       const { data: allTransactions, error: transactionsError } = await supabase
         .from('transactions')
         .select('id, amount, type, date, created_at, balance_before, balance_after')
@@ -271,7 +247,6 @@ export default function TransactionDetailScreen() {
 
       if (transactionsError) throw transactionsError;
 
-      // Get account's current balance
       const { data: accountData, error: accountError } = await supabase
         .from('accounts')
         .select('balance, created_at')
@@ -282,8 +257,6 @@ export default function TransactionDetailScreen() {
 
       const currentBalance = Number(accountData.balance) || 0;
       
-      // Calculate signed transaction amounts based on type
-      // Expenses are negative, income is positive
       const signedTransactions = (allTransactions || []).map(t => ({
         ...t,
         signedAmount: t.type === 'expense' ? -Math.abs(Number(t.amount) || 0) : Math.abs(Number(t.amount) || 0)
@@ -295,61 +268,49 @@ export default function TransactionDetailScreen() {
       );
       const initialBalance = currentBalance - sumOfAllTransactions;
 
-      // Now calculate running balance up to and including this transaction
       const transactionDate = transaction.date;
       const transactionCreatedAt = transaction.created_at || transaction.date;
       
       let runningBalance = initialBalance;
-      let beforeBalance = initialBalance;
-      let afterBalance = initialBalance;
+      let beforeBal = initialBalance;
+      let afterBal = initialBalance;
       let foundTransaction = false;
 
-      // Calculate running balance chronologically using signed transactions
       for (const txn of signedTransactions) {
         const txnDate = txn.date;
         const txnCreatedAt = txn.created_at || txn.date;
         
-        // Check if we've reached our target transaction
         const isTargetTransaction = txn.id === transaction.id;
         
         if (isTargetTransaction) {
-          // Use stored balance if available, otherwise calculate
           if (txn.balance_before !== null && txn.balance_before !== undefined &&
               txn.balance_after !== null && txn.balance_after !== undefined) {
-            beforeBalance = Number(txn.balance_before);
-            afterBalance = Number(txn.balance_after);
+            beforeBal = Number(txn.balance_before);
+            afterBal = Number(txn.balance_after);
           } else {
-            // This is our transaction - balance before it
-            beforeBalance = runningBalance;
-            // Apply signed transaction amount to get balance after
-            afterBalance = runningBalance + txn.signedAmount;
+            beforeBal = runningBalance;
+            afterBal = runningBalance + txn.signedAmount;
           }
           foundTransaction = true;
           break;
         } else {
-          // Check if this transaction is before our target
           const isBefore = 
             txnDate < transactionDate || 
             (txnDate === transactionDate && txnCreatedAt < transactionCreatedAt);
           
           if (isBefore) {
-            // Use stored balance_after if available, otherwise calculate
             if (txn.balance_after !== null && txn.balance_after !== undefined) {
               runningBalance = Number(txn.balance_after);
             } else {
-              // This transaction happened before our target - include it in running balance
               runningBalance = runningBalance + txn.signedAmount;
             }
           } else {
-            // This transaction happened after our target - we've passed it
             break;
           }
         }
       }
 
-      // If we didn't find the transaction in the list (shouldn't happen), use fallback
       if (!foundTransaction) {
-        // Fallback: calculate from current balance and transactions after
         const transactionsAfter = signedTransactions.filter(t => {
           if (t.id === transaction.id) return false;
           const txnDate = t.date;
@@ -365,28 +326,16 @@ export default function TransactionDetailScreen() {
           0
         );
         
-        // Get signed amount for current transaction
         const transactionSignedAmount = transaction.type === 'expense' 
           ? -Math.abs(Number(transaction.amount) || 0) 
           : Math.abs(Number(transaction.amount) || 0);
         
-        afterBalance = currentBalance - sumAfter;
-        beforeBalance = afterBalance - transactionSignedAmount;
+        afterBal = currentBalance - sumAfter;
+        beforeBal = afterBal - transactionSignedAmount;
       }
 
-      setBeforeBalance(beforeBalance);
-      setAfterBalance(afterBalance);
-
-      console.log('Balance Impact Calculation (fallback):', {
-        transactionId: transaction.id,
-        transactionAmount: transaction.amount,
-        transactionType: transaction.type,
-        transactionDate: transaction.date,
-        beforeBalance,
-        afterBalance,
-        currentBalance,
-        foundInSequence: foundTransaction,
-      });
+      setBeforeBalance(beforeBal);
+      setAfterBalance(afterBal);
 
     } catch (error) {
       console.error('Error calculating balance impact:', error);
@@ -408,38 +357,91 @@ export default function TransactionDetailScreen() {
     });
   };
 
+  const formatTime = (dateString: string) => {
+    const date = new Date(dateString);
+    return date.toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  };
+
   const getTransactionIcon = (type: string, category?: string) => {
-    if (type === 'income') return 'arrow-up';
-    if (type === 'expense') {
       const categoryName = (category || '').toLowerCase();
+    if (type === 'income') return 'trending-up';
+    if (type === 'expense') {
       if (categoryName.includes('food') || categoryName.includes('dining')) return 'restaurant';
       if (categoryName.includes('transport') || categoryName.includes('gas')) return 'car';
       if (categoryName.includes('entertainment')) return 'game-controller';
       if (categoryName.includes('utilities') || categoryName.includes('bills')) return 'flash';
-      return 'arrow-down';
+      if (categoryName.includes('shopping')) return 'bag-handle';
+      if (categoryName.includes('health')) return 'fitness';
+      return 'trending-down';
     }
     return 'swap-horizontal';
   };
 
-  const getTransactionColor = (type: string) => {
+  const getTypeConfig = (type: string) => {
     switch (type) {
-      case 'income': return '#10B981';
-      case 'expense': return '#EF4444';
-      case 'transfer': return '#3B82F6';
-      default: return '#6B7280';
+      case 'income':
+        return {
+          color: '#10B981',
+          bgColor: 'rgba(16, 185, 129, 0.12)',
+          label: 'Income',
+          prefix: '+',
+        };
+      case 'expense':
+        return {
+          color: '#EF4444',
+          bgColor: 'rgba(239, 68, 68, 0.12)',
+          label: 'Expense',
+          prefix: '-',
+        };
+      case 'transfer':
+        return {
+          color: '#3B82F6',
+          bgColor: 'rgba(59, 130, 246, 0.12)',
+          label: 'Transfer',
+          prefix: '',
+        };
+      default:
+        return {
+          color: '#6B7280',
+          bgColor: 'rgba(107, 114, 128, 0.12)',
+          label: 'Other',
+          prefix: '',
+        };
+    }
+  };
+
+  const getFundConfig = (fundType: string | null) => {
+    switch (fundType) {
+      case 'personal':
+        return { color: '#10B981', icon: 'wallet-outline', bgColor: 'rgba(16, 185, 129, 0.12)' };
+      case 'liability':
+        return { color: '#EF4444', icon: 'card-outline', bgColor: 'rgba(239, 68, 68, 0.12)' };
+      case 'goal':
+        return { color: '#3B82F6', icon: 'flag-outline', bgColor: 'rgba(59, 130, 246, 0.12)' };
+      default:
+        return { color: '#6B7280', icon: 'layers-outline', bgColor: 'rgba(107, 114, 128, 0.12)' };
     }
   };
 
   if (loading) {
     return (
       <Modal visible={true} animationType="slide" presentationStyle="pageSheet">
-        <LinearGradient colors={['#065F46', '#047857', '#059669']} style={styles.container}>
+        <View style={styles.container}>
+          <StatusBar barStyle="dark-content" />
           <SafeAreaView style={styles.safeArea}>
             <View style={styles.loadingContainer}>
-              <Text style={styles.loadingText}>Loading transaction details...</Text>
+              <LiquidGlassCard variant="frosted" size="lg" elevation="medium">
+                <View style={styles.loadingContent}>
+                  <Ionicons name="hourglass-outline" size={32} color="rgba(0, 0, 0, 0.4)" />
+                  <Text style={styles.loadingText}>Loading transaction...</Text>
+                </View>
+              </LiquidGlassCard>
             </View>
           </SafeAreaView>
-        </LinearGradient>
+        </View>
       </Modal>
     );
   }
@@ -447,333 +449,325 @@ export default function TransactionDetailScreen() {
   if (!transaction) {
     return (
       <Modal visible={true} animationType="slide" presentationStyle="pageSheet">
-        <LinearGradient colors={['#065F46', '#047857', '#059669']} style={styles.container}>
+        <View style={styles.container}>
+          <StatusBar barStyle="dark-content" />
           <SafeAreaView style={styles.safeArea}>
             <View style={styles.errorContainer}>
-              <Text style={styles.errorText}>Transaction not found</Text>
-              <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-                <Text style={styles.backButtonText}>Go Back</Text>
-              </TouchableOpacity>
+              <LiquidGlassCard variant="light" size="xl" elevation="medium">
+                <View style={styles.errorContent}>
+                  <View style={styles.errorIconContainer}>
+                    <Ionicons name="alert-circle-outline" size={40} color="#EF4444" />
+                  </View>
+                  <Text style={styles.errorTitle}>Transaction Not Found</Text>
+                  <Text style={styles.errorDescription}>
+                    This transaction may have been deleted or doesn't exist.
+                  </Text>
+                  <Pressable 
+                    style={({ pressed }) => [styles.errorButton, { opacity: pressed ? 0.9 : 1 }]}
+                    onPress={handleBack}
+                  >
+                    <Ionicons name="arrow-back" size={18} color="#FFFFFF" />
+                    <Text style={styles.errorButtonText}>Go Back</Text>
+                  </Pressable>
+                </View>
+              </LiquidGlassCard>
             </View>
           </SafeAreaView>
-        </LinearGradient>
+        </View>
       </Modal>
     );
   }
 
+  const typeConfig = getTypeConfig(transaction.type);
+  const fundConfig = getFundConfig(fundInfo?.fundType || null);
+
   return (
-    <Modal
-      visible={true}
-      animationType="slide"
-      presentationStyle="pageSheet"
-    >
-      <LinearGradient
-        colors={['#065F46', '#047857', '#059669']}
-        style={styles.container}
-      >
+    <Modal visible={true} animationType="slide" presentationStyle="pageSheet">
+      <View style={styles.container}>
+        <StatusBar barStyle="dark-content" />
         <SafeAreaView style={styles.safeArea}>
-          <ScrollView style={styles.scrollView}>
+          <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
             {/* Header */}
             <View style={styles.header}>
-              <TouchableOpacity style={styles.closeButton} onPress={() => router.back()}>
-                <Ionicons name="close" size={24} color="white" />
-              </TouchableOpacity>
-              <Text style={styles.headerTitle}>Transaction Details</Text>
-                  <TouchableOpacity 
-                      style={styles.editButton}
+              <Pressable 
+                style={({ pressed }) => [styles.headerButton, { opacity: pressed ? 0.7 : 1 }]}
+                onPress={handleBack}
+              >
+                <Ionicons name="chevron-back" size={24} color="#000000" />
+              </Pressable>
+              <Text style={styles.headerTitle}>Transaction</Text>
+              <Pressable 
+                style={({ pressed }) => [styles.headerButton, { opacity: pressed ? 0.7 : 1 }]}
                       onPress={() => setEditModalVisible(true)}
                     >
-                      <Ionicons name="create" size={24} color="white" />
-                    </TouchableOpacity>
+                <Ionicons name="create-outline" size={22} color="#000000" />
+              </Pressable>
             </View>
 
-            {/* Transaction Amount Card */}
-            <View style={styles.amountCard}>
-              <View style={styles.amountHeader}>
-                <View style={[styles.transactionIcon, { backgroundColor: getTransactionColor(transaction?.type || '') + '20' }]}>
+            {/* Hero Amount Card */}
+            <LiquidGlassCard
+              variant="frosted"
+              size="xl"
+              elevation="high"
+              shimmer
+              marginVertical={16}
+            >
+              <View style={styles.heroCard}>
+                {/* Transaction Icon */}
+                <View style={[styles.heroIcon, { backgroundColor: typeConfig.bgColor }]}>
                   <Ionicons 
-                    name={getTransactionIcon(transaction?.type || '', transaction?.category?.name) as any} 
+                    name={getTransactionIcon(transaction.type, transaction.category?.name) as any} 
                     size={32} 
-                    color={getTransactionColor(transaction?.type || '')} 
+                    color={typeConfig.color} 
                   />
-                </View>
-                <View style={styles.amountInfo}>
-                  <Text style={styles.transactionTitle}>{transaction?.description || 'Transaction'}</Text>
-                  <Text style={styles.transactionDate}>{transaction?.date ? formatDate(transaction.date) : 'Unknown Date'}</Text>
-                </View>
               </View>
               
-              <View style={styles.amountSection}>
-                <Text style={styles.amountLabel}>Transaction Amount</Text>
-                <Text style={[
-                  styles.amountValue,
-                  { color: getTransactionColor(transaction?.type || '') }
-                ]}>
-                  {transaction?.type === 'income' ? '+' : transaction?.type === 'expense' ? '-' : ''}{formatCurrency(Math.abs(transaction?.amount || 0))}
+                {/* Amount */}
+                <Text style={[styles.heroAmount, { color: typeConfig.color }]}>
+                  {typeConfig.prefix}{formatCurrency(Math.abs(transaction.amount))}
                 </Text>
-                <Text style={styles.amountCurrency}>{currency}</Text>
-              </View>
-            </View>
 
-            {/* Transaction Information */}
-            <View style={styles.infoCard}>
-              <Text style={styles.sectionTitle}>Transaction Information</Text>
-              
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Description:</Text>
-                <Text style={styles.infoValue}>{transaction?.description || 'No description'}</Text>
+                {/* Type Badge */}
+                <View style={[styles.heroBadge, { backgroundColor: typeConfig.bgColor }]}>
+                  <Text style={[styles.heroBadgeText, { color: typeConfig.color }]}>
+                    {typeConfig.label}
+                  </Text>
               </View>
               
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Category:</Text>
-                <Text style={styles.infoValue}>{transaction?.category?.name || 'Unknown'}</Text>
+                {/* Description */}
+                <Text style={styles.heroDescription}>{transaction.description || 'No description'}</Text>
+                <Text style={styles.heroDate}>{formatDate(transaction.date)}</Text>
               </View>
-              
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Account:</Text>
-                <Text style={styles.infoValue}>{transaction?.account?.name || 'Unknown'}</Text>
-              </View>
-              
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Type:</Text>
-                <Text style={styles.infoValue}>{transaction?.type ? transaction.type.charAt(0).toUpperCase() + transaction.type.slice(1) : 'Unknown'}</Text>
-              </View>
-              
-              {transaction?.reference_number && (
-                <View style={styles.infoRow}>
-                  <Text style={styles.infoLabel}>Reference:</Text>
-                  <Text style={styles.infoValue}>{transaction.reference_number}</Text>
-                </View>
-              )}
-              
-              {transaction?.location && (
-                <View style={styles.infoRow}>
-                  <Text style={styles.infoLabel}>Location:</Text>
-                  <Text style={styles.infoValue}>{transaction.location}</Text>
-                </View>
-              )}
+            </LiquidGlassCard>
 
-              {/* Fund Information */}
+            {/* Quick Info Row */}
+            <View style={styles.quickInfoRow}>
+              <LiquidGlassCard variant="light" size="sm" elevation="low" style={styles.quickInfoCard}>
+                <View style={styles.quickInfoContent}>
+                  <Ionicons name="pricetag-outline" size={16} color="rgba(0, 0, 0, 0.5)" />
+                  <Text style={styles.quickInfoLabel}>Category</Text>
+                  <Text style={styles.quickInfoValue}>{transaction.category?.name || 'Other'}</Text>
+              </View>
+              </LiquidGlassCard>
+
+              <LiquidGlassCard variant="light" size="sm" elevation="low" style={styles.quickInfoCard}>
+                <View style={styles.quickInfoContent}>
+                  <Ionicons name="wallet-outline" size={16} color="rgba(0, 0, 0, 0.5)" />
+                  <Text style={styles.quickInfoLabel}>Account</Text>
+                  <Text style={styles.quickInfoValue}>{transaction.account?.name || 'Unknown'}</Text>
+              </View>
+              </LiquidGlassCard>
+                </View>
+
+            {/* Fund Source */}
               {fundInfo && (
-                <View style={styles.infoRow}>
-                  <Text style={styles.infoLabel}>Fund Source:</Text>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
-                    <Ionicons
-                      name={
-                        fundInfo.fundType === 'personal' ? 'wallet-outline' :
-                        fundInfo.fundType === 'liability' ? 'card-outline' :
-                        fundInfo.fundType === 'goal' ? 'flag-outline' :
-                        'layers-outline'
-                      }
-                      size={16}
-                      color={
-                        fundInfo.fundType === 'personal' ? '#10B981' :
-                        fundInfo.fundType === 'liability' ? '#EF4444' :
-                        fundInfo.fundType === 'goal' ? '#3B82F6' :
-                        '#6B7280'
-                      }
-                      style={{ marginRight: 6 }}
-                    />
-                    <Text style={[
-                      styles.infoValue,
-                      {
-                        color:
-                          fundInfo.fundType === 'personal' ? '#10B981' :
-                          fundInfo.fundType === 'liability' ? '#EF4444' :
-                          fundInfo.fundType === 'goal' ? '#3B82F6' :
-                          '#000000',
-                        flex: 1
-                      }
-                    ]}>
+              <LiquidGlassCard variant="mint" size="md" elevation="low" marginVertical={8}>
+                <View style={styles.fundSourceRow}>
+                  <View style={[styles.fundSourceIcon, { backgroundColor: fundConfig.bgColor }]}>
+                    <Ionicons name={fundConfig.icon as any} size={18} color={fundConfig.color} />
+                  </View>
+                  <View style={styles.fundSourceInfo}>
+                    <Text style={styles.fundSourceLabel}>Fund Source</Text>
+                    <Text style={[styles.fundSourceValue, { color: fundConfig.color }]}>
                       {fundInfo.fundName}
                     </Text>
                   </View>
                 </View>
+              </LiquidGlassCard>
+            )}
+
+            {/* Balance Impact */}
+            <LiquidGlassCard variant="crystal" size="lg" elevation="medium" marginVertical={8}>
+              <View style={styles.sectionHeader}>
+                <Ionicons name="analytics-outline" size={18} color="rgba(0, 0, 0, 0.6)" />
+              <Text style={styles.sectionTitle}>Balance Impact</Text>
+              </View>
+              
+              {beforeBalance !== null && afterBalance !== null ? (
+                <View style={styles.balanceImpact}>
+                  {/* Before */}
+                  <View style={styles.balanceRow}>
+                    <View style={styles.balanceLabel}>
+                      <View style={styles.balanceDot} />
+                      <Text style={styles.balanceLabelText}>Before</Text>
+                    </View>
+                    <Text style={styles.balanceValue}>{formatCurrency(beforeBalance)}</Text>
+                  </View>
+                  
+                  {/* Arrow with Transaction Amount */}
+                  <View style={styles.balanceArrow}>
+                    <View style={styles.balanceArrowLine} />
+                    <View style={[styles.transactionBadge, { backgroundColor: typeConfig.bgColor }]}>
+                      <Text style={[styles.transactionBadgeText, { color: typeConfig.color }]}>
+                        {typeConfig.prefix}{formatCurrency(Math.abs(transaction.amount))}
+                    </Text>
+                    </View>
+                    <View style={styles.balanceArrowLine} />
+                  </View>
+                  
+                  {/* After */}
+                  <View style={styles.balanceRow}>
+                    <View style={styles.balanceLabel}>
+                      <View style={[styles.balanceDot, { backgroundColor: '#10B981' }]} />
+                      <Text style={styles.balanceLabelText}>After</Text>
+                    </View>
+                    <Text style={[styles.balanceValue, styles.balanceValueHighlight]}>
+                      {formatCurrency(afterBalance)}
+                    </Text>
+                  </View>
+                  
+                  {/* Current Balance */}
+                  {currentAccountBalance !== null && (
+                    <View style={styles.currentBalanceSection}>
+                      <View style={styles.currentBalanceRow}>
+                        <Text style={styles.currentBalanceLabel}>Current Account Balance</Text>
+                      <Text style={styles.currentBalanceValue}>{formatCurrency(currentAccountBalance)}</Text>
+                      </View>
+                    </View>
+                  )}
+                        </View>
+              ) : (
+                <View style={styles.balanceUnavailable}>
+                  <Ionicons name="information-circle-outline" size={18} color="rgba(0, 0, 0, 0.4)" />
+                  <Text style={styles.balanceUnavailableText}>Balance information unavailable</Text>
+                      </View>
               )}
+            </LiquidGlassCard>
+
+            {/* Additional Details */}
+            {(transaction.notes || transaction.location || transaction.reference_number) && (
+              <LiquidGlassCard variant="light" size="md" elevation="low" marginVertical={8}>
+                <View style={styles.sectionHeader}>
+                  <Ionicons name="document-text-outline" size={18} color="rgba(0, 0, 0, 0.6)" />
+                  <Text style={styles.sectionTitle}>Additional Details</Text>
+                </View>
+
+                <View style={styles.detailsList}>
+                  {transaction.notes && (
+                    <View style={styles.detailItem}>
+                      <Text style={styles.detailLabel}>Notes</Text>
+                      <Text style={styles.detailValue}>{transaction.notes}</Text>
+                  </View>
+                  )}
+                  {transaction.location && (
+                    <View style={styles.detailItem}>
+                      <Text style={styles.detailLabel}>Location</Text>
+                      <Text style={styles.detailValue}>{transaction.location}</Text>
+                </View>
+              )}
+                  {transaction.reference_number && (
+                    <View style={styles.detailItem}>
+                      <Text style={styles.detailLabel}>Reference</Text>
+                      <Text style={styles.detailValue}>{transaction.reference_number}</Text>
             </View>
+                  )}
+                </View>
+              </LiquidGlassCard>
+            )}
 
             {/* Tags */}
-            {transaction?.tags && transaction.tags.length > 0 && (
-              <View style={styles.infoCard}>
-                <Text style={styles.sectionTitle}>Tags</Text>
+            {transaction.tags && transaction.tags.length > 0 && (
+              <LiquidGlassCard variant="light" size="md" elevation="low" marginVertical={8}>
+                <View style={styles.sectionHeader}>
+                  <Ionicons name="pricetags-outline" size={18} color="rgba(0, 0, 0, 0.6)" />
+                  <Text style={styles.sectionTitle}>Tags</Text>
+                </View>
                 <View style={styles.tagsContainer}>
                   {transaction.tags.map((tag, index) => (
                     <View key={index} style={styles.tag}>
+                      <Ionicons name="bookmark" size={12} color="#10B981" />
                       <Text style={styles.tagText}>{tag}</Text>
                     </View>
                   ))}
                 </View>
-              </View>
+              </LiquidGlassCard>
             )}
 
-            {/* Balance Impact */}
-            <View style={styles.infoCard}>
-              <Text style={styles.sectionTitle}>Balance Impact</Text>
-              
-              {beforeBalance !== null && afterBalance !== null ? (
-                <>
-                  <View style={styles.balanceRow}>
-                    <Text style={styles.balanceLabel}>Before (at time of transaction):</Text>
-                    <Text style={styles.balanceValue}>{formatCurrency(beforeBalance)}</Text>
-                  </View>
-                  
-                  <View style={styles.balanceRow}>
-                    <Text style={styles.balanceLabel}>Transaction:</Text>
-                    <Text style={[
-                      styles.balanceValue,
-                      { color: getTransactionColor(transaction?.type || '') }
-                    ]}>
-                      {transaction?.type === 'income' ? '+' : transaction?.type === 'expense' ? '-' : ''}{formatCurrency(Math.abs(transaction?.amount || 0))}
-                    </Text>
-                  </View>
-                  
-                  <View style={styles.balanceRow}>
-                    <Text style={styles.balanceLabel}>After (at time of transaction):</Text>
-                    <Text style={[styles.balanceValue, styles.afterBalanceValue]}>{formatCurrency(afterBalance)}</Text>
-                  </View>
-                  
-                  {currentAccountBalance !== null && (
-                    <View style={[styles.balanceRow, styles.currentBalanceRow]}>
-                      <Text style={styles.currentBalanceLabel}>Current Account Balance:</Text>
-                      <Text style={styles.currentBalanceValue}>{formatCurrency(currentAccountBalance)}</Text>
-                    </View>
-                  )}
-
-                  {/* Fund Balance Impact */}
-                  {fundInfo && fundInfo.fundType !== 'personal' && transaction?.account_id && (
-                    <>
-                      <View style={{ marginTop: 20, paddingTop: 20, borderTopWidth: 1, borderTopColor: 'rgba(255, 255, 255, 0.1)' }}>
-                        <Text style={[styles.sectionTitle, { fontSize: 14, marginBottom: 12 }]}>
-                          {fundInfo.fundName} Balance Impact
-                        </Text>
-                        <View style={styles.balanceRow}>
-                          <Text style={styles.balanceLabel}>Fund Balance Changed:</Text>
-                          <Text style={[
-                            styles.balanceValue,
-                            { 
-                              color: transaction?.type === 'expense' ? '#EF4444' : '#10B981',
-                              fontSize: 16,
-                              fontWeight: '600'
-                            }
-                          ]}>
-                            {transaction?.type === 'expense' ? '-' : '+'}{formatCurrency(Math.abs(transaction?.amount || 0))}
-                          </Text>
-                        </View>
-                        <Text style={{ marginTop: 8, fontSize: 12, color: '#9CA3AF', lineHeight: 16 }}>
-                          {transaction?.type === 'expense' 
-                            ? (fundInfo.fundType === 'liability' 
-                              ? 'Amount deducted from liability fund' 
-                              : 'Amount deducted from goal fund')
-                            : (fundInfo.fundType === 'liability' 
-                              ? 'Amount added to liability fund' 
-                              : 'Amount added to goal fund')}
-                        </Text>
-                      </View>
-                    </>
-                  )}
-                  
-                  {/* Verify calculation */}
-                  <View style={styles.verificationNote}>
-                    <Ionicons name="information-circle" size={16} color="#9CA3AF" />
-                    <Text style={styles.verificationText}>
-                      {(() => {
-                        // Calculate expected after balance based on transaction type
-                        const transactionAmount = Number(transaction?.amount || 0);
-                        const expectedAfterBalance = transaction?.type === 'expense' 
-                          ? beforeBalance - Math.abs(transactionAmount)
-                          : transaction?.type === 'income'
-                          ? beforeBalance + Math.abs(transactionAmount)
-                          : beforeBalance;
-                        
-                        const isVerified = Math.abs(afterBalance - expectedAfterBalance) < 0.01;
-                        const currentMatchesAfter = currentAccountBalance !== null && Math.abs(currentAccountBalance - afterBalance) < 0.01;
-                        
-                        if (isVerified && currentMatchesAfter) {
-                          return 'Balance calculation verified ✓';
-                        } else if (isVerified && !currentMatchesAfter) {
-                          return `Balance at transaction time verified ✓. Current balance may differ due to subsequent transactions.`;
-                        } else {
-                          return 'Note: Balance shown reflects the account state at the time of this transaction';
-                        }
-                      })()}
-                    </Text>
-                  </View>
-                </>
-              ) : (
-                <View style={styles.balanceRow}>
-                  <Text style={styles.balanceLabel}>Unable to calculate balance impact</Text>
-                </View>
-              )}
-            </View>
-
             {/* Daily Activity */}
-            <View style={styles.infoCard}>
-              <Text style={styles.sectionTitle}>Daily Activity</Text>
+            <LiquidGlassCard variant="light" size="md" elevation="low" marginVertical={8}>
               <View style={styles.dailyActivity}>
+                <View style={styles.dailyActivityIcon}>
                 <Ionicons name="calendar" size={20} color="#3B82F6" />
-                <View style={styles.dailyInfo}>
-                  <Text style={styles.dailyText}>
-                    {dailyTransactionCount} transactions on {transaction?.date ? formatDate(transaction.date) : 'Unknown Date'}
+                </View>
+                <View style={styles.dailyActivityInfo}>
+                  <Text style={styles.dailyActivityCount}>
+                    {dailyTransactionCount} transaction{dailyTransactionCount !== 1 ? 's' : ''} on this day
                   </Text>
-                  <Text style={styles.dailySubtext}>
-                    {dailyTransactionCount > 1 ? `You had ${dailyTransactionCount} transactions this day` : 'This was your only transaction this day'}
+                  <Text style={styles.dailyActivitySubtext}>
+                    {dailyTransactionCount > 1 
+                      ? `You had ${dailyTransactionCount} transactions on ${formatDate(transaction.date)}`
+                      : 'This was your only transaction this day'}
                   </Text>
                 </View>
               </View>
-            </View>
+            </LiquidGlassCard>
 
                 {/* Action Buttons */}
                 <View style={styles.actionButtons}>
-                  <TouchableOpacity 
-                      style={[styles.actionButton, { backgroundColor: '#3B82F6' }]}
+              <Pressable 
+                style={({ pressed }) => [styles.actionButton, styles.actionButtonPrimary, { opacity: pressed ? 0.9 : 1 }]}
                       onPress={() => setEditModalVisible(true)}
                     >
-                      <Ionicons name="create" size={20} color="white" />
-                      <Text style={styles.actionText}>Edit Transaction</Text>
-                    </TouchableOpacity>
+                <Ionicons name="create-outline" size={18} color="#FFFFFF" />
+                <Text style={styles.actionButtonTextPrimary}>Edit</Text>
+              </Pressable>
                   
-                  <TouchableOpacity style={[styles.actionButton, { backgroundColor: '#8B5CF6' }]}>
-                    <Ionicons name="copy" size={20} color="white" />
-                    <Text style={styles.actionText}>Duplicate</Text>
-                  </TouchableOpacity>
+              <Pressable 
+                style={({ pressed }) => [styles.actionButton, styles.actionButtonSecondary, { opacity: pressed ? 0.9 : 1 }]}
+              >
+                <Ionicons name="copy-outline" size={18} color="#000000" />
+                <Text style={styles.actionButtonTextSecondary}>Duplicate</Text>
+              </Pressable>
                   
-                  <TouchableOpacity style={[styles.actionButton, { backgroundColor: '#EF4444' }]}>
-                    <Ionicons name="trash" size={20} color="white" />
-                    <Text style={styles.actionText}>Delete</Text>
-                  </TouchableOpacity>
+              <Pressable 
+                style={({ pressed }) => [styles.actionButton, styles.actionButtonDanger, { opacity: pressed ? 0.9 : 1 }]}
+              >
+                <Ionicons name="trash-outline" size={18} color="#EF4444" />
+                <Text style={styles.actionButtonTextDanger}>Delete</Text>
+              </Pressable>
                 </View>
 
             {/* Related Transactions */}
             {relatedTransactions.length > 0 && (
-              <View style={styles.infoCard}>
+              <LiquidGlassCard variant="light" size="md" elevation="low" marginVertical={8}>
+                <View style={styles.sectionHeader}>
+                  <Ionicons name="git-branch-outline" size={18} color="rgba(0, 0, 0, 0.6)" />
                 <Text style={styles.sectionTitle}>Related Transactions</Text>
-                <View style={styles.relatedTransactions}>
-                  {relatedTransactions.map((relatedTransaction) => (
-                    <TouchableOpacity 
-                      key={relatedTransaction.id} 
-                      style={styles.relatedItem}
-                      onPress={() => router.push(`/transaction/${relatedTransaction.id}`)}
-                    >
-                      <Ionicons 
-                        name={getTransactionIcon(relatedTransaction.type, relatedTransaction.category?.name) as any} 
-                        size={20} 
-                        color={getTransactionColor(relatedTransaction.type)} 
-                      />
-                      <View style={styles.relatedInfo}>
-                        <Text style={styles.relatedTitle}>{relatedTransaction.description}</Text>
-                        <Text style={styles.relatedDate}>{formatDate(relatedTransaction.date)}</Text>
-                      </View>
-                      <Text style={[
-                        styles.relatedAmount,
-                        { color: getTransactionColor(relatedTransaction.type) }
-                      ]}>
-                        {relatedTransaction.type === 'income' ? '+' : relatedTransaction.type === 'expense' ? '-' : ''}{formatCurrency(Math.abs(relatedTransaction.amount))}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
                 </View>
-              </View>
+
+                <View style={styles.relatedList}>
+                  {relatedTransactions.map((relatedTxn) => {
+                    const relatedConfig = getTypeConfig(relatedTxn.type);
+                    return (
+                      <Pressable 
+                        key={relatedTxn.id} 
+                        style={({ pressed }) => [styles.relatedItem, { opacity: pressed ? 0.8 : 1 }]}
+                        onPress={() => router.push(`/transaction/${relatedTxn.id}`)}
+                      >
+                        <View style={[styles.relatedIcon, { backgroundColor: relatedConfig.bgColor }]}>
+                      <Ionicons 
+                            name={getTransactionIcon(relatedTxn.type, relatedTxn.category?.name) as any} 
+                            size={16} 
+                            color={relatedConfig.color} 
+                      />
+                        </View>
+                      <View style={styles.relatedInfo}>
+                          <Text style={styles.relatedDescription}>{relatedTxn.description}</Text>
+                          <Text style={styles.relatedCategory}>{relatedTxn.category?.name || 'Other'}</Text>
+                      </View>
+                        <Text style={[styles.relatedAmount, { color: relatedConfig.color }]}>
+                          {relatedConfig.prefix}{formatCurrency(Math.abs(relatedTxn.amount))}
+                      </Text>
+                        <Ionicons name="chevron-forward" size={16} color="rgba(0, 0, 0, 0.3)" />
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </LiquidGlassCard>
             )}
+
+            {/* Bottom Spacing */}
+            <View style={{ height: 40 }} />
           </ScrollView>
         </SafeAreaView>
 
@@ -786,7 +780,7 @@ export default function TransactionDetailScreen() {
             fetchTransactionDetails();
           }}
         />
-      </LinearGradient>
+      </View>
     </Modal>
   );
 }
@@ -794,6 +788,7 @@ export default function TransactionDetailScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   safeArea: {
     flex: 1,
@@ -802,297 +797,456 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 20,
   },
+  // Header
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingTop: 20,
-    paddingBottom: 30,
+    paddingVertical: 12,
   },
-  closeButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 12,
+  headerButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   headerTitle: {
-    fontSize: 20,
-    color: 'white',
-    fontWeight: 'bold',
+    fontSize: 17,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
   },
-  editButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 12,
-  },
-  amountCard: {
-    backgroundColor: '#000000',
-    borderRadius: 20,
-    padding: 24,
-    marginBottom: 20,
-  },
-  amountHeader: {
-    flexDirection: 'row',
+  // Hero Card
+  heroCard: {
     alignItems: 'center',
-    marginBottom: 20,
+    paddingVertical: 12,
   },
-  transactionIcon: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
+  heroIcon: {
+    width: 72,
+    height: 72,
+    borderRadius: 24,
+    alignItems: 'center',
     justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
+    marginBottom: 20,
   },
-  amountInfo: {
+  heroAmount: {
+    fontSize: 40,
+    fontFamily: 'Poppins-Bold',
+    fontWeight: '700',
+    letterSpacing: -1,
+    marginBottom: 12,
+  },
+  heroBadge: {
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    borderRadius: 12,
+    marginBottom: 16,
+  },
+  heroBadgeText: {
+    fontSize: 12,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  heroDescription: {
+    fontSize: 17,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 4,
+    textAlign: 'center',
+  },
+  heroDate: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+  },
+  // Quick Info
+  quickInfoRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginVertical: 8,
+  },
+  quickInfoCard: {
     flex: 1,
   },
-  transactionTitle: {
-    fontSize: 20,
-    color: 'white',
-    fontWeight: 'bold',
-    marginBottom: 4,
+  quickInfoContent: {
+    alignItems: 'center',
+    gap: 6,
   },
-  transactionDate: {
+  quickInfoLabel: {
+    fontSize: 11,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.45)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  quickInfoValue: {
     fontSize: 14,
-    color: '#9CA3AF',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    textAlign: 'center',
   },
-  amountSection: {
+  // Fund Source
+  fundSourceRow: {
+    flexDirection: 'row',
     alignItems: 'center',
   },
-  amountLabel: {
-    fontSize: 16,
-    color: 'white',
-    fontFamily: 'serif',
-    marginBottom: 8,
+  fundSourceIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
   },
-  amountValue: {
-    fontSize: 36,
-    color: 'white',
-    fontFamily: 'serif',
-    fontWeight: 'bold',
-    marginBottom: 8,
+  fundSourceInfo: {
+    flex: 1,
   },
-  amountCurrency: {
-    fontSize: 14,
-    color: '#9CA3AF',
+  fundSourceLabel: {
+    fontSize: 12,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginBottom: 2,
   },
-  infoCard: {
-    backgroundColor: '#000000',
-    borderRadius: 16,
-    padding: 20,
+  fundSourceValue: {
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+  },
+  // Section
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
     marginBottom: 16,
   },
   sectionTitle: {
-    fontSize: 18,
-    color: 'white',
-    fontWeight: 'bold',
-    marginBottom: 16,
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: 'rgba(0, 0, 0, 0.7)',
   },
-  infoRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
-  },
-  infoLabel: {
-    fontSize: 14,
-    color: '#9CA3AF',
-    flex: 1,
-  },
-  infoValue: {
-    fontSize: 14,
-    color: 'white',
-    fontWeight: 'bold',
-    flex: 2,
-    textAlign: 'right',
-  },
-  tagsContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginTop: 8,
-  },
-  tag: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    borderRadius: 16,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    marginRight: 8,
-    marginBottom: 8,
-  },
-  tagText: {
-    color: '#10B981',
-    fontSize: 12,
-    fontWeight: 'bold',
+  // Balance Impact
+  balanceImpact: {
+    gap: 8,
   },
   balanceRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
+    justifyContent: 'space-between',
     paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
-  },
-  balanceRowFinal: {
-    borderBottomWidth: 0,
-    backgroundColor: 'rgba(16, 185, 129, 0.1)',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    marginTop: 8,
-  },
-  currentBalanceRow: {
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.2)',
-    marginTop: 12,
-    paddingTop: 12,
-    backgroundColor: 'rgba(59, 130, 246, 0.1)',
-    borderRadius: 8,
-    paddingHorizontal: 12,
   },
   balanceLabel: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  balanceDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+  },
+  balanceLabelText: {
     fontSize: 14,
-    color: '#9CA3AF',
-    flex: 1,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.6)',
   },
   balanceValue: {
     fontSize: 16,
-    color: 'white',
-    fontWeight: 'bold',
-    flex: 1,
-    textAlign: 'right',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
   },
-  afterBalanceValue: {
-    fontSize: 18,
+  balanceValueHighlight: {
     color: '#10B981',
-    fontWeight: 'bold',
+    fontSize: 18,
+  },
+  balanceArrow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  balanceArrowLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.1)',
+  },
+  transactionBadge: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    marginHorizontal: 12,
+  },
+  transactionBadgeText: {
+    fontSize: 13,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+  },
+  currentBalanceSection: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0, 0, 0, 0.06)',
+  },
+  currentBalanceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(59, 130, 246, 0.08)',
+    padding: 12,
+    borderRadius: 12,
   },
   currentBalanceLabel: {
-    fontSize: 14,
+    fontSize: 13,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
     color: '#3B82F6',
-    fontWeight: '600',
-    flex: 1,
   },
   currentBalanceValue: {
-    fontSize: 18,
+    fontSize: 16,
+    fontFamily: 'Poppins-Bold',
+    fontWeight: '700',
     color: '#3B82F6',
-    fontWeight: 'bold',
-    flex: 1,
-    textAlign: 'right',
   },
-  verificationNote: {
+  balanceUnavailable: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    marginTop: 12,
+    alignItems: 'center',
+    gap: 8,
     padding: 12,
-    backgroundColor: 'rgba(156, 163, 175, 0.1)',
-    borderRadius: 8,
+    backgroundColor: 'rgba(0, 0, 0, 0.04)',
+    borderRadius: 12,
+  },
+  balanceUnavailableText: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+  },
+  // Details
+  detailsList: {
+    gap: 12,
+  },
+  detailItem: {
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  detailLabel: {
+    fontSize: 12,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: 'rgba(0, 0, 0, 0.45)',
+    marginBottom: 4,
+  },
+  detailValue: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
+    lineHeight: 20,
+  },
+  // Tags
+  tagsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 8,
   },
-  verificationText: {
-    flex: 1,
-    fontSize: 12,
-    color: '#9CA3AF',
-    lineHeight: 16,
+  tag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.1)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    gap: 6,
   },
+  tagText: {
+    fontSize: 13,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: '#10B981',
+  },
+  // Daily Activity
   dailyActivity: {
     flexDirection: 'row',
     alignItems: 'center',
   },
-  dailyInfo: {
-    marginLeft: 12,
+  dailyActivityIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: 'rgba(59, 130, 246, 0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  dailyActivityInfo: {
     flex: 1,
   },
-  dailyText: {
-    fontSize: 16,
-    color: 'white',
-    fontWeight: 'bold',
-    marginBottom: 4,
+  dailyActivityCount: {
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+    marginBottom: 2,
   },
-  dailySubtext: {
-    fontSize: 12,
-    color: '#9CA3AF',
+  dailyActivitySubtext: {
+    fontSize: 13,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
   },
+  // Action Buttons
   actionButtons: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 20,
+    gap: 10,
+    marginVertical: 20,
   },
   actionButton: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 12,
-    flex: 1,
-    marginHorizontal: 4,
     justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 14,
+    gap: 6,
   },
-  actionText: {
-    color: 'white',
-    marginLeft: 8,
-    fontSize: 12,
-    fontWeight: 'bold',
+  actionButtonPrimary: {
+    backgroundColor: '#000000',
   },
-  relatedTransactions: {
-    marginTop: 8,
+  actionButtonSecondary: {
+    backgroundColor: 'rgba(0, 0, 0, 0.06)',
+  },
+  actionButtonDanger: {
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+  },
+  actionButtonTextPrimary: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  actionButtonTextSecondary: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#000000',
+  },
+  actionButtonTextDanger: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#EF4444',
+  },
+  // Related Transactions
+  relatedList: {
+    gap: 8,
   },
   relatedItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255, 255, 255, 0.1)',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.03)',
+    borderRadius: 12,
+  },
+  relatedIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
   },
   relatedInfo: {
     flex: 1,
-    marginLeft: 12,
   },
-  relatedTitle: {
-    fontSize: 16,
-    color: 'white',
-    fontWeight: 'bold',
-    marginBottom: 4,
+  relatedDescription: {
+    fontSize: 14,
+    fontFamily: 'Poppins-Medium',
+    fontWeight: '500',
+    color: '#000000',
+    marginBottom: 2,
   },
-  relatedDate: {
+  relatedCategory: {
     fontSize: 12,
-    color: '#9CA3AF',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
   },
   relatedAmount: {
-    fontSize: 16,
-    color: '#EF4444',
-    fontWeight: 'bold',
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    marginRight: 8,
   },
+  // Loading & Error States
   loadingContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    padding: 20,
+  },
+  loadingContent: {
+    alignItems: 'center',
+    gap: 16,
   },
   loadingText: {
-    fontSize: 16,
-    color: 'rgba(255,255,255,0.7)',
+    fontSize: 15,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.6)',
   },
   errorContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 20,
+    padding: 20,
   },
-  errorText: {
+  errorContent: {
+    alignItems: 'center',
+    gap: 12,
+  },
+  errorIconContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 24,
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  errorTitle: {
     fontSize: 18,
-    color: 'white',
-    marginBottom: 20,
-    textAlign: 'center',
-  },
-  backButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-  },
-  backButtonText: {
-    color: 'white',
-    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
+    color: '#000000',
+  },
+  errorDescription: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  errorButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#000000',
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderRadius: 14,
+    gap: 8,
+    marginTop: 8,
+  },
+  errorButtonText: {
+    fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
 });

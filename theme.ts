@@ -11,6 +11,8 @@ export type BackgroundMode = typeof BACKGROUND_MODES[keyof typeof BACKGROUND_MOD
 // Type definitions for better TypeScript support
 export interface ThemeColors {
   background: string;
+  backgroundOlive: string;
+  backgroundBlack: string;
   cardBackground: string;
   glassBackground: string;
   glassBorder: string;
@@ -42,6 +44,7 @@ export interface ThemeTypography {
   bodySecondary: TextStyle;
   currency: TextStyle;
   currencyLarge: TextStyle;
+  currencyDashboard: TextStyle;
   caption: TextStyle;
   crazyText: TextStyle;
   glassTitle: TextStyle;
@@ -89,9 +92,11 @@ export interface ThemeBlurIntensity {
 
 export const theme = {
   colors: {
-    // App Foundation
-    background: '#99D795', // Light Moss Green - global app background
-    cardBackground: '#121212', // Wallet, Bank, and Card containers
+    // App Foundation - White, Olive Green, Black Palette
+    background: '#FFFFFF', // White - primary app background
+    backgroundOlive: '#6B8E23', // Olive Green - secondary background option
+    backgroundBlack: '#000000', // Black - accent backgrounds
+    cardBackground: '#000000', // Black - Wallet, Bank, and Card containers
     
     // iOS Glassmorphism Colors - Enhanced for better blur effects
     glassBackground: 'rgba(255, 255, 255, 0.08)',
@@ -120,7 +125,7 @@ export const theme = {
     warning: '#F5A623', // Alerts, low-balance warnings
     
     // Status Bar
-    statusBar: '#99D795',
+    statusBar: '#FFFFFF', // White status bar to match background
   } as ThemeColors,
   
   typography: {
@@ -182,9 +187,13 @@ export const theme = {
       letterSpacing: 0.1,
     },
     
-    // Financial Data (System fonts - 16px - white - bold)
+    // Financial Data - All numbers use Instrument Sans
     currency: {
-      fontFamily: Platform.OS === 'ios' ? 'System' : 'sans-serif',
+      fontFamily: Platform.select({
+        ios: 'InstrumentSans-Bold',
+        android: 'InstrumentSans-Bold',
+        default: 'InstrumentSans-Bold',
+      }) || 'System',
       fontSize: 16,
       fontWeight: '700',
       color: '#FFFFFF',
@@ -193,12 +202,30 @@ export const theme = {
     },
     
     currencyLarge: {
-      fontFamily: Platform.OS === 'ios' ? 'System' : 'sans-serif',
+      fontFamily: Platform.select({
+        ios: 'InstrumentSans-Bold',
+        android: 'InstrumentSans-Bold',
+        default: 'InstrumentSans-Bold',
+      }) || 'System',
       fontSize: 24,
       fontWeight: '700',
       color: '#00B37E',
       lineHeight: 30,
       letterSpacing: 0.3,
+    },
+    
+    // Dashboard Numbers - ExtraBold weight
+    currencyDashboard: {
+      fontFamily: Platform.select({
+        ios: 'InstrumentSans-ExtraBold',
+        android: 'InstrumentSans-ExtraBold',
+        default: 'InstrumentSans-ExtraBold',
+      }) || 'System',
+      fontSize: 64,
+      fontWeight: '800',
+      color: '#FFFFFF',
+      lineHeight: 72,
+      letterSpacing: -1.5,
     },
     
     // Small Text

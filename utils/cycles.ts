@@ -7,9 +7,12 @@
 import { Transaction } from '@/types';
 import { calculateNextOccurrence } from './recurrence';
 import { RecurrenceDefinition } from '@/types/recurrence';
+import { resolveFrequencyWithCustom } from './frequency';
 
 export type CycleStatus = 
   | 'paid_on_time' 
+  | 'paid_early'
+  | 'paid_within_window'
   | 'paid_late' 
   | 'underpaid' 
   | 'overpaid' 
@@ -17,18 +20,50 @@ export type CycleStatus =
   | 'upcoming'
   | 'partial';
 
+/**
+ * Scheduled bill information attached to a cycle (for liabilities)
+ */
+export interface ScheduledBill {
+  id: string;
+  amount: number;
+  dueDate: string;
+  status: string;
+  title: string;
+}
+
+export interface CycleBill {
+  id: string;
+  title: string;
+  dueDate: string;
+  status: string;
+  amount: number;
+  totalAmount?: number | null;
+}
+
 export interface Cycle {
   cycleNumber: number;
   startDate: string; // ISO date string
   endDate: string; // ISO date string
   expectedAmount: number;
+  minimumAmount?: number; // Optional minimum required payment
   expectedDate: string; // The due date within this cycle
   actualAmount: number;
   actualDate?: string;
+  lastPaymentDate?: string;
+  paymentCount?: number;
+  timingStatus?: 'early' | 'on_time' | 'within_window' | 'late' | 'none';
+  isWithinWindow?: boolean; // True if payment was within tolerance window
+  daysFromDue?: number; // Days from due date (negative = early, positive = late)
+  amountStatus?: 'over' | 'target' | 'partial' | 'below_minimum' | 'minimum_met' | 'none';
+  statusLabel?: string;
   status: CycleStatus;
   transactions: Transaction[];
   notes?: string;
+  // Pricing/phase metadata for recurring items
+  phaseLabel?: string;
+  prorated?: boolean;
   daysLate?: number; // Only for late payments
+  daysEarly?: number; // Only for early payments
   amountShort?: number; // Only for underpaid
   amountOver?: number; // Only for overpaid
   // Interest breakdown (for liabilities)
@@ -38,6 +73,10 @@ export interface Cycle {
   // Actual interest and principal paid (from payment records)
   actualInterest?: number;
   actualPrincipal?: number;
+  // Scheduled bill (for liabilities - shows planned payment before execution)
+  scheduledBill?: ScheduledBill;
+  // All bills linked to this cycle (liabilities)
+  bills?: CycleBill[];
 }
 
 export interface CycleGenerationOptions {
@@ -45,7 +84,7 @@ export interface CycleGenerationOptions {
   endDate?: string | null; // ISO date string (activity end date, null = ongoing)
   frequency: 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'yearly' | 'custom';
   interval: number; // e.g., 1 for monthly, 2 for bi-weekly
-  customUnit?: 'day' | 'week' | 'month' | 'quarter' | 'year';
+  customUnit?: 'day' | 'days' | 'week' | 'weeks' | 'month' | 'months' | 'quarter' | 'quarters' | 'year' | 'years';
   dueDay?: number; // Day of month/week for payment (e.g., 2nd of month)
   amount: number; // Expected amount per cycle
   maxCycles?: number; // Limit number of cycles to generate (default: 12)
@@ -57,9 +96,15 @@ export interface CycleGenerationOptions {
 }
 
 export interface TransactionMatchOptions {
-  tolerance: number; // Days tolerance for matching (default: 2)
-  amountTolerance: number; // Percentage tolerance for amount (default: 0.01 = 1%)
+  tolerance: number; // Days tolerance for matching and on-time window (default: 2)
+  amountTolerance: number; // Percentage tolerance for expected vs actual (default: 0.01 = 1%)
 }
+
+/**
+ * Default tolerance values for liability cycles
+ */
+export const DEFAULT_LIABILITY_TOLERANCE_DAYS = 7; // ±7 days window for matching payments
+export const DEFAULT_LIABILITY_AMOUNT_TOLERANCE = 0.01; // 1% tolerance for amount matching
 
 /**
  * Generate cycles for an activity
@@ -100,6 +145,9 @@ export function generateCycles(options: CycleGenerationOptions): Cycle[] {
   let currentBalance = startingBalance || 0;
   const hasInterest = interestRate !== undefined && interestRate > 0 && startingBalance !== undefined && startingBalance > 0;
 
+  // Resolve effective frequency (handles custom unit)
+  const actualFrequency = resolveFrequencyWithCustom(frequency, customUnit);
+
   // Calculate period rate based on frequency
   let periodRate = 0;
   if (hasInterest) {
@@ -110,12 +158,12 @@ export function generateCycles(options: CycleGenerationOptions): Cycle[] {
       quarterly: 4,
       yearly: 1,
     };
-    const periods = periodsPerYear[frequency] || 12;
+    const periods = periodsPerYear[actualFrequency] || 12;
     periodRate = (interestRate || 0) / 100 / periods;
   }
 
   while (count < maxCycles) {
-    const cycleEnd = calculateCycleEnd(cycleStart, frequency, interval, customUnit);
+    const cycleEnd = calculateCycleEnd(cycleStart, actualFrequency, interval);
     
     // Check if we've passed the end date
     if (end && cycleStart > end) {
@@ -123,7 +171,7 @@ export function generateCycles(options: CycleGenerationOptions): Cycle[] {
     }
 
     // Calculate expected payment date within this cycle
-    const expectedDate = calculateExpectedDate(cycleStart, cycleEnd, dueDay, frequency);
+    const expectedDate = calculateExpectedDate(cycleStart, cycleEnd, dueDay, actualFrequency);
     
     // Determine if this cycle is in the past, present, or future
     const cycleEndDate = new Date(cycleEnd);
@@ -172,7 +220,22 @@ export function generateCycles(options: CycleGenerationOptions): Cycle[] {
       }),
     };
 
-    cycles.push(cycle);
+    // Check for duplicate before adding
+    const isDuplicate = cycles.some(c => 
+      c.cycleNumber === cycleNumber &&
+      c.startDate === formatDate(cycleStart) &&
+      c.endDate === formatDate(cycleEnd)
+    );
+
+    if (!isDuplicate) {
+      cycles.push(cycle);
+    } else {
+      console.warn('Duplicate cycle detected during generation:', {
+        cycleNumber,
+        startDate: formatDate(cycleStart),
+        endDate: formatDate(cycleEnd),
+      });
+    }
 
     // Move to next cycle
     cycleStart = new Date(cycleEnd);
@@ -206,14 +269,12 @@ export function generateCycles(options: CycleGenerationOptions): Cycle[] {
 function calculateCycleEnd(
   startDate: Date,
   frequency: string,
-  interval: number,
-  customUnit?: string
+  interval: number
 ): Date {
   const endDate = new Date(startDate);
-  const actualFrequency = frequency === 'custom' ? customUnit! : frequency;
   const actualInterval = interval;
 
-  switch (actualFrequency) {
+  switch (frequency) {
     case 'daily':
       endDate.setDate(startDate.getDate() + actualInterval - 1);
       break;
@@ -312,10 +373,28 @@ function calculateExpectedDate(
 }
 
 /**
- * Match transactions to cycles and determine status
+ * Match transactions to cycles and determine status.
+ * 
+ * MATCHING LOGIC:
+ * - Transactions are matched to cycles if their date falls within:
+ *   [cycle.startDate - tolerance, cycle.endDate + tolerance]
+ * - This allows early payments (before cycle starts) and late payments (after cycle ends)
+ * - Multiple payments can match to the same cycle (all are aggregated)
+ * - Amount tolerance (default 1%) is used for status determination, not matching
+ * 
+ * MULTIPLE PAYMENTS HANDLING:
+ * - All payments within the tolerance window are matched to the cycle
+ * - Amounts are summed together
+ * - Earliest payment date is used for timeliness status check
+ * - Interest/principal components are summed from all payments
+ * 
+ * TOLERANCE DEFAULTS:
+ * - Date tolerance: 7 days for liabilities (DEFAULT_LIABILITY_TOLERANCE_DAYS)
+ * - Amount tolerance: 1% (0.01) for rounding differences
+ * 
  * @param cycles Array of cycles
  * @param transactions Array of transactions
- * @param options Matching options
+ * @param options Matching options with tolerance and amountTolerance
  * @returns Updated cycles with matched transactions and status
  */
 export function matchTransactionsToCycles(
@@ -326,41 +405,45 @@ export function matchTransactionsToCycles(
   const { tolerance = 2, amountTolerance = 0.01 } = options;
 
   return cycles.map((cycle) => {
-    // Find transactions that fall within this cycle's date range
+    // Find transactions that fall within the cycle window, allowing early/late by tolerance days
     const cycleTransactions = transactions.filter((tx) => {
       const txDate = new Date(tx.date);
       const cycleStart = new Date(cycle.startDate);
       const cycleEnd = new Date(cycle.endDate);
+
+      // If transaction explicitly carries cycle_number, honor it
+      const txCycleNumber = (tx as any)?.metadata?.cycle_number;
+      if (typeof txCycleNumber === 'number' && txCycleNumber === cycle.cycleNumber) {
+        return true;
+      }
+
+      // Extend window by tolerance on both sides to allow early/late payments
+      const windowStart = new Date(cycleStart);
+      windowStart.setDate(windowStart.getDate() - tolerance);
+      const windowEnd = new Date(cycleEnd);
+      windowEnd.setDate(windowEnd.getDate() + tolerance);
       
       // Reset times for date-only comparison
       txDate.setHours(0, 0, 0, 0);
-      cycleStart.setHours(0, 0, 0, 0);
-      cycleEnd.setHours(0, 0, 0, 0);
+      windowStart.setHours(0, 0, 0, 0);
+      windowEnd.setHours(0, 0, 0, 0);
 
-      return txDate >= cycleStart && txDate <= cycleEnd;
+      return txDate >= windowStart && txDate <= windowEnd;
     });
 
-    if (cycleTransactions.length === 0) {
-      // No transactions found
-      return {
-        ...cycle,
-        status: determineCycleStatus(cycle, 0, undefined),
-        actualAmount: 0,
-        transactions: [],
-      };
-    }
+    // Sort transactions by date
+    const sortedTx = [...cycleTransactions].sort(
+      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+    );
 
     // Sum up all transaction amounts
-    const totalAmount = cycleTransactions.reduce(
-      (sum, tx) => sum + Math.abs(tx.amount),
-      0
-    );
+    const totalAmount = sortedTx.reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
 
     // Calculate actual interest and principal from payment metadata
     let actualInterest = 0;
     let actualPrincipal = 0;
     
-    cycleTransactions.forEach((tx) => {
+    sortedTx.forEach((tx) => {
       // Extract interest and principal from metadata if available (from liability_payments)
       if (tx.metadata) {
         const interest = typeof tx.metadata.interest === 'number' ? tx.metadata.interest : 
@@ -396,22 +479,29 @@ export function matchTransactionsToCycles(
       }
     }
 
-    // Find the date of the last/most relevant transaction
-    const latestTx = cycleTransactions.reduce((latest, tx) =>
-      new Date(tx.date) > new Date(latest.date) ? tx : latest
+    const firstTx = sortedTx[0];
+    const lastTx = sortedTx[sortedTx.length - 1];
+    const actualDate = firstTx?.date;
+    const lastPaymentDate = lastTx?.date;
+
+    const statusInfo = buildCycleStatus(
+      cycle,
+      {
+        totalAmount,
+        paymentCount: sortedTx.length,
+        firstPaymentDate: actualDate,
+        lastPaymentDate,
+      },
+      { tolerance, amountTolerance }
     );
-
-    const actualDate = latestTx.date;
-    const status = determineCycleStatus(cycle, totalAmount, actualDate);
-
-    // Calculate additional status information
-    const statusInfo = calculateStatusInfo(cycle, totalAmount, actualDate, tolerance);
 
     return {
       ...cycle,
       actualAmount: totalAmount,
       actualDate,
-      status,
+      lastPaymentDate,
+      paymentCount: sortedTx.length,
+      status: statusInfo.status,
       transactions: cycleTransactions,
       // Add actual interest and principal if calculated
       ...(actualInterest > 0 || actualPrincipal > 0 ? {
@@ -423,130 +513,222 @@ export function matchTransactionsToCycles(
   });
 }
 
-/**
- * Determine the status of a cycle based on payment
- * @param cycle Cycle information
- * @param actualAmount Actual amount paid
- * @param actualDate Date of payment
- * @returns Cycle status
- */
-function determineCycleStatus(
+type PaymentSummary = {
+  totalAmount: number;
+  paymentCount: number;
+  firstPaymentDate?: string;
+  lastPaymentDate?: string;
+};
+
+type StatusBuildOptions = {
+  tolerance: number;
+  amountTolerance: number;
+};
+
+function buildCycleStatus(
   cycle: Cycle,
-  actualAmount: number,
-  actualDate?: string
-): CycleStatus {
-  const currentDate = new Date();
-  const expectedDate = new Date(cycle.expectedDate);
+  payments: PaymentSummary,
+  options: StatusBuildOptions
+): Partial<Cycle> & { status: CycleStatus } {
+  const { tolerance, amountTolerance } = options;
+  const expected = cycle.expectedAmount || 0;
+  const minimum = cycle.minimumAmount || 0;
+  const total = payments.totalAmount || 0;
+  const hasPayments = payments.paymentCount > 0;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const dueDate = new Date(cycle.expectedDate);
+  dueDate.setHours(0, 0, 0, 0);
   const cycleEnd = new Date(cycle.endDate);
-  
-  // Reset times
-  currentDate.setHours(0, 0, 0, 0);
-  expectedDate.setHours(0, 0, 0, 0);
   cycleEnd.setHours(0, 0, 0, 0);
 
-  // Check if cycle hasn't started yet or is current but no payment expected yet
-  if (cycleEnd > currentDate) {
-    if (actualAmount > 0) {
-      // Payment made in advance
-      if (actualAmount >= cycle.expectedAmount * 0.99) {
-        return 'paid_on_time';
-      } else if (actualAmount > 0) {
-        return 'partial';
-      }
-    }
-    return 'upcoming';
+  // No payments
+  if (!hasPayments) {
+    if (cycleEnd >= today) {
+      return {
+        status: 'upcoming',
+        statusLabel: 'Upcoming - no payments yet',
+        amountStatus: 'none',
+        timingStatus: 'none',
+        isWithinWindow: false,
+      };
+  }
+    return {
+      status: 'not_paid',
+      statusLabel: 'Missed - no payment',
+      amountStatus: 'none',
+      timingStatus: 'none',
+      isWithinWindow: false,
+    };
   }
 
-  // No payment made
-  if (actualAmount === 0) {
-    return 'not_paid';
-  }
+  // Use first payment date for timing evaluation (primary payment timing)
+  const firstPaymentDate = payments.firstPaymentDate ? new Date(payments.firstPaymentDate) : dueDate;
+  firstPaymentDate.setHours(0, 0, 0, 0);
 
-  // Calculate payment accuracy
-  const amountDiff = actualAmount - cycle.expectedAmount;
-  const amountRatio = actualAmount / cycle.expectedAmount;
-
-  // Check if payment date is available
-  if (!actualDate) {
-    // We have amount but no specific date
-    if (amountRatio >= 0.99 && amountRatio <= 1.01) {
-      return 'paid_on_time'; // Assume on time if amount is correct
-    } else if (amountRatio < 0.99) {
-      return 'underpaid';
-    } else {
-      return 'overpaid';
-    }
-  }
-
-  const paymentDate = new Date(actualDate);
-  paymentDate.setHours(0, 0, 0, 0);
-
-  // Calculate days difference from expected date
+  // Calculate days difference from due date
   const daysDiff = Math.floor(
-    (paymentDate.getTime() - expectedDate.getTime()) / (1000 * 60 * 60 * 24)
+    (firstPaymentDate.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24)
   );
 
-  // Determine status based on timing and amount
-  const isOnTime = Math.abs(daysDiff) <= 2; // Within ±2 days
-  const isCorrectAmount = amountRatio >= 0.99 && amountRatio <= 1.01; // Within ±1%
+  /**
+   * TIMING STATUS BASED ON CYCLE WINDOW RULES:
+   * 
+   * | Payment Timing                           | Status          | isWithinWindow |
+   * |------------------------------------------|-----------------|----------------|
+   * | Before (due - tolerance)                 | early           | true           |
+   * | Between (due - tolerance) and due date   | on_time (early) | true           |
+   * | Exactly on due date                      | on_time         | true           |
+   * | Between due date and (due + tolerance)   | within_window   | true           |
+   * | After (due + tolerance)                  | late            | false          |
+   */
 
-  if (isCorrectAmount) {
-    if (isOnTime) {
-      return 'paid_on_time';
-    } else if (daysDiff > 2) {
-      return 'paid_late';
-    } else {
-      // Paid early
-      return 'paid_on_time';
-    }
-  } else if (amountRatio < 0.99) {
-    return 'underpaid';
+  let timingStatus: Cycle['timingStatus'] = 'on_time';
+  let isWithinWindow = true;
+  let daysLate: number | undefined;
+  let daysEarly: number | undefined;
+
+  if (daysDiff < -tolerance) {
+    // Paid more than tolerance days before due date - early (ahead of window)
+    timingStatus = 'early';
+    daysEarly = Math.abs(daysDiff);
+    isWithinWindow = true; // Still acceptable
+  } else if (daysDiff < 0) {
+    // Paid before due date but within tolerance window - on_time (early)
+    timingStatus = 'early';
+    daysEarly = Math.abs(daysDiff);
+    isWithinWindow = true;
+  } else if (daysDiff === 0) {
+    // Paid exactly on due date
+    timingStatus = 'on_time';
+    isWithinWindow = true;
+  } else if (daysDiff <= tolerance) {
+    // Paid after due date but within tolerance window - within_window
+    timingStatus = 'within_window';
+    daysLate = daysDiff;
+    isWithinWindow = true;
   } else {
-    return 'overpaid';
-  }
-}
-
-/**
- * Calculate additional status information
- * @param cycle Cycle information
- * @param actualAmount Actual amount paid
- * @param actualDate Date of payment
- * @param tolerance Days tolerance for on-time payment
- * @returns Additional status information
- */
-function calculateStatusInfo(
-  cycle: Cycle,
-  actualAmount: number,
-  actualDate: string | undefined,
-  tolerance: number
-): Partial<Cycle> {
-  const info: Partial<Cycle> = {};
-
-  if (actualDate) {
-    const expectedDate = new Date(cycle.expectedDate);
-    const paymentDate = new Date(actualDate);
-    
-    expectedDate.setHours(0, 0, 0, 0);
-    paymentDate.setHours(0, 0, 0, 0);
-
-    const daysDiff = Math.floor(
-      (paymentDate.getTime() - expectedDate.getTime()) / (1000 * 60 * 60 * 24)
-    );
-
-    if (daysDiff > tolerance) {
-      info.daysLate = daysDiff;
+    // Paid more than tolerance days after due date - late (outside window)
+    timingStatus = 'late';
+    daysLate = daysDiff;
+    isWithinWindow = false;
     }
+
+  // Amount evaluation
+  const expectedFloor = expected > 0 ? expected * (1 - amountTolerance) : expected;
+  const expectedCeil = expected > 0 ? expected * (1 + amountTolerance) : expected;
+
+  let amountStatus: Cycle['amountStatus'] = 'none';
+  let amountShort: number | undefined;
+  let amountOver: number | undefined;
+
+  if (total >= expectedCeil && expected > 0) {
+    amountStatus = 'over';
+    amountOver = total - expected;
+  } else if (expected > 0 && total >= expectedFloor) {
+    amountStatus = 'target';
+  } else if (minimum > 0 && total < minimum) {
+    amountStatus = 'below_minimum';
+    amountShort = expected > 0 ? expected - total : undefined;
+  } else if (minimum > 0 && total >= minimum && total < expectedFloor) {
+    amountStatus = 'minimum_met';
+    amountShort = expected > 0 ? expected - total : undefined;
+  } else if (total > 0 && expected > 0) {
+    amountStatus = 'partial';
+    amountShort = expected - total;
   }
 
-  const amountDiff = actualAmount - cycle.expectedAmount;
+  /**
+   * MAP TO CYCLE STATUS:
+   * 
+   * Priority order:
+   * 1. Amount status determines base status (overpaid, underpaid, partial)
+   * 2. Timing status modifies the base status
+   * 3. Within window payments get preferential treatment
+   */
+  let status: CycleStatus = 'partial';
   
-  if (amountDiff < -0.01) {
-    // Underpaid
-    info.amountShort = Math.abs(amountDiff);
-  } else if (amountDiff > 0.01) {
-    // Overpaid
-    info.amountOver = amountDiff;
+  if (amountStatus === 'over') {
+    // Overpaid - timing matters for label but always positive
+    if (timingStatus === 'late') {
+      status = 'paid_late'; // Late but overpaid
+    } else if (timingStatus === 'early') {
+      status = 'paid_early'; // Early and overpaid
+    } else if (timingStatus === 'within_window') {
+      status = 'paid_within_window'; // Within window and overpaid
+    } else {
+      status = 'overpaid';
+    }
+  } else if (amountStatus === 'target' || amountStatus === 'minimum_met') {
+    // Target or minimum met
+    if (timingStatus === 'late') {
+      status = 'paid_late';
+    } else if (timingStatus === 'early') {
+      status = 'paid_early';
+    } else if (timingStatus === 'within_window') {
+      status = 'paid_within_window';
+    } else {
+      status = 'paid_on_time';
+    }
+  } else if (amountStatus === 'below_minimum' || amountStatus === 'partial') {
+    // Underpaid or partial
+    if (!isWithinWindow) {
+      status = 'underpaid'; // Late and underpaid
+    } else {
+      status = 'partial'; // Still within window, can add more
+    }
+  } else if (amountStatus === 'none') {
+    status = 'not_paid';
   }
+
+  // Build status label with window context
+  let timingLabel = '';
+  if (timingStatus === 'early') {
+    timingLabel = daysEarly && daysEarly > tolerance 
+      ? `${daysEarly} days early`
+      : `${daysEarly} day${(daysEarly ?? 0) > 1 ? 's' : ''} before due`;
+  } else if (timingStatus === 'on_time') {
+    timingLabel = 'On time';
+  } else if (timingStatus === 'within_window') {
+    timingLabel = `${daysLate} day${(daysLate ?? 0) > 1 ? 's' : ''} after due (within window)`;
+  } else if (timingStatus === 'late') {
+    timingLabel = `${daysLate} day${(daysLate ?? 0) > 1 ? 's' : ''} late (outside window)`;
+  } else {
+    timingLabel = 'No timing';
+  }
+
+  let amountLabel = 'Paid';
+  if (amountStatus === 'over') {
+    amountLabel = 'Overpaid';
+  } else if (amountStatus === 'target') {
+    amountLabel = 'Full payment';
+  } else if (amountStatus === 'minimum_met') {
+    amountLabel = 'Minimum paid';
+  } else if (amountStatus === 'below_minimum') {
+    amountLabel = 'Below minimum';
+  } else if (amountStatus === 'partial') {
+    amountLabel = 'Partial';
+  } else if (amountStatus === 'none') {
+    amountLabel = 'No payment';
+  }
+
+  const windowLabel = isWithinWindow ? '✓' : '✗';
+  const statusLabel = `${amountLabel} - ${timingLabel} ${windowLabel}`;
+
+  const info: Partial<Cycle> & { status: CycleStatus } = {
+    status,
+    statusLabel,
+    timingStatus,
+    amountStatus,
+    isWithinWindow,
+    daysFromDue: daysDiff,
+  };
+
+  if (typeof daysLate === 'number') info.daysLate = daysLate;
+  if (typeof daysEarly === 'number') info.daysEarly = daysEarly;
+  if (typeof amountShort === 'number') info.amountShort = amountShort;
+  if (typeof amountOver === 'number') info.amountOver = amountOver;
 
   return info;
 }
@@ -638,41 +820,352 @@ function formatDate(date: Date): string {
 }
 
 /**
+ * Find the cycle that a payment/bill should be mapped to based on date
+ * @param cycles Array of cycles
+ * @param paymentDate Payment or bill date (ISO date string)
+ * @param tolerance Days tolerance for matching (default: 7 for liabilities)
+ * @returns Cycle number if found, null otherwise
+ */
+export function findCycleForPayment(
+  cycles: Cycle[],
+  paymentDate: string,
+  tolerance: number = DEFAULT_LIABILITY_TOLERANCE_DAYS
+): number | null {
+  const txDate = new Date(paymentDate);
+  txDate.setHours(0, 0, 0, 0);
+
+  for (const cycle of cycles) {
+    const cycleStart = new Date(cycle.startDate);
+    const cycleEnd = new Date(cycle.endDate);
+    
+    // Extend window by tolerance on both sides
+    const windowStart = new Date(cycleStart);
+    windowStart.setDate(windowStart.getDate() - tolerance);
+    const windowEnd = new Date(cycleEnd);
+    windowEnd.setDate(windowEnd.getDate() + tolerance);
+    
+    windowStart.setHours(0, 0, 0, 0);
+    windowEnd.setHours(0, 0, 0, 0);
+
+    if (txDate >= windowStart && txDate <= windowEnd) {
+      return cycle.cycleNumber;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Get cycle statistics
  * @param cycles Array of cycles
  * @returns Cycle statistics
  */
 export function getCycleStatistics(cycles: Cycle[]) {
   const total = cycles.length;
+  
+  // Count paid cycles (any successful payment status)
   const paid = cycles.filter(
-    (c) => c.status === 'paid_on_time' || c.status === 'paid_late' || c.status === 'overpaid'
+    (c) => c.status === 'paid_on_time' || c.status === 'paid_early' || 
+           c.status === 'paid_within_window' || c.status === 'paid_late' || 
+           c.status === 'overpaid'
   ).length;
+  
   const notPaid = cycles.filter((c) => c.status === 'not_paid').length;
   const upcoming = cycles.filter((c) => c.status === 'upcoming').length;
-  const late = cycles.filter((c) => c.status === 'paid_late').length;
+  
+  // Timing-based counts
+  const paidEarly = cycles.filter((c) => c.status === 'paid_early').length;
+  const paidOnTime = cycles.filter((c) => c.status === 'paid_on_time').length;
+  const paidWithinWindow = cycles.filter((c) => c.status === 'paid_within_window').length;
+  const paidLate = cycles.filter((c) => c.status === 'paid_late').length;
+  
+  // Amount-based counts
   const underpaid = cycles.filter((c) => c.status === 'underpaid').length;
   const overpaid = cycles.filter((c) => c.status === 'overpaid').length;
   const partial = cycles.filter((c) => c.status === 'partial').length;
+  
+  // Window compliance
+  const withinWindow = cycles.filter((c) => c.isWithinWindow === true).length;
+  const outsideWindow = cycles.filter((c) => c.isWithinWindow === false && c.actualAmount > 0).length;
 
   const totalExpected = cycles.reduce((sum, c) => sum + c.expectedAmount, 0);
   const totalActual = cycles.reduce((sum, c) => sum + c.actualAmount, 0);
 
+  // Calculate early payments using timingStatus
+  const early = cycles.filter((c) => c.timingStatus === 'early').length;
+
+  // Completion rate (any payment made)
   const completionRate = total > 0 ? (paid / total) * 100 : 0;
-  const onTimeRate = total > 0 ? ((paid - late) / total) * 100 : 0;
+  
+  // On-time rate = (early + on_time + within_window) / total paid
+  const goodTimingCount = paidEarly + paidOnTime + paidWithinWindow;
+  const onTimeRate = paid > 0 ? (goodTimingCount / paid) * 100 : 0;
+  
+  // Window compliance rate
+  const windowComplianceRate = (withinWindow + outsideWindow) > 0 
+    ? (withinWindow / (withinWindow + outsideWindow)) * 100 
+    : 100;
+
+  // Calculate streak (consecutive on-time/early/within-window payments)
+  let currentStreak = 0;
+  const sortedCycles = [...cycles].sort((a, b) => a.cycleNumber - b.cycleNumber);
+  for (let i = sortedCycles.length - 1; i >= 0; i--) {
+    const c = sortedCycles[i];
+    // Good statuses for streak
+    if (c.status === 'paid_on_time' || c.status === 'paid_early' || 
+        c.status === 'paid_within_window' || c.status === 'overpaid') {
+      currentStreak++;
+    } else if (c.status !== 'upcoming') {
+      break;
+    }
+  }
 
   return {
     total,
     paid,
     notPaid,
     upcoming,
-    late,
+    // Timing-based
+    paidEarly,
+    paidOnTime,
+    paidWithinWindow,
+    paidLate,
+    late: paidLate, // Alias for backward compatibility
+    early,
+    // Amount-based
     underpaid,
     overpaid,
     partial,
+    // Window compliance
+    withinWindow,
+    outsideWindow,
+    windowComplianceRate: Math.round(windowComplianceRate * 10) / 10,
+    // Totals
     totalExpected,
     totalActual,
     completionRate: Math.round(completionRate * 10) / 10,
     onTimeRate: Math.round(onTimeRate * 10) / 10,
+    currentStreak,
+    averagePayment: paid > 0 ? Math.round(totalActual / paid * 100) / 100 : 0,
   };
+}
+
+/**
+ * Get human-readable status message for a cycle
+ * Uses simple, clear language without jargon
+ * @param cycle The cycle to get status for
+ * @returns Status message with details
+ */
+export function getCycleStatusMessage(cycle: Cycle): {
+  title: string;
+  subtitle: string;
+  color: string;
+  icon: string;
+} {
+  const { status, daysLate, amountShort, amountOver, paymentCount, isWithinWindow, daysFromDue } = cycle;
+  
+  // Default values
+  let title = 'Unknown';
+  let subtitle = '';
+  let color = '#6B7280'; // Gray
+  let icon = 'ellipse';
+  
+  switch (status) {
+    case 'paid_on_time':
+      title = 'Paid ✓';
+      subtitle = paymentCount && paymentCount > 1 ? `${paymentCount} payments` : 'On time';
+      color = '#10B981'; // Green
+      icon = 'checkmark-circle';
+      break;
+      
+    case 'paid_early':
+      title = 'Paid ✓';
+      const daysEarlyNum = cycle.daysEarly || Math.abs(daysFromDue || 0);
+      subtitle = daysEarlyNum > 0 ? `${daysEarlyNum} day${daysEarlyNum > 1 ? 's' : ''} early` : 'Early';
+      color = '#059669'; // Emerald
+      icon = 'checkmark-done-circle';
+      break;
+      
+    case 'paid_within_window':
+      title = 'Paid ✓';
+      const daysAfterDue = daysLate || daysFromDue || 0;
+      subtitle = daysAfterDue > 0 ? `${daysAfterDue} day${daysAfterDue > 1 ? 's' : ''} after due` : 'Completed';
+      color = '#6366F1'; // Indigo
+      icon = 'checkmark-circle-outline';
+      break;
+      
+    case 'paid_late':
+      title = 'Paid late';
+      subtitle = daysLate ? `${daysLate} day${daysLate > 1 ? 's' : ''} late` : 'After due date';
+      color = '#F59E0B'; // Amber
+      icon = 'time';
+      break;
+      
+    case 'overpaid':
+      title = 'Paid more';
+      subtitle = amountOver ? `Extra paid` : 'More than expected';
+      color = '#8B5CF6'; // Purple
+      icon = 'arrow-up-circle';
+      break;
+      
+    case 'underpaid':
+      title = 'Paid less';
+      subtitle = !isWithinWindow ? `Late & incomplete` : amountShort ? `Short` : 'Below target';
+      color = '#EF4444'; // Red
+      icon = 'alert-circle';
+      break;
+      
+    case 'partial':
+      title = 'Paid less';
+      subtitle = isWithinWindow ? `Can add more` : amountShort ? `Incomplete` : 'Partial';
+      color = '#F59E0B'; // Amber
+      icon = 'pie-chart';
+      break;
+      
+    case 'not_paid':
+      title = 'Missed';
+      subtitle = 'No payment';
+      color = '#EF4444'; // Red
+      icon = 'close-circle';
+      break;
+      
+    case 'upcoming':
+      title = 'Due';
+      const expectedDate = new Date(cycle.expectedDate);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      expectedDate.setHours(0, 0, 0, 0);
+      const daysUntil = Math.ceil((expectedDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+      
+      if (daysUntil === 0) {
+        subtitle = 'Today';
+        color = '#F59E0B'; // Amber
+        icon = 'alert';
+      } else if (daysUntil === 1) {
+        subtitle = 'Tomorrow';
+        color = '#6366F1'; // Indigo
+        icon = 'calendar';
+      } else if (daysUntil > 0 && daysUntil <= 7) {
+        subtitle = `In ${daysUntil} days`;
+        color = '#6366F1'; // Indigo
+        icon = 'calendar';
+      } else if (daysUntil < 0) {
+        // Past due but still upcoming status (no payment yet)
+        const daysPast = Math.abs(daysUntil);
+        if (daysPast <= DEFAULT_LIABILITY_TOLERANCE_DAYS) {
+          subtitle = `${daysPast} day${daysPast > 1 ? 's' : ''} past due (within window)`;
+          color = '#F59E0B'; // Amber warning
+          icon = 'alert';
+        } else {
+          subtitle = `${daysPast} days overdue`;
+          color = '#EF4444'; // Red
+          icon = 'alert-circle';
+        }
+      } else {
+        subtitle = `Due on ${expectedDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+        color = '#6B7280'; // Gray
+        icon = 'calendar-outline';
+      }
+      break;
+  }
+  
+  return { title, subtitle, color, icon };
+}
+
+/**
+ * Get cycle rules based on cycle configuration
+ * @param cycle The cycle
+ * @param options Additional options
+ * @returns Array of rule strings with icons
+ */
+export function getCycleRules(
+  cycle: Cycle,
+  options?: {
+    tolerance?: number;
+    minimumPaymentPercent?: number;
+  }
+): { text: string; icon: string; type: 'info' | 'success' | 'warning' }[] {
+  const rules: { text: string; icon: string; type: 'info' | 'success' | 'warning' }[] = [];
+  const tolerance = options?.tolerance ?? DEFAULT_LIABILITY_TOLERANCE_DAYS;
+  
+  // Payment window rule (most important)
+  rules.push({
+    text: `Payment window: ±${tolerance} days from due date`,
+    icon: 'calendar',
+    type: 'info',
+  });
+  
+  // Window timing breakdown
+  rules.push({
+    text: `Early: Before due date (bonus)`,
+    icon: 'checkmark-done',
+    type: 'success',
+  });
+  
+  rules.push({
+    text: `On time: Exactly on due date`,
+    icon: 'checkmark',
+    type: 'success',
+  });
+  
+  rules.push({
+    text: `Within window: Up to ${tolerance} days after due`,
+    icon: 'checkmark-circle-outline',
+    type: 'info',
+  });
+  
+  rules.push({
+    text: `Late: More than ${tolerance} days after due`,
+    icon: 'alert',
+    type: 'warning',
+  });
+  
+  // Target amount rule
+  rules.push({
+    text: `Target: Full expected amount`,
+    icon: 'cash',
+    type: 'info',
+  });
+  
+  // Minimum amount rule
+  if (cycle.minimumAmount && cycle.minimumAmount > 0) {
+    rules.push({
+      text: `Minimum required: At least this amount`,
+      icon: 'remove-circle',
+      type: 'warning',
+    });
+  }
+  
+  // Multiple payments rule
+  rules.push({
+    text: `Multiple payments: Allowed within window`,
+    icon: 'layers',
+    type: 'info',
+  });
+  
+  // Amount tolerance rule
+  rules.push({
+    text: `Amount tolerance: ±1% for exact match`,
+    icon: 'swap-horizontal',
+    type: 'info',
+  });
+  
+  return rules;
+}
+
+/**
+ * Get simple rule strings (backward compatibility)
+ */
+export function getCycleRulesSimple(
+  cycle: Cycle,
+  options?: { tolerance?: number }
+): string[] {
+  const tolerance = options?.tolerance ?? DEFAULT_LIABILITY_TOLERANCE_DAYS;
+  return [
+    `Payment window: ±${tolerance} days`,
+    `Multiple payments: Allowed`,
+    `Early payment: Encouraged`,
+    `Amount tolerance: ±1%`,
+  ];
 }
 

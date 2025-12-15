@@ -130,7 +130,7 @@ export function calculateSmartSuggestion(context: SuggestionContext): PaymentSug
     return {
       suggestedAmount: Math.ceil(outstandingBalance),
       reason: 'near_payoff',
-      explanation: `You're close to paying off! Pay ₹${Math.ceil(outstandingBalance)} to clear the debt completely.`,
+      explanation: `You&apos;re close to paying off! Pay ₹${Math.ceil(outstandingBalance)} to clear the debt completely.`,
       urgency: 'low',
     };
   }

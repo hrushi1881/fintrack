@@ -7,10 +7,12 @@
  * 2. Liabilities (Home Loan EMI, Car Loan, etc.)
  * 3. Scheduled Payments (One-time future payments)
  * 4. Goal Contributions (Planned savings)
+ * 5. Bills Table (Direct bills linked to liabilities, goals, or recurring transactions)
  */
 
 import { supabase } from '@/lib/supabase';
 import { UpcomingPayment, BillsViewFilters, BillsViewOptions } from '@/types/bills';
+import { DEFAULT_CURRENCY } from './currency';
 import { 
   fetchRecurringTransactions,
   generateUpcomingPaymentsFromRecurring
@@ -20,6 +22,8 @@ import {
 } from '@/utils/scheduledPayments';
 import { fetchLiabilitySchedules, LiabilitySchedule } from '@/utils/liabilitySchedules';
 import { calculateStatus as calculateRecurrenceStatus, getDaysUntil, generateSchedule } from '@/utils/recurrence';
+import { calculateBillStatus } from '@/utils/bills';
+import { Bill } from '@/types';
 
 /**
  * Fetch all upcoming payments (aggregated Bills view)
@@ -84,7 +88,17 @@ export async function fetchAllUpcomingPayments(
       payments.push(...goalPayments);
     }
 
-    // 5. Get upcoming budget periods for tracking
+    // 5. Get bills directly from bills table (liability-linked, goal-linked, recurring transaction-linked)
+    const billsTablePayments = await fetchBillsTablePayments(
+      userId,
+      queryStartDate,
+      queryEndDate,
+      filters,
+      options
+    );
+    payments.push(...billsTablePayments);
+
+    // 6. Get upcoming budget periods for tracking
     // Note: fetchBudgetTrackingPayments function not yet implemented
     // if (!filters.source_type || filters.source_type.includes('budget')) {
     //   const budgetPayments = await fetchBudgetTrackingPayments(
@@ -96,8 +110,11 @@ export async function fetchAllUpcomingPayments(
     //   payments.push(...budgetPayments);
     // }
 
+    // Deduplicate: If a bill appears from both bills table and other sources, prefer bills table version
+    const deduplicatedPayments = deduplicatePayments(payments);
+
     // Apply additional filters
-    let filteredPayments = payments;
+    let filteredPayments = deduplicatedPayments;
 
     if (filters.status && filters.status.length > 0) {
       filteredPayments = filteredPayments.filter(p => filters.status!.includes(p.status));
@@ -293,7 +310,7 @@ async function fetchLiabilityPayments(
           title: `${liability.title} - Payment`,
           description: schedule.metadata?.description,
           amount: schedule.amount,
-          currency: liability.currency || 'USD',
+          currency: liability.currency || DEFAULT_CURRENCY,
           due_date: schedule.due_date,
           status: status === 'upcoming' ? 'upcoming' :
                   status === 'due_today' ? 'due_today' :
@@ -410,6 +427,255 @@ async function fetchScheduledPaymentsAsUpcoming(
 }
 
 /**
+ * Fetch bills directly from bills table
+ * Handles bills linked to liabilities, goals, and recurring transactions
+ */
+async function fetchBillsTablePayments(
+  userId: string,
+  startDate: string,
+  endDate: string,
+  filters: BillsViewFilters,
+  options: BillsViewOptions
+): Promise<UpcomingPayment[]> {
+  try {
+    // Build query for bills table
+    let query = supabase
+      .from('bills')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('is_deleted', false)
+      .gte('due_date', startDate)
+      .lte('due_date', endDate);
+
+    // Only get bills that are linked to liabilities, goals, or recurring transactions
+    // We'll filter these in the query or in code
+    const { data: bills, error: billsError } = await query;
+
+    if (billsError) {
+      console.error('Error fetching bills from bills table:', billsError);
+      return [];
+    }
+
+    if (!bills || bills.length === 0) {
+      return [];
+    }
+
+    const payments: UpcomingPayment[] = [];
+
+    // Filter bills to only include those linked to liabilities, goals, or recurring transactions
+    const relevantBills = bills.filter((bill: Bill) => {
+      // Include if it has liability_id
+      if (bill.liability_id) return true;
+      // Include if it has goal_id
+      if (bill.goal_id) return true;
+      // Include if metadata has recurring_transaction_id
+      if (bill.metadata?.recurring_transaction_id) return true;
+      return false;
+    });
+
+    // Apply source type filter if specified
+    let filteredBills = relevantBills;
+    if (filters.source_type && filters.source_type.length > 0) {
+      filteredBills = relevantBills.filter((bill: Bill) => {
+        if (bill.liability_id && filters.source_type!.includes('liability')) return true;
+        if (bill.goal_id && filters.source_type!.includes('goal_contribution')) return true;
+        if (bill.metadata?.recurring_transaction_id && filters.source_type!.includes('recurring_transaction')) return true;
+        return false;
+      });
+    }
+
+    // Convert bills to UpcomingPayment format
+    for (const bill of filteredBills) {
+      // Determine source type and source ID
+      let sourceType: 'liability' | 'goal_contribution' | 'recurring_transaction';
+      let sourceId: string;
+
+      if (bill.liability_id) {
+        sourceType = 'liability';
+        sourceId = bill.liability_id;
+      } else if (bill.goal_id) {
+        sourceType = 'goal_contribution';
+        sourceId = bill.goal_id;
+      } else if (bill.metadata?.recurring_transaction_id) {
+        sourceType = 'recurring_transaction';
+        sourceId = bill.metadata.recurring_transaction_id;
+      } else {
+        // Skip if no valid source
+        continue;
+      }
+
+      // Calculate bill status
+      const billStatus = calculateBillStatus(bill);
+      
+      // Map bill status to payment status
+      let paymentStatus: UpcomingPayment['status'];
+      switch (billStatus) {
+        case 'paid':
+          paymentStatus = 'paid';
+          break;
+        case 'cancelled':
+          paymentStatus = 'cancelled';
+          break;
+        case 'skipped':
+          paymentStatus = 'skipped';
+          break;
+        case 'postponed':
+          paymentStatus = 'postponed';
+          break;
+        case 'due_today':
+          paymentStatus = 'due_today';
+          break;
+        case 'overdue':
+          paymentStatus = 'overdue';
+          break;
+        case 'upcoming':
+        default:
+          paymentStatus = 'upcoming';
+          break;
+      }
+
+      // Skip paid and cancelled bills unless explicitly requested
+      if (!options.include_paid && paymentStatus === 'paid') continue;
+      if (!options.include_cancelled && paymentStatus === 'cancelled') continue;
+
+      // Get category name if category_id exists
+      let categoryName: string | undefined;
+      if (bill.category_id) {
+        try {
+          const { data: category } = await supabase
+            .from('categories')
+            .select('name')
+            .eq('id', bill.category_id)
+            .single();
+          categoryName = category?.name;
+        } catch (err) {
+          // Category not found, ignore
+        }
+      }
+
+      // Get account name if linked_account_id exists
+      let accountName: string | undefined;
+      if (bill.linked_account_id) {
+        try {
+          const { data: account } = await supabase
+            .from('accounts')
+            .select('name')
+            .eq('id', bill.linked_account_id)
+            .single();
+          accountName = account?.name;
+        } catch (err) {
+          // Account not found, ignore
+        }
+      }
+
+      // Build metadata
+      const metadata: any = {
+        ...bill.metadata,
+      };
+
+      // Add liability-specific metadata
+      if (bill.liability_id) {
+        metadata.nature = 'payment';
+        metadata.amount_type = 'fixed';
+        if (bill.principal_amount !== undefined) {
+          metadata.principal_amount = bill.principal_amount;
+        }
+        if (bill.interest_amount !== undefined) {
+          metadata.interest_amount = bill.interest_amount;
+        }
+        if (bill.payment_number !== undefined) {
+          metadata.payment_number = bill.payment_number;
+        }
+      }
+
+      // Add goal-specific metadata
+      if (bill.goal_id) {
+        metadata.nature = 'payment';
+        metadata.amount_type = 'fixed';
+      }
+
+      // Add recurring transaction metadata
+      if (bill.metadata?.recurring_transaction_id) {
+        metadata.nature = bill.nature || bill.metadata?.nature;
+        metadata.amount_type = bill.amount_type || bill.metadata?.amount_type;
+        metadata.estimated_amount = bill.estimated_amount || bill.metadata?.estimated_amount;
+      }
+
+      payments.push({
+        id: bill.id,
+        source_type: sourceType,
+        source_id: sourceId,
+        title: bill.title,
+        description: bill.description,
+        amount: bill.amount ?? bill.total_amount ?? bill.metadata?.estimated_amount ?? undefined,
+        currency: bill.currency,
+        due_date: bill.due_date,
+        status: paymentStatus,
+        category_id: bill.category_id,
+        category_name: categoryName,
+        linked_account_id: bill.linked_account_id,
+        account_name: accountName,
+        fund_type: bill.fund_type,
+        specific_fund_id: bill.specific_fund_id,
+        color: bill.color,
+        icon: bill.icon,
+        notes: bill.notes,
+        metadata,
+        created_at: bill.created_at,
+      });
+    }
+
+    return payments;
+  } catch (error) {
+    console.error('Error fetching bills table payments:', error);
+    return [];
+  }
+}
+
+/**
+ * Deduplicate payments - prefer bills table version over dynamically generated ones
+ */
+function deduplicatePayments(payments: UpcomingPayment[]): UpcomingPayment[] {
+  // Create a map to track payments by unique key
+  // Key format: source_type:source_id:due_date
+  const paymentMap = new Map<string, UpcomingPayment>();
+
+  // UUID pattern: 8-4-4-4-12 hex digits with hyphens
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  for (const payment of payments) {
+    const key = `${payment.source_type}:${payment.source_id}:${payment.due_date}`;
+    
+    // If we already have this payment, check if current one is from bills table
+    // Bills table payments have IDs that are UUIDs (with hyphens)
+    // Dynamically generated ones have composite IDs like "recurring_tx_id_date" (with underscores)
+    const existing = paymentMap.get(key);
+    
+    if (existing) {
+      // Check if IDs are UUIDs (from bills table) vs composite IDs (dynamically generated)
+      const isCurrentFromBillsTable = uuidPattern.test(payment.id);
+      const isExistingFromBillsTable = uuidPattern.test(existing.id);
+      
+      if (isCurrentFromBillsTable && !isExistingFromBillsTable) {
+        // Current is from bills table, replace existing dynamically generated one
+        paymentMap.set(key, payment);
+      } else if (!isCurrentFromBillsTable && isExistingFromBillsTable) {
+        // Existing is from bills table, keep it (don't replace with dynamically generated)
+        // Do nothing, keep existing
+      } else {
+        // Both are same type, keep the first one (or could prefer bills table if both are UUIDs)
+        // For now, keep existing to maintain order
+      }
+    } else {
+      // First occurrence, add it
+      paymentMap.set(key, payment);
+    }
+  }
+
+  return Array.from(paymentMap.values());
+}
+
+/**
  * Fetch upcoming payments from Goal Contributions
  * Shows target payments every cycle based on goal contribution schedule
  */
@@ -473,7 +739,7 @@ async function fetchGoalContributionPayments(
             title: `${goal.title} - Target Payment`,
             description: `Contribution to reach ${goal.title} target`,
             amount: monthlyAmount,
-            currency: goal.currency || 'USD',
+            currency: goal.currency || DEFAULT_CURRENCY,
             due_date: occurrence.date,
             status: occurrence.status === 'upcoming' ? 'upcoming' :
                     occurrence.status === 'due_today' ? 'due_today' :

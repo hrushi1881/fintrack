@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, TextInput, Modal, Alert } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useAuth } from '@/contexts/AuthContext';
@@ -10,6 +9,7 @@ import { useSettings } from '@/contexts/SettingsContext';
 import { supabase } from '@/lib/supabase';
 import { formatCurrencyAmount } from '@/utils/currency';
 import FundPicker, { FundBucket } from '@/components/FundPicker';
+import GlassCard from '@/components/GlassCard';
 
 interface Transaction {
   id: string;
@@ -60,7 +60,6 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
   const { user } = useAuth();
   const { currency } = useSettings();
   const { globalRefresh } = useRealtimeData();
-  const { getAccountBreakdown } = useLiabilities();
   const [formData, setFormData] = useState({
     amount: '',
     type: 'expense',
@@ -331,16 +330,13 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
       animationType="slide"
       presentationStyle="pageSheet"
     >
-      <LinearGradient
-        colors={['#99D795', '#99D795', '#99D795']}
-        style={styles.container}
-      >
+      <View style={styles.container}>
         <SafeAreaView style={styles.safeArea}>
           <ScrollView style={styles.scrollView}>
             {/* Header */}
             <View style={styles.header}>
               <TouchableOpacity style={styles.closeButton} onPress={onClose}>
-                <Ionicons name="close" size={24} color="white" />
+                <Ionicons name="close" size={24} color="#000000" />
               </TouchableOpacity>
               <Text style={styles.headerTitle}>Edit Transaction</Text>
               <TouchableOpacity
@@ -355,7 +351,7 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
             </View>
 
             {/* Transaction Type */}
-            <View style={styles.inputCard}>
+            <GlassCard padding={20} marginVertical={0} borderRadius={24}>
               <Text style={styles.inputLabel}>Transaction Type</Text>
               <View style={styles.typeRow}>
                 <TouchableOpacity
@@ -368,7 +364,7 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
                   <Ionicons 
                     name="arrow-down" 
                     size={20} 
-                    color={formData.type === 'income' ? 'white' : '#6B7280'} 
+                    color={formData.type === 'income' ? '#FFFFFF' : 'rgba(0, 0, 0, 0.6)'} 
                   />
                   <Text style={[
                     styles.typeText,
@@ -387,7 +383,7 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
                   <Ionicons 
                     name="arrow-up" 
                     size={20} 
-                    color={formData.type === 'expense' ? 'white' : '#6B7280'} 
+                    color={formData.type === 'expense' ? '#FFFFFF' : 'rgba(0, 0, 0, 0.6)'} 
                   />
                   <Text style={[
                     styles.typeText,
@@ -397,10 +393,10 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
                   </Text>
                 </TouchableOpacity>
               </View>
-            </View>
+            </GlassCard>
 
             {/* Amount */}
-            <View style={styles.inputCard}>
+            <GlassCard padding={20} marginVertical={0} borderRadius={24}>
               <Text style={styles.inputLabel}>Amount</Text>
               <View style={styles.amountInput}>
                 <Text style={styles.currencySymbol}>{formatCurrencyAmount(0, currency).charAt(0)}</Text>
@@ -414,23 +410,23 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
                 />
               </View>
               {errors.amount && <Text style={styles.errorText}>{errors.amount}</Text>}
-            </View>
+            </GlassCard>
 
             {/* Description */}
-            <View style={styles.inputCard}>
+            <GlassCard padding={20} marginVertical={0} borderRadius={24}>
               <Text style={styles.inputLabel}>Description</Text>
               <TextInput
                 style={[styles.textInput, errors.description && styles.errorInput]}
                 value={formData.description}
                 onChangeText={(text) => setFormData({ ...formData, description: text })}
                 placeholder="Enter transaction description"
-                placeholderTextColor="#6B7280"
+                placeholderTextColor="rgba(0, 0, 0, 0.5)"
               />
               {errors.description && <Text style={styles.errorText}>{errors.description}</Text>}
-            </View>
+            </GlassCard>
 
             {/* Account Selection */}
-            <View style={styles.inputCard}>
+            <GlassCard padding={20} marginVertical={0} borderRadius={24}>
               <Text style={styles.inputLabel}>Account</Text>
               <View style={styles.accountList}>
                 {accounts.map((acc) => (
@@ -465,17 +461,17 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
                       </View>
                     </View>
                     {formData.account_id === acc.id && (
-                      <Ionicons name="checkmark-circle" size={20} color="#10B981" />
+                      <Ionicons name="checkmark-circle" size={20} color="#000000" />
                     )}
                   </TouchableOpacity>
                 ))}
               </View>
               {errors.account_id && <Text style={styles.errorText}>{errors.account_id}</Text>}
-            </View>
+            </GlassCard>
 
             {/* Fund Source Selection (for expenses) */}
             {formData.type === 'expense' && formData.account_id && (
-              <View style={styles.inputCard}>
+              <GlassCard padding={20} marginVertical={0} borderRadius={24}>
                 <Text style={styles.inputLabel}>Fund Source {originalBucketInfo && '(Original: ' + originalBucketInfo.type + ')'}</Text>
                 {selectedFundBucket ? (
                   <TouchableOpacity
@@ -505,7 +501,7 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
                         </Text>
                       </View>
                     </View>
-                    <Ionicons name="chevron-forward" size={20} color="rgba(255,255,255,0.7)" />
+                    <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.3)" />
                   </TouchableOpacity>
                 ) : originalBucketInfo ? (
                   <View style={styles.bucketInfoDisplay}>
@@ -518,7 +514,7 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
                           : 'wallet-outline'
                       } 
                       size={20} 
-                      color="#6366F1" 
+                      color="#000000" 
                     />
                     <Text style={styles.bucketInfoText}>
                       Originally paid from {originalBucketInfo.type} bucket
@@ -532,15 +528,15 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
                     style={styles.selectFundButton}
                     onPress={() => setShowFundPicker(true)}
                   >
-                    <Ionicons name="wallet-outline" size={20} color="#10B981" />
+                    <Ionicons name="wallet-outline" size={20} color="#000000" />
                     <Text style={styles.selectFundText}>Select Fund Source (Optional)</Text>
                   </TouchableOpacity>
                 )}
-              </View>
+              </GlassCard>
             )}
 
             {/* Category Selection */}
-            <View style={styles.inputCard}>
+            <GlassCard padding={20} marginVertical={0} borderRadius={24}>
               <Text style={styles.inputLabel}>Category</Text>
               <View style={styles.categoryGrid}>
                 {categories.map((cat) => (
@@ -562,20 +558,20 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
                 ))}
               </View>
               {errors.category_id && <Text style={styles.errorText}>{errors.category_id}</Text>}
-            </View>
+            </GlassCard>
 
             {/* Date */}
-            <View style={styles.inputCard}>
+            <GlassCard padding={20} marginVertical={0} borderRadius={24}>
               <Text style={styles.inputLabel}>Date</Text>
               <TouchableOpacity
                 style={styles.dateButton}
                 onPress={() => setShowDatePicker(true)}
               >
-                <Ionicons name="calendar" size={20} color="#6B7280" />
+                <Ionicons name="calendar" size={20} color="#000000" />
                 <Text style={styles.dateText}>
                   {formData.date.toLocaleDateString()}
                 </Text>
-                <Ionicons name="chevron-down" size={20} color="#6B7280" />
+                <Ionicons name="chevron-down" size={20} color="rgba(0, 0, 0, 0.3)" />
               </TouchableOpacity>
               {showDatePicker && (
                 <DateTimePicker
@@ -585,10 +581,10 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
                   onChange={onDateChange}
                 />
               )}
-            </View>
+            </GlassCard>
 
             {/* Notes */}
-            <View style={styles.inputCard}>
+            <GlassCard padding={20} marginVertical={0} borderRadius={24}>
               <Text style={styles.inputLabel}>Notes (Optional)</Text>
               <TextInput
                 style={styles.textInput}
@@ -599,31 +595,31 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
                 multiline
                 numberOfLines={3}
               />
-            </View>
+            </GlassCard>
 
             {/* Location */}
-            <View style={styles.inputCard}>
+            <GlassCard padding={20} marginVertical={0} borderRadius={24}>
               <Text style={styles.inputLabel}>Location (Optional)</Text>
               <TextInput
                 style={styles.textInput}
                 value={formData.location}
                 onChangeText={(text) => setFormData({ ...formData, location: text })}
                 placeholder="Where did this transaction occur?"
-                placeholderTextColor="#6B7280"
+                placeholderTextColor="rgba(0, 0, 0, 0.5)"
               />
-            </View>
+            </GlassCard>
 
             {/* Reference Number */}
-            <View style={styles.inputCard}>
+            <GlassCard padding={20} marginVertical={0} borderRadius={24}>
               <Text style={styles.inputLabel}>Reference Number (Optional)</Text>
               <TextInput
                 style={styles.textInput}
                 value={formData.reference_number}
                 onChangeText={(text) => setFormData({ ...formData, reference_number: text })}
                 placeholder="Transaction reference number"
-                placeholderTextColor="#6B7280"
+                placeholderTextColor="rgba(0, 0, 0, 0.5)"
               />
-            </View>
+            </GlassCard>
 
             {/* Delete Button */}
             <View style={styles.deleteSection}>
@@ -643,12 +639,12 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
             accountId={formData.account_id}
             onSelect={(bucket) => {
               setSelectedFundBucket(bucket);
-              setShowFundPicker(false);
-            }}
-            amount={parseFloat(formData.amount) || 0}
-          />
-        )}
-      </LinearGradient>
+            setShowFundPicker(false);
+          }}
+          amount={parseFloat(formData.amount) || 0}
+        />
+      )}
+      </View>
     </Modal>
   );
 }
@@ -656,9 +652,11 @@ export default function EditTransactionModal({ visible, onClose, transaction, on
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   safeArea: {
     flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   scrollView: {
     flex: 1,
@@ -669,50 +667,61 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 20,
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
+    marginBottom: 0,
   },
   closeButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
-    padding: 12,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   headerTitle: {
-    fontSize: 20,
-    color: 'white',
-    fontWeight: 'bold',
+    fontSize: 22,
+    fontFamily: 'Archivo Black',
+    color: '#000000',
+    letterSpacing: 0.5,
   },
   saveButton: {
-    backgroundColor: '#10B981',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  saveText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  disabledButton: {
-    opacity: 0.6,
-  },
-  inputCard: {
     backgroundColor: '#000000',
     borderRadius: 16,
-    padding: 20,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+  },
+  saveText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+  },
+  disabledButton: {
+    opacity: 0.4,
+  },
+  inputCard: {
     marginBottom: 16,
   },
   inputLabel: {
-    fontSize: 16,
-    color: 'white',
-    fontWeight: '600',
-    marginBottom: 10,
+    fontSize: 13,
+    fontFamily: 'Poppins-SemiBold',
+    color: 'rgba(0, 0, 0, 0.6)',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    marginBottom: 12,
   },
   textInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 16,
     padding: 16,
-    color: 'white',
+    color: '#000000',
     fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
   },
   errorInput: {
     borderColor: '#EF4444',
@@ -726,58 +735,69 @@ const styles = StyleSheet.create({
   amountInput: {
     flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 16,
+    paddingHorizontal: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    minHeight: 64,
   },
   currencySymbol: {
     fontSize: 32,
-    color: 'white',
-    fontWeight: 'bold',
-    marginRight: 8,
+    fontFamily: 'InstrumentSans-Bold',
+    color: '#000000',
+    marginRight: 12,
   },
   amountTextInput: {
     flex: 1,
     fontSize: 32,
-    color: 'white',
-    fontWeight: 'bold',
+    fontFamily: 'InstrumentSans-Bold',
+    color: '#000000',
   },
   typeRow: {
     flexDirection: 'row',
     gap: 12,
   },
   typeButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 16,
     padding: 16,
     alignItems: 'center',
     flex: 1,
+    borderWidth: 2,
+    borderColor: 'transparent',
   },
   selectedType: {
-    backgroundColor: '#10B981',
+    backgroundColor: '#000000',
+    borderColor: '#000000',
   },
   typeText: {
-    color: 'white',
+    color: 'rgba(0, 0, 0, 0.7)',
     fontSize: 14,
-    fontWeight: '500',
+    fontFamily: 'Poppins-Medium',
     marginTop: 8,
   },
   selectedTypeText: {
-    color: 'white',
-    fontWeight: 'bold',
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-SemiBold',
   },
   accountList: {
     gap: 8,
   },
   accountButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 16,
     padding: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    borderWidth: 2,
+    borderColor: 'transparent',
+    marginBottom: 8,
   },
   selectedAccount: {
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
-    borderWidth: 1,
-    borderColor: '#10B981',
+    backgroundColor: 'rgba(0, 0, 0, 0.08)',
+    borderColor: '#000000',
   },
   accountInfo: {
     flexDirection: 'row',
@@ -796,17 +816,19 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   accountName: {
-    color: 'white',
+    color: '#000000',
     fontSize: 16,
-    fontWeight: 'bold',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
     marginBottom: 4,
   },
   accountBalance: {
-    color: '#9CA3AF',
+    color: 'rgba(0, 0, 0, 0.6)',
     fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
   },
   selectedAccountText: {
-    color: '#10B981',
+    color: '#000000',
   },
   categoryGrid: {
     flexDirection: 'row',
@@ -814,35 +836,44 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   categoryButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
-    borderRadius: 20,
-    paddingHorizontal: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderRadius: 12,
+    paddingHorizontal: 12,
     paddingVertical: 8,
     marginBottom: 8,
+    marginRight: 8,
+    borderWidth: 2,
+    borderColor: 'transparent',
   },
   selectedCategory: {
-    backgroundColor: '#10B981',
+    backgroundColor: '#000000',
+    borderColor: '#000000',
   },
   categoryText: {
-    color: 'white',
-    fontSize: 14,
+    color: 'rgba(0, 0, 0, 0.6)',
+    fontSize: 13,
+    fontFamily: 'Poppins-Medium',
     fontWeight: '500',
   },
   selectedCategoryText: {
-    color: 'white',
-    fontWeight: 'bold',
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
   },
   dateButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
     borderRadius: 12,
     padding: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
   },
   dateText: {
-    color: 'white',
+    color: '#000000',
     fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
     flex: 1,
     marginLeft: 12,
   },
@@ -866,13 +897,15 @@ const styles = StyleSheet.create({
     marginLeft: 8,
   },
   fundBucketButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
     borderRadius: 12,
     padding: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     marginTop: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
   },
   fundBucketInfo: {
     flexDirection: 'row',
@@ -891,36 +924,40 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   fundBucketName: {
-    color: 'white',
+    color: '#000000',
     fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
     marginBottom: 4,
   },
   fundBucketAmount: {
-    color: '#9CA3AF',
+    color: 'rgba(0, 0, 0, 0.6)',
     fontSize: 12,
+    fontFamily: 'InstrumentSerif-Regular',
   },
   bucketInfoDisplay: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(99, 102, 241, 0.1)',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
     borderRadius: 12,
     padding: 12,
     marginTop: 8,
     gap: 8,
   },
   bucketInfoText: {
-    color: 'white',
+    color: '#000000',
     fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
     flex: 1,
   },
   changeBucketText: {
-    color: '#6366F1',
+    color: '#000000',
     fontSize: 14,
+    fontFamily: 'Poppins-SemiBold',
     fontWeight: '600',
   },
   selectFundButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
     borderRadius: 12,
     padding: 16,
     flexDirection: 'row',
@@ -928,14 +965,15 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
     marginTop: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.3)',
+    borderWidth: 2,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
     borderStyle: 'dashed',
   },
   selectFundText: {
-    color: '#10B981',
+    color: '#000000',
     fontSize: 16,
-    fontWeight: '500',
+    fontFamily: 'Poppins-SemiBold',
+    fontWeight: '600',
   },
 });
 

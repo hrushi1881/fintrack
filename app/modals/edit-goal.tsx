@@ -17,7 +17,6 @@ import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { Goal, Account } from '@/types';
 import { formatCurrencyAmount } from '@/utils/currency';
 import { updateGoal, transferGoalFunds, getGoalAccounts, getLinkedAccountsForGoal, linkAccountsToGoal } from '@/utils/goals';
-import InlineAccountSelector from '@/components/InlineAccountSelector';
 import CalendarDatePicker from '@/components/CalendarDatePicker';
 
 interface EditGoalModalProps {
@@ -84,7 +83,7 @@ export default function EditGoalModal({
   const [showDatePicker, setShowDatePicker] = useState(false);
 
   // Account management
-  const [goalAccounts, setGoalAccounts] = useState<Array<{ account: Account; balance: number }>>([]);
+  const [goalAccounts, setGoalAccounts] = useState<{ account: Account; balance: number }[]>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
   const [linkedAccounts, setLinkedAccounts] = useState<Account[]>([]);
   const [linkedAccountIds, setLinkedAccountIds] = useState<string[]>([]);

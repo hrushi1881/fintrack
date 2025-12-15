@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Modal,
   View,
@@ -7,9 +7,7 @@ import {
   ScrollView,
   StyleSheet,
   TextInput,
-  Animated,
-  Dimensions,
-} from 'react-native';
+ Switch } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
@@ -21,7 +19,7 @@ import {
   executeRenewalDecision,
 } from '@/utils/budgets';
 import CalendarDatePicker from '@/components/CalendarDatePicker';
-import { Switch } from 'react-native';
+
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 
 interface BudgetReflectionModalProps {
@@ -40,7 +38,7 @@ const RECURRENCE_OPTIONS = [
   { id: 'custom', label: 'Custom' },
 ];
 
-export const BudgetReflectionModal: React.FC<BudgetReflectionModalProps> = ({
+const BudgetReflectionModal: React.FC<BudgetReflectionModalProps> = ({
   visible,
   budget,
   onClose,
@@ -49,7 +47,7 @@ export const BudgetReflectionModal: React.FC<BudgetReflectionModalProps> = ({
   const { user } = useAuth();
   const { currency } = useSettings();
   const { showNotification } = useNotification();
-  const { accounts, refreshBudgets } = useRealtimeData();
+  const { refreshBudgets } = useRealtimeData();
 
   const [insights, setInsights] = useState<BudgetPeriodSummary | null>(null);
   const [loading, setLoading] = useState(false);
@@ -217,7 +215,7 @@ export const BudgetReflectionModal: React.FC<BudgetReflectionModalProps> = ({
 
   const isUnderBudget = insights.remaining_amount > 0;
   const isOverBudget = insights.spent_amount > insights.total_amount;
-  const isExactlyOnBudget = Math.abs(insights.spent_amount - insights.total_amount) < 0.01;
+  // const isExactlyOnBudget = Math.abs(insights.spent_amount - insights.total_amount) < 0.01;
 
   // Determine outcome message
   let outcomeMessage = '';
@@ -338,9 +336,9 @@ export const BudgetReflectionModal: React.FC<BudgetReflectionModalProps> = ({
 
           {/* Renewal Decision Section */}
           <View style={styles.renewalSection}>
-            <Text style={styles.sectionTitle}>What's Next?</Text>
+            <Text style={styles.sectionTitle}>What&apos;s Next?</Text>
             <Text style={styles.sectionSubtitle}>
-              For {new Date(budget.end_date).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}, what's the plan?
+              For {new Date(budget.end_date).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}, what&apos;s the plan?
             </Text>
 
             {/* Renewal Path Selection */}
@@ -878,4 +876,6 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
   },
 });
+
+export default BudgetReflectionModal;
 

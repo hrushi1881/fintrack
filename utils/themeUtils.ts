@@ -41,6 +41,7 @@ export const textStyles = {
   bodySecondary: createTextStyle(theme.typography.bodySecondary),
   currency: createTextStyle(theme.typography.currency),
   currencyLarge: createTextStyle(theme.typography.currencyLarge),
+  currencyDashboard: createTextStyle(theme.typography.currencyDashboard),
   caption: createTextStyle(theme.typography.caption),
   crazyText: createTextStyle(theme.typography.crazyText),
   glassTitle: createTextStyle(theme.typography.glassTitle),

@@ -1,9 +1,9 @@
 import React from 'react';
-import { Text, TextProps, StyleSheet } from 'react-native';
+import { Text, TextProps } from 'react-native';
 import { theme } from '@/theme';
 
 interface ThemedTextProps extends TextProps {
-  variant?: 'h1' | 'h2' | 'h3' | 'body' | 'bodySecondary' | 'cardTitle' | 'currency' | 'currencyLarge' | 'caption' | 'crazyText';
+  variant?: 'h1' | 'h2' | 'h3' | 'body' | 'bodySecondary' | 'cardTitle' | 'currency' | 'currencyLarge' | 'currencyDashboard' | 'caption' | 'crazyText';
   color?: string;
 }
 
@@ -58,6 +58,10 @@ export const CurrencyText = (props: Omit<ThemedTextProps, 'variant'>) => (
 
 export const LargeCurrencyText = (props: Omit<ThemedTextProps, 'variant'>) => (
   <ThemedText variant="currencyLarge" {...props} />
+);
+
+export const DashboardCurrencyText = (props: Omit<ThemedTextProps, 'variant'>) => (
+  <ThemedText variant="currencyDashboard" {...props} />
 );
 
 export const CaptionText = (props: Omit<ThemedTextProps, 'variant'>) => (

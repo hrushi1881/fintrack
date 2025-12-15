@@ -5,10 +5,11 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { useSettings } from '@/contexts/SettingsContext';
 import { formatCurrencyAmount } from '@/utils/currency';
+import { useBackNavigation, useAndroidBackButton } from '@/hooks/useBackNavigation';
 import PayModal from '../modals/pay';
 import TransferModal from '../modals/transfer';
 import TransferFundsModal from '../modals/transfer-funds';
-import { AddBudgetModal } from '../modals/add-budget';
+import AddBudgetModal from '../modals/add-budget';
 import type { AccountFund } from '@/types';
 
 const MAX_RECENT_TRANSACTIONS = 4;
@@ -22,6 +23,8 @@ const toNumber = (value: any) => {
 export default function AccountDetailScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const accountId = Array.isArray(params?.id) ? params.id[0] : params?.id;
+  const handleBack = useBackNavigation();
+  useAndroidBackButton();
   const {
     accounts,
     transactions,
@@ -172,7 +175,7 @@ export default function AccountDetailScreen() {
         return false;
       });
     },
-    [goals, accountId, account?.type]
+    [goals, account?.type]
   );
 
   const linkedBudgets = useMemo(() => {
@@ -277,7 +280,7 @@ export default function AccountDetailScreen() {
           <View style={styles.headerRow}>
             <TouchableOpacity
               style={styles.iconButton}
-              onPress={() => router.back()}
+              onPress={handleBack}
               accessibilityLabel="Go back"
             >
               <Ionicons name="arrow-back" size={20} color="#0E401C" />
@@ -532,8 +535,7 @@ export default function AccountDetailScreen() {
                     })}
 
                     {/* Goal Funds - Multiple shown separately */}
-                    {goalFunds.map((fund, index) => {
-                      const isLastGoal = index === goalFunds.length - 1;
+                    {goalFunds.map((fund) => {
                       const treeChar = '└─';
                       
                       return (

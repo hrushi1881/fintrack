@@ -49,8 +49,7 @@ interface PayLiabilityModalProps {
 export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuccess }: PayLiabilityModalProps) {
   const { user } = useAuth();
   const { currency } = useSettings();
-  const { getAccountBreakdown, fetchLiabilityAllocations } = useLiabilities();
-  const { globalRefresh, refreshAccounts, refreshAccountFunds, refreshTransactions, recalculateAllBalances } = useRealtimeData();
+  const { globalRefresh, refreshAccounts, refreshAccountFunds, refreshTransactions } = useRealtimeData();
   
   const [liability, setLiability] = useState<LiabilityData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -547,7 +546,7 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
                       <View style={styles.extraPaymentNotice}>
                         <Ionicons name="information-circle-outline" size={20} color="#F59E0B" />
                         <Text style={styles.extraPaymentText}>
-                          You're paying {formatCurrency(extraAmount)} extra. Tap "Continue" to choose how to apply it.
+                          You&apos;re paying {formatCurrency(extraAmount)} extra. Tap &quot;Continue&quot; to choose how to apply it.
                         </Text>
                       </View>
                     </>
@@ -560,7 +559,7 @@ export default function PayLiabilityModal({ visible, onClose, liabilityId, onSuc
                 <GlassCard padding={20} marginVertical={12}>
                   <Text style={styles.extraOptionsTitle}>Apply Extra Payment</Text>
                   <Text style={styles.extraOptionsSubtitle}>
-                    You're paying {formatCurrency(extraAmount)} more than your regular payment of {formatCurrency(liability.periodical_payment || 0)}.
+                    You&apos;re paying {formatCurrency(extraAmount)} more than your regular payment of {formatCurrency(liability.periodical_payment || 0)}.
                   </Text>
 
                   <TouchableOpacity

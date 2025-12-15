@@ -49,7 +49,7 @@ export default function PayBillModal({ visible: propVisible, onClose: propOnClos
   const { id } = useLocalSearchParams();
   const { user } = useAuth();
   const { currency } = useSettings();
-  const { globalRefresh, refreshAccounts, refreshAccountFunds, refreshTransactions, accounts: realtimeAccounts } = useRealtimeData();
+  const { globalRefresh, refreshAccounts, refreshAccountFunds, refreshTransactions } = useRealtimeData();
   
   const [bill, setBill] = useState<BillData | null>(propBill || null);
   const [loading, setLoading] = useState(true);
@@ -236,7 +236,7 @@ export default function PayBillModal({ visible: propVisible, onClose: propOnClos
           metadata: {
             paid_amount: amountNum,
             paid_date: paymentDate.toISOString().split('T')[0],
-            transaction_id: (rpcData as any)?.id || null,
+            transaction_id: (rpcData as string) || null,
           },
         })
         .eq('id', bill.id);

@@ -7,8 +7,6 @@ import { useSettings } from '@/contexts/SettingsContext';
 import { useNotification } from '@/contexts/NotificationContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { createGoal, CreateGoalData } from '@/utils/goals';
-import CalendarDatePicker from '@/components/CalendarDatePicker';
-import InlineAccountSelector from '@/components/InlineAccountSelector';
 import { formatCurrencyAmount } from '@/utils/currency';
 
 interface AddGoalModalProps {

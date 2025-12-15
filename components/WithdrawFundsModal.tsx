@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, TextInput, Modal, Alert, ScrollView, SafeAreaView, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { formatCurrencyAmount } from '@/utils/currency';
+import { formatCurrencyAmount, formatCurrencySymbol } from '@/utils/currency';
 import { Goal, Account } from '@/types';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { useSettings } from '@/contexts/SettingsContext';
@@ -36,7 +36,7 @@ export default function WithdrawFundsModal({
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [sourceAccountId, setSourceAccountId] = useState<string | null>(null);
   const [destinationAccountId, setDestinationAccountId] = useState<string | null>(null);
-  const [goalAccounts, setGoalAccounts] = useState<Array<{ account: Account; balance: number }>>([]);
+  const [goalAccounts, setGoalAccounts] = useState<{ account: Account; balance: number }[]>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(false);
   const [isAmountFocused, setIsAmountFocused] = useState(false);
   const [linkedAccounts, setLinkedAccounts] = useState<Account[]>([]);
@@ -92,10 +92,18 @@ export default function WithdrawFundsModal({
           const accountsWithFunds = await getGoalAccounts(goal.id);
           console.log(`📊 WithdrawFundsModal: Fetched ${accountsWithFunds.length} account(s) with goal funds for "${goal.title}"`);
           
-          // Show all accounts with funds (linked or not)
+          // Filter by goal currency - accounts MUST match goal currency
+          const goalCurrency = goal.currency || currency;
+          const filteredAccounts = accountsWithFunds.filter(({ account }) => {
+            return account.currency === goalCurrency;
+          });
+          
+          console.log(`📊 WithdrawFundsModal: Filtered to ${filteredAccounts.length} account(s) matching goal currency (${goalCurrency})`);
+          
+          // Show all accounts with funds (linked or not) that match goal currency
           // Priority: linked accounts with funds first, then non-linked accounts with funds
           const linkedAccountIds = new Set(linkedAccts.map(acc => acc.id));
-          const sorted = accountsWithFunds.sort((a, b) => {
+          const sorted = filteredAccounts.sort((a, b) => {
             const aIsLinked = linkedAccountIds.has(a.account.id);
             const bIsLinked = linkedAccountIds.has(b.account.id);
             if (aIsLinked && !bIsLinked) return -1;
@@ -133,20 +141,24 @@ export default function WithdrawFundsModal({
 
   // Destination accounts: Show ALL accounts (money goes to personal funds in any account)
   // Since money goes to personal funds, any account can receive the withdrawal
-  // Filter: exclude liability and Goals Savings accounts, must be active, must match settings currency
+  // Filter: exclude liability and Goals Savings accounts, must be active, must match GOAL currency (not settings)
+  // IMPORTANT: Goal funds are stored in goal currency, so destination account must match goal currency
   // Goals Savings account is only for displaying aggregate statistics
   const destinationAccounts = useMemo(() => {
-    if (!accounts || accounts.length === 0) {
-      console.log('⚠️ Withdraw modal: No accounts available for destination');
-      return [];
-    }
-    if (!currency) {
-      console.log('⚠️ Withdraw modal: Currency from settings not available');
+    if (!accounts || accounts.length === 0 || !goal) {
+      console.log('⚠️ Withdraw modal: No accounts available for destination or no goal');
       return [];
     }
     
-    // Show ALL accounts: exclude only liability and goals_savings, must be active, must match settings currency
-    // Money goes to personal funds, so any account can receive it
+    // Use goal currency - destination account must match goal currency
+    const targetCurrency = goal.currency || currency;
+    if (!targetCurrency) {
+      console.log('⚠️ Withdraw modal: No currency available (goal or settings)');
+      return [];
+    }
+    
+    // Show ALL accounts: exclude only liability and goals_savings, must be active, must match GOAL currency
+    // Money goes to personal funds, so any account can receive it (as long as currency matches)
     const filtered = accounts
       .filter((account) => {
         const acc = account as Account;
@@ -154,36 +166,38 @@ export default function WithdrawFundsModal({
           acc.type !== 'liability' && 
           acc.type !== 'goals_savings' &&
           (acc.is_active === true || acc.is_active === undefined || acc.is_active === null) &&
-          acc.currency === currency // Match currency from settings
+          acc.currency === targetCurrency // Match GOAL currency (not settings currency)
         );
       })
       .map((account) => account as Account);
     
-    console.log('✅ Withdraw modal destinationAccounts:', filtered.length, 'from', accounts.length, 'total (ALL accounts, settings currency:', currency, ')');
+    console.log('✅ Withdraw modal destinationAccounts:', filtered.length, 'from', accounts.length, 'total (ALL accounts, goal currency:', targetCurrency, ')');
     if (filtered.length === 0) {
-      console.warn('⚠️ No accounts found matching settings currency:', currency);
+      console.warn('⚠️ No accounts found matching goal currency:', targetCurrency);
     }
     return filtered;
-  }, [accounts, currency]);
+  }, [accounts, goal, currency]);
 
   // Check if there are any accounts at all (for helpful error message)
   const hasAnyAccounts = useMemo(() => {
     return accounts && accounts.length > 0;
   }, [accounts]);
 
-  // Check if accounts exist but don't match currency
+  // Check if accounts exist but don't match goal currency
   const accountsWithDifferentCurrency = useMemo(() => {
-    if (!accounts || !currency) return [];
+    if (!accounts || !goal) return [];
+    const targetCurrency = goal.currency || currency;
+    if (!targetCurrency) return [];
     return accounts.filter((account) => {
       const acc = account as Account;
       return (
         acc.type !== 'liability' && 
         acc.type !== 'goals_savings' &&
         (acc.is_active === true || acc.is_active === undefined || acc.is_active === null) &&
-        acc.currency !== currency
+        acc.currency !== targetCurrency
       );
     });
-  }, [accounts, currency]);
+  }, [accounts, goal, currency]);
 
   // Get selected accounts
   const sourceAccount = goalAccounts.find((ga) => ga.account.id === sourceAccountId)?.account;
@@ -231,6 +245,29 @@ export default function WithdrawFundsModal({
     if (!destinationAccountId) {
       Alert.alert('Error', 'Please select a destination account');
       return;
+    }
+
+    // Validate currency match before withdrawing
+    const sourceAccount = goalAccounts.find(ga => ga.account.id === sourceAccountId)?.account;
+    const destinationAccount = destinationAccounts.find(acc => acc.id === destinationAccountId);
+    const goalCurrency = goal.currency || currency;
+    
+    if (sourceAccount && destinationAccount) {
+      if (sourceAccount.currency !== destinationAccount.currency) {
+        Alert.alert(
+          'Currency Mismatch',
+          `Source account (${sourceAccount.name}) uses ${sourceAccount.currency}, but destination account (${destinationAccount.name}) uses ${destinationAccount.currency}. Both accounts must use the same currency.`
+        );
+        return;
+      }
+      
+      if (sourceAccount.currency !== goalCurrency) {
+        Alert.alert(
+          'Currency Mismatch',
+          `Selected accounts use ${sourceAccount.currency}, but the goal uses ${goalCurrency}. Please select accounts that match the goal currency.`
+        );
+        return;
+      }
     }
 
     // Note: Same account is allowed - source is goal fund, destination is personal fund
@@ -364,8 +401,8 @@ export default function WithdrawFundsModal({
                   <Text style={styles.errorTitle}>No Accounts Available</Text>
                   {hasAnyAccounts && accountsWithDifferentCurrency.length > 0 ? (
                     <Text style={styles.errorText}>
-                      You need an account with currency {currency} to receive the withdrawal. 
-                      Your accounts use different currencies. Please create an account with currency {currency} first.
+                      You need an account with currency {goal?.currency || currency} to receive the withdrawal. 
+                      Your accounts use different currencies. Please create an account with currency {goal?.currency || currency} first.
                     </Text>
                   ) : (
                     <Text style={styles.errorText}>
@@ -380,7 +417,7 @@ export default function WithdrawFundsModal({
             <View style={styles.amountSection}>
               <Text style={styles.amountLabel}>Amount</Text>
               <View style={styles.amountContainer}>
-                <Text style={styles.currencySymbol}>$</Text>
+                <Text style={styles.currencySymbol}>{formatCurrencySymbol(currency || goal.currency)}</Text>
                 <TextInput
                   style={[styles.amountInput, !amount && styles.amountInputPlaceholder]}
                   value={amount}

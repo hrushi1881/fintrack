@@ -22,7 +22,6 @@ import GlassCard from '@/components/GlassCard';
 import {
   calculateLiabilityUpdateImpact,
   recalculateLiabilitySchedules,
-  validateLiabilityAmountUpdate,
   calculateMonthlyPayment,
   calculateMonthsBetween,
   RecalculateSchedulesOptions,
@@ -56,7 +55,7 @@ export default function EditLiabilityModal({
 }: EditLiabilityModalProps) {
   const { user } = useAuth();
   const { currency } = useSettings();
-  const { updateLiability, fetchLiabilities } = useLiabilities();
+  const { fetchLiabilities } = useLiabilities();
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editingField, setEditingField] = useState<EditField>(null);

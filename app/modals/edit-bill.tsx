@@ -182,7 +182,7 @@ export default function EditBillModal({
               const paymentAmount = bill.amount || 0;
 
               // 1. Create expense transaction via RPC
-              const { data: rpcData, error: rpcError } = await supabase.rpc('spend_from_account_bucket', {
+              const { error: rpcError } = await supabase.rpc('spend_from_account_bucket', {
                 p_account_id: paymentAccountId,
                 p_bucket_type: 'personal',
                 p_bucket_id: 'personal',

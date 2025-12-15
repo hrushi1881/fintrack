@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "fintrack",
+    "name": "FinTrack",
     "slug": "fintrack",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -8,22 +8,38 @@
     "scheme": "fintrack",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+    "description": "Comprehensive personal finance management app to track expenses, manage budgets, set financial goals, handle liabilities, and gain insights into your spending habits.",
+    "privacy": "public",
+    "primaryColor": "#4F6F3E",
+    "privacyPolicy": "https://your-privacy-policy-url.com/privacy",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.fintrack.app",
+      "buildNumber": "1",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "config": {
+        "usesNonExemptEncryption": false
+      },
+      "associatedDomains": []
     },
     "android": {
+      "package": "com.fintrack.app",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
+      "permissions": [],
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
     "web": {
       "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/favicon.png",
+      "bundler": "metro"
     },
     "plugins": [
       "expo-router",
@@ -43,7 +59,7 @@
     "assetBundlePatterns": ["**/*"],
     "extra": {
       "eas": {
-        "projectId": "your-project-id"
+        "projectId": "b543f9a1-7def-4655-9882-ad07d8955a06"
       }
     },
     "experiments": {

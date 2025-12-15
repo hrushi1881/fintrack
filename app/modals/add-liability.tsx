@@ -25,11 +25,11 @@ import { generateBillsFromCycles } from '@/utils/cycleBillGeneration';
 
 type LiabilityType = 'loan' | 'credit_card' | 'emi' | 'line_of_credit' | 'other';
 
-const LIABILITY_TYPES: Array<{
+const LIABILITY_TYPES: {
   key: LiabilityType;
   label: string;
   icon: string;
-}> = [
+}[] = [
   { key: 'loan', label: 'Loan', icon: 'business' },
   { key: 'credit_card', label: 'Credit Card', icon: 'card' },
   { key: 'emi', label: 'EMI', icon: 'calendar' },
@@ -504,7 +504,7 @@ export default function AddLiabilityModal() {
           {/* Did you receive funds? */}
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Did you receive funds?</Text>
-            <Text style={styles.helperText} style={{ marginBottom: 12 }}>
+            <Text style={[styles.helperText, { marginBottom: 12 }]}>
               Example: Did a bank transfer money to your account?
             </Text>
             <View style={styles.optionButtons}>

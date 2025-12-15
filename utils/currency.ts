@@ -30,7 +30,9 @@ export const CURRENCY_CONFIGS: { [key: string]: CurrencyConfig } = {
 };
 
 // Default currency (can be changed based on user preference)
-const DEFAULT_CURRENCY = 'INR';
+// Note: Entities (goals, liabilities, recurring transactions, accounts) should always have currency set
+// This is only used as a last resort fallback when currency is missing
+export const DEFAULT_CURRENCY = 'INR';
 
 export function getCurrencyConfig(currencyCode: string = DEFAULT_CURRENCY): CurrencyConfig {
   return CURRENCY_CONFIGS[currencyCode] || CURRENCY_CONFIGS[DEFAULT_CURRENCY];

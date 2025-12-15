@@ -21,6 +21,8 @@ import { formatCurrencyAmount } from '@/utils/currency';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import FundPicker, { FundBucket } from '@/components/FundPicker';
 import InlineAccountSelector from '@/components/InlineAccountSelector';
+import GlassCard from '@/components/GlassCard';
+import { getParentCategories, getSubcategories } from '@/utils/categories';
 
 interface PayModalProps {
   visible: boolean;
@@ -29,43 +31,6 @@ interface PayModalProps {
   preselectedAccountId?: string;
 }
 
-// Subcategory mappings (simplified - will be replaced with database structure later)
-const SUBCATEGORY_MAP: Record<string, Array<{ name: string; icon: string }>> = {
-  Food: [
-    { name: 'Dining', icon: 'restaurant' },
-    { name: 'Lunch', icon: 'fast-food' },
-    { name: 'Drinks', icon: 'wine' },
-    { name: 'Groceries', icon: 'basket' },
-    { name: 'Coffee', icon: 'cafe' },
-  ],
-  Transport: [
-    { name: 'Taxi', icon: 'car' },
-    { name: 'Public Transport', icon: 'bus' },
-    { name: 'Fuel', icon: 'car-sport' },
-    { name: 'Parking', icon: 'parking' },
-  ],
-  Bills: [
-    { name: 'Electricity', icon: 'flash' },
-    { name: 'Water', icon: 'water' },
-    { name: 'Internet', icon: 'wifi' },
-    { name: 'Phone', icon: 'call' },
-  ],
-  Shopping: [
-    { name: 'Clothing', icon: 'shirt' },
-    { name: 'Electronics', icon: 'phone-portrait' },
-    { name: 'Home', icon: 'home' },
-  ],
-  Entertainment: [
-    { name: 'Movies', icon: 'film' },
-    { name: 'Music', icon: 'musical-notes' },
-    { name: 'Games', icon: 'game-controller' },
-  ],
-  Health: [
-    { name: 'Medicine', icon: 'medical' },
-    { name: 'Doctor', icon: 'person' },
-    { name: 'Gym', icon: 'fitness' },
-  ],
-};
 
 export default function PayModal({ visible, onClose, onSuccess, preselectedAccountId }: PayModalProps) {
   const { user } = useAuth();
@@ -83,13 +48,14 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
 
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
-  const [category, setCategory] = useState('');
-  const [subcategory, setSubcategory] = useState('');
+  const [mainCategory, setMainCategory] = useState<string>(''); // Parent category ID from database
+  const [subcategory, setSubcategory] = useState<string>(''); // Subcategory ID from database
   const [account, setAccount] = useState('');
   const [date, setDate] = useState(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [accounts, setAccounts] = useState<any[]>([]);
-  const [categories, setCategories] = useState<any[]>([]);
+  const [parentCategories, setParentCategories] = useState<any[]>([]); // Main categories from database
+  const [subcategories, setSubcategories] = useState<any[]>([]); // Subcategories for selected parent
   const [isLoading, setIsLoading] = useState(false);
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
   const [selectedFundBucket, setSelectedFundBucket] = useState<FundBucket | null>(null);
@@ -97,26 +63,28 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
   const [showNoteInput, setShowNoteInput] = useState(false);
   const [showAmountInput, setShowAmountInput] = useState(false);
 
-  // Get frequently used categories (top 3 by transaction count)
-  const frequentlyUsedCategories = useMemo(() => {
-    return [...categories]
-      .sort((a, b) => (b.transaction_count || 0) - (a.transaction_count || 0))
-      .slice(0, 3);
-  }, [categories]);
 
-  // Get subcategories for selected category
-  const availableSubcategories = useMemo(() => {
-    if (!category) return [];
-    const selectedCategory = categories.find((cat) => cat.id === category);
-    if (!selectedCategory) return [];
-    return SUBCATEGORY_MAP[selectedCategory.name] || [];
-  }, [category, categories]);
+  // Fetch subcategories when a parent category is selected
+  useEffect(() => {
+    if (mainCategory && user) {
+      loadSubcategories(mainCategory);
+    } else {
+      setSubcategories([]);
+      setSubcategory('');
+    }
+  }, [mainCategory, user]);
+
+  // Fetch parent categories when modal opens
+  useEffect(() => {
+    if (visible && user) {
+      loadParentCategories();
+    }
+  }, [visible, user]);
 
   // Fetch user accounts
   useEffect(() => {
     if (visible && user) {
       fetchAccounts();
-      fetchCategories();
       // Also refresh accounts and account funds from realtime data
       refreshAccounts();
       refreshAccountFunds();
@@ -159,7 +127,7 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
     const funds = getFundsForAccount(account, { includeLocked: true });
     // Check if account has ANY funds (borrowed, goal, reserved, sinking) - personal is calculated, not stored
     return funds.length > 0;
-  }, [account, getFundsForAccount, accountFunds]);
+  }, [account, getFundsForAccount]);
 
   // Check if account has any non-personal funds (for showing fund picker)
   // Personal funds are always available (calculated), so we check for borrowed/liability funds
@@ -228,21 +196,27 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
     }
   };
 
-  const fetchCategories = async () => {
+  const loadParentCategories = async () => {
+    if (!user) return;
+    
     try {
-      const { data, error } = await supabase
-        .from('categories')
-        .select('*')
-        .eq('user_id', user?.id)
-        .contains('activity_types', ['expense'])
-        .eq('is_deleted', false)
-        .order('transaction_count', { ascending: false })
-        .order('name');
-
-      if (error) throw error;
-      setCategories(data || []);
+      const parents = await getParentCategories(user.id, 'expense');
+      setParentCategories(parents);
     } catch (error) {
-      console.error('Error fetching categories:', error);
+      console.error('Error loading parent categories:', error);
+      setParentCategories([]);
+    }
+  };
+
+  const loadSubcategories = async (parentCategoryId: string) => {
+    if (!user) return;
+    
+    try {
+      const subs = await getSubcategories(user.id, parentCategoryId);
+      setSubcategories(subs);
+    } catch (error) {
+      console.error('Error loading subcategories:', error);
+      setSubcategories([]);
     }
   };
 
@@ -277,7 +251,7 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
       }
     }
 
-    if (!category) {
+    if (!mainCategory) {
       newErrors.category = 'Please select a category';
     }
 
@@ -292,9 +266,15 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
 
     try {
       const amountValue = parseFloat(amount);
-      const selectedCategory = categories.find((cat) => cat.id === category);
-      const categoryName = selectedCategory?.name || null;
-      const categoryId = selectedCategory?.id || null;
+      // Determine which category ID to send to the RPC:
+      // - If a subcategory is selected, use it
+      // - Otherwise, use the parent category
+      const selectedParent = parentCategories.find((cat) => cat.id === mainCategory);
+      const selectedSub = subcategory
+        ? subcategories.find((sub) => sub.id === subcategory)
+        : null;
+      const categoryId = subcategory || mainCategory || null;
+      const categoryName = selectedSub?.name || selectedParent?.name || null;
 
       // Always default to Personal Funds if no fund bucket is selected
       // This should rarely happen since we auto-select Personal Funds when account changes
@@ -317,15 +297,21 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
       const selectedAccountObj = accounts.find((acc) => acc.id.toString() === account);
       const accountName = selectedAccountObj?.name || 'Account';
 
-      const { data: rpcData, error } = await supabase.rpc('spend_from_account_bucket', {
+      const { error } = await supabase.rpc('spend_from_account_bucket', {
         p_user_id: user?.id,
         p_account_id: account,
         p_bucket: bucketParam,
         p_amount: amountValue,
-        p_category: categoryId || categoryName, // Pass UUID if available, fallback to name
+        p_category: categoryId, // Database category ID (sub-category or parent)
         p_description: description.trim() || categoryName || 'Payment',
         p_date: date.toISOString().split('T')[0],
         p_currency: currency,
+        p_metadata: {
+          parent_category_id: mainCategory || null,
+          parent_category_name: selectedParent?.name || null,
+          subcategory_id: subcategory || null,
+          subcategory_name: selectedSub?.name || null,
+        },
       });
 
       if (error) {
@@ -350,9 +336,6 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
 
       const displayCategoryName = categoryName || 'Uncategorized';
       let descriptionText = displayCategoryName;
-      if (subcategory) {
-        descriptionText += ` - ${subcategory}`;
-      }
       if (fundBucket.type === 'borrowed') {
         descriptionText += ` (from ${fundBucket.name})`;
       } else if (fundBucket.type === 'goal') {
@@ -376,7 +359,7 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
       // Reset form but keep modal open
       setAmount('');
       setDescription('');
-      setCategory('');
+      setMainCategory('');
       setSubcategory('');
       setAccount('');
       setDate(new Date());
@@ -384,6 +367,7 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
       setErrors({});
       setShowNoteInput(false);
       setShowAmountInput(true);
+      setSubcategories([]);
       
       // Modal stays open - user can add another transaction
     } catch (error) {
@@ -396,7 +380,6 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
 
   const selectedAccount = accounts.find((acc) => acc.id.toString() === account);
   const amountValue = parseFloat(amount) || 0;
-  const selectedCategoryObj = categories.find((cat) => cat.id === category);
 
   const formatDate = (date: Date) => {
     const today = new Date();
@@ -437,28 +420,32 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
     setAmount(cleaned);
   };
 
-  // Reset subcategory when category changes
-  useEffect(() => {
-    setSubcategory('');
-  }, [category]);
-
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-        <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea}>
         <View style={styles.container}>
+          {/* Header */}
+          <View style={styles.header}>
+            <TouchableOpacity style={styles.closeButton} onPress={onClose}>
+              <Ionicons name="close" size={24} color="#000000" />
+            </TouchableOpacity>
+            <Text style={styles.headerTitle}>Pay</Text>
+            <View style={styles.headerPlaceholder} />
+          </View>
+
           {/* Amount Display */}
-              <TouchableOpacity 
+          <TouchableOpacity 
             style={styles.amountContainer}
             onPress={() => setShowAmountInput(true)}
             activeOpacity={0.7}
           >
             {showAmountInput ? (
-                <TextInput
+              <TextInput
                 style={styles.amountInput}
-                  value={amount}
+                value={amount}
                 onChangeText={handleAmountChange}
-                  placeholder="0.00"
-                placeholderTextColor="#9AA88B"
+                placeholder="0.00"
+                placeholderTextColor="rgba(0, 0, 0, 0.3)"
                 keyboardType="decimal-pad"
                 autoFocus
                 onSubmitEditing={() => {
@@ -484,83 +471,139 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
             contentContainerStyle={styles.scrollContent}
             showsVerticalScrollIndicator={false}
           >
-            {/* Suggestions Section */}
-            {frequentlyUsedCategories.length > 0 && (
-              <View style={styles.section}>
-                <Text style={styles.sectionLabel}>Suggestions</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.pillScroll}>
-                  {frequentlyUsedCategories.map((cat) => (
-                    <TouchableOpacity
-                      key={cat.id}
-                      style={[styles.pillButton, category === cat.id && styles.pillButtonActive]}
-                      onPress={() => setCategory(cat.id)}
-                    >
-                      <Ionicons
-                        name={(cat.icon as any) || 'folder-outline'}
-                        size={16}
-                        color={category === cat.id ? '#4F6F3E' : '#6B7D5D'}
-                      />
-                      <Text style={[styles.pillText, category === cat.id && styles.pillTextActive]}>
-                        {cat.name}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </ScrollView>
-            </View>
-            )}
-
-            {/* Categories Section */}
+            {/* Categories & Subcategories Section */}
             <View style={styles.section}>
-              <View style={styles.sectionHeader}>
-                <Text style={styles.sectionLabel}>Categories</Text>
-                <TouchableOpacity onPress={() => {}}>
-                  <Text style={styles.viewAllText}>View All →</Text>
-                </TouchableOpacity>
-              </View>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.pillScroll}>
-                {categories.map((cat) => (
-                  <TouchableOpacity
-                    key={cat.id}
-                    style={[styles.pillButton, category === cat.id && styles.pillButtonActive]}
-                    onPress={() => setCategory(cat.id)}
-                  >
-                    <Ionicons
-                      name={(cat.icon as any) || 'folder-outline'}
-                      size={16}
-                      color={category === cat.id ? '#4F6F3E' : '#6B7D5D'}
-                    />
-                    <Text style={[styles.pillText, category === cat.id && styles.pillTextActive]}>
-                      {cat.name}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-            </View>
+              <Text style={styles.sectionLabel}>Select Category</Text>
 
-            {/* Sub-categories Section */}
-            {availableSubcategories.length > 0 && (
-              <View style={styles.section}>
-                <Text style={styles.sectionLabel}>Sub-categories</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.pillScroll}>
-                  {availableSubcategories.map((subcat, index) => (
-                  <TouchableOpacity
-                      key={index}
-                      style={[styles.pillButton, subcategory === subcat.name && styles.pillButtonActive]}
-                      onPress={() => setSubcategory(subcategory === subcat.name ? '' : subcat.name)}
-                    >
-                      <Ionicons
-                        name={subcat.icon as any}
-                        size={16}
-                        color={subcategory === subcat.name ? '#4F6F3E' : '#6B7D5D'}
-                      />
-                      <Text style={[styles.pillText, subcategory === subcat.name && styles.pillTextActive]}>
-                        {subcat.name}
-                      </Text>
-                  </TouchableOpacity>
-                ))}
-                </ScrollView>
+              {/* Parent Categories Grid */}
+              <View style={styles.categoryGrid}>
+                {parentCategories.map((parentCat) => {
+                  const isSelected = mainCategory === parentCat.id;
+                  const hasSubcategories = subcategories.length > 0 && isSelected;
+                  const isFullySelected = isSelected && (!hasSubcategories || subcategory);
+                  
+                  return (
+                    <View key={parentCat.id} style={styles.categoryItemContainer}>
+                      {/* Parent Category Button */}
+                      <TouchableOpacity
+                        style={[
+                          styles.categoryCard,
+                          isSelected && styles.categoryCardSelected,
+                          isFullySelected && styles.categoryCardActive,
+                        ]}
+                        onPress={() => {
+                          setMainCategory(parentCat.id);
+                          setSubcategory(''); // Reset subcategory when changing parent category
+                        }}
+                        activeOpacity={0.7}
+                      >
+                        <View style={[
+                          styles.categoryIconContainer, 
+                          isFullySelected && styles.categoryIconContainerActive
+                        ]}>
+                          <Ionicons
+                            name={(parentCat.icon as any) || 'folder-outline'}
+                            size={20}
+                            color={
+                              isFullySelected 
+                                ? '#FFFFFF' 
+                                : isSelected
+                                ? parentCat.color
+                                : parentCat.color
+                            }
+                          />
+                        </View>
+                        <Text style={[
+                          styles.categoryName, 
+                          isFullySelected && styles.categoryNameActive
+                        ]}>
+                          {parentCat.name}
+                        </Text>
+                        {isFullySelected && (
+                          <View style={styles.selectedIndicator}>
+                            <Ionicons name="checkmark-circle" size={16} color="#FFFFFF" />
+                          </View>
+                        )}
+                        {isSelected && hasSubcategories && !subcategory && (
+                          <View style={styles.selectedIndicator}>
+                            <Ionicons name="chevron-down" size={16} color="rgba(0, 0, 0, 0.5)" />
+                          </View>
+                        )}
+                      </TouchableOpacity>
+
+                      {/* Subcategories (shown when parent category is selected) */}
+                      {hasSubcategories && (
+                        <View style={styles.subcategoryContainer}>
+                          <View style={styles.subcategoryHeader}>
+                            <View style={styles.subcategoryConnector} />
+                            <Text style={styles.subcategoryLabel}>Select Subcategory (Optional)</Text>
+                          </View>
+                          <View style={styles.subcategoryGrid}>
+                            {/* Option: Use parent category directly */}
+                            <TouchableOpacity
+                              style={[
+                                styles.subcategoryCard,
+                                !subcategory && styles.subcategoryCardActive
+                              ]}
+                              onPress={() => setSubcategory('')}
+                              activeOpacity={0.7}
+                            >
+                              <Ionicons
+                                name="remove-outline"
+                                size={14}
+                                color={!subcategory ? '#FFFFFF' : 'rgba(0, 0, 0, 0.5)'}
+                                style={styles.subcategoryIcon}
+                              />
+                              <Text style={[
+                                styles.subcategoryName,
+                                !subcategory && styles.subcategoryNameActive
+                              ]}>
+                                {parentCat.name}
+                              </Text>
+                              {!subcategory && (
+                                <Ionicons name="checkmark-circle" size={14} color="#FFFFFF" />
+                              )}
+                            </TouchableOpacity>
+                            
+                            {/* Subcategory options */}
+                            {subcategories.map((subcat) => {
+                              const isSubSelected = subcategory === subcat.id;
+                              return (
+                                <TouchableOpacity
+                                  key={subcat.id}
+                                  style={[
+                                    styles.subcategoryCard,
+                                    isSubSelected && styles.subcategoryCardActive
+                                  ]}
+                                  onPress={() => setSubcategory(isSubSelected ? '' : subcat.id)}
+                                  activeOpacity={0.7}
+                                >
+                                  <Ionicons
+                                    name={(subcat.icon as any) || 'ellipse-outline'}
+                                    size={14}
+                                    color={isSubSelected ? '#FFFFFF' : 'rgba(0, 0, 0, 0.5)'}
+                                    style={styles.subcategoryIcon}
+                                  />
+                                  <Text style={[
+                                    styles.subcategoryName,
+                                    isSubSelected && styles.subcategoryNameActive
+                                  ]}>
+                                    {subcat.name}
+                                  </Text>
+                                  {isSubSelected && (
+                                    <Ionicons name="checkmark-circle" size={14} color="#FFFFFF" />
+                                  )}
+                                </TouchableOpacity>
+                              );
+                            })}
+                          </View>
+                        </View>
+                      )}
+                    </View>
+                  );
+                })}
               </View>
-            )}
+            </View>
 
             {/* Account Selection */}
             <InlineAccountSelector
@@ -576,63 +619,90 @@ export default function PayModal({ visible, onClose, onSuccess, preselectedAccou
             />
 
             {/* Transaction Details */}
-            <View style={styles.detailsSection}>
+            <GlassCard padding={0} marginVertical={12} borderRadius={24}>
               {/* Date */}
-              <TouchableOpacity style={styles.detailRow} onPress={() => setShowDatePicker(true)}>
-                <Ionicons name="calendar-outline" size={20} color="#1F3A24" />
-                <Text style={styles.detailText}>{formatDate(date)}</Text>
-                <Ionicons name="chevron-forward" size={18} color="#9AA88B" />
+              <TouchableOpacity 
+                style={[styles.detailRow, styles.detailRowFirst]} 
+                onPress={() => setShowDatePicker(true)}
+                activeOpacity={0.7}
+              >
+                <View style={styles.detailIconContainer}>
+                  <Ionicons name="calendar-outline" size={20} color="#000000" />
+                </View>
+                <View style={styles.detailContent}>
+                  <Text style={styles.detailLabel}>Date</Text>
+                  <Text style={styles.detailText}>{formatDate(date)}</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.3)" />
               </TouchableOpacity>
 
               {/* Note */}
-                  <TouchableOpacity
+              <TouchableOpacity
                 style={styles.detailRow}
                 onPress={() => setShowNoteInput(!showNoteInput)}
-                  >
-                <Ionicons name="create-outline" size={20} color="#1F3A24" />
-                {showNoteInput ? (
-                  <TextInput
-                    style={styles.noteInput}
-                    value={description}
-                    onChangeText={setDescription}
-                    placeholder="e.g., Lunch with team"
-                    placeholderTextColor="#9AA88B"
-                    autoFocus
-                    onBlur={() => {
-                      if (!description.trim()) {
-                        setShowNoteInput(false);
-                      }
-                    }}
-                  />
-                ) : (
-                  <Text style={[styles.detailText, !description && styles.detailTextPlaceholder]}>
-                    {description || 'e.g., Lunch with team'}
-                        </Text>
-                )}
-                {!showNoteInput && <Ionicons name="chevron-forward" size={18} color="#9AA88B" />}
-                  </TouchableOpacity>
+                activeOpacity={0.7}
+              >
+                <View style={styles.detailIconContainer}>
+                  <Ionicons name="create-outline" size={20} color="#000000" />
+                </View>
+                <View style={styles.detailContent}>
+                  {showNoteInput ? (
+                    <TextInput
+                      style={styles.noteInput}
+                      value={description}
+                      onChangeText={setDescription}
+                      placeholder="Add a note..."
+                      placeholderTextColor="rgba(0, 0, 0, 0.4)"
+                      autoFocus
+                      onBlur={() => {
+                        if (!description.trim()) {
+                          setShowNoteInput(false);
+                        }
+                      }}
+                    />
+                  ) : (
+                    <>
+                      <Text style={styles.detailLabel}>Note</Text>
+                      <Text style={[styles.detailText, !description && styles.detailTextPlaceholder]}>
+                        {description || 'Add a note...'}
+                      </Text>
+                    </>
+                  )}
+                </View>
+                {!showNoteInput && <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.3)" />}
+              </TouchableOpacity>
 
-              {/* Fund Source - Always show picker if account has other funds (borrowed/liability) */}
+              {/* Fund Source */}
               {account && accountHasOtherFunds && (
-                  <TouchableOpacity
+                <TouchableOpacity
                   style={styles.detailRow}
-                    onPress={() => setShowFundPicker(true)}
-                  >
-                  <Ionicons name="wallet-outline" size={20} color="#1F3A24" />
-                  <Text style={styles.detailText}>
-                    {selectedFundBucket?.name || 'Select Fund Source'}
-                  </Text>
-                  <Ionicons name="chevron-forward" size={18} color="#9AA88B" />
-                  </TouchableOpacity>
-                )}
-              {/* Show static "Personal Funds" only if no other funds exist */}
+                  onPress={() => setShowFundPicker(true)}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.detailIconContainer}>
+                    <Ionicons name="wallet-outline" size={20} color="#000000" />
+                  </View>
+                  <View style={styles.detailContent}>
+                    <Text style={styles.detailLabel}>Fund Source</Text>
+                    <Text style={styles.detailText}>
+                      {selectedFundBucket?.name || 'Select Fund Source'}
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={20} color="rgba(0, 0, 0, 0.3)" />
+                </TouchableOpacity>
+              )}
               {account && !accountHasOtherFunds && (
                 <View style={styles.detailRow}>
-                  <Ionicons name="wallet-outline" size={20} color="#1F3A24" />
-                  <Text style={styles.detailText}>Personal Funds</Text>
-              </View>
-            )}
-            </View>
+                  <View style={styles.detailIconContainer}>
+                    <Ionicons name="wallet-outline" size={20} color="#000000" />
+                  </View>
+                  <View style={styles.detailContent}>
+                    <Text style={styles.detailLabel}>Fund Source</Text>
+                    <Text style={styles.detailText}>Personal Funds</Text>
+                  </View>
+                </View>
+              )}
+            </GlassCard>
 
             {errors.account && <Text style={styles.errorText}>{errors.account}</Text>}
             {errors.category && <Text style={styles.errorText}>{errors.category}</Text>}
@@ -696,30 +766,62 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#FFFFFF',
   },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  closeButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerTitle: {
+    fontSize: 22,
+    fontFamily: 'Archivo Black',
+    color: '#000000',
+    letterSpacing: 0.5,
+  },
+  headerPlaceholder: {
+    width: 40,
+  },
   amountContainer: {
     paddingHorizontal: 24,
     paddingTop: 32,
-    paddingBottom: 24,
+    paddingBottom: 32,
     alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
   },
   amountText: {
-    fontSize: 48,
-    fontFamily: 'Archivo Black',
-    color: '#0E401C',
+    fontSize: 56,
+    fontFamily: 'InstrumentSans-ExtraBold',
+    color: '#000000',
+    letterSpacing: -1,
   },
   amountInput: {
-    fontSize: 48,
-    fontFamily: 'Archivo Black',
-    color: '#0E401C',
+    fontSize: 56,
+    fontFamily: 'InstrumentSans-ExtraBold',
+    color: '#000000',
     textAlign: 'center',
     minWidth: 200,
+    letterSpacing: -1,
   },
   scrollView: {
     flex: 1,
   },
   scrollContent: {
     paddingHorizontal: 20,
-    paddingBottom: 100,
+    paddingTop: 24,
+    paddingBottom: 120,
   },
   section: {
     marginBottom: 24,
@@ -733,108 +835,211 @@ const styles = StyleSheet.create({
   sectionLabel: {
     fontSize: 13,
     fontFamily: 'Poppins-SemiBold',
-    color: '#637050',
+    color: 'rgba(0, 0, 0, 0.6)',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
     marginBottom: 12,
   },
   viewAllText: {
     fontSize: 13,
     fontFamily: 'Poppins-Medium',
-    color: '#4F6F3E',
+    color: 'rgba(0, 0, 0, 0.6)',
   },
-  pillScroll: {
-    marginHorizontal: -4,
+  categoryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
   },
-  pillButton: {
+  categoryItemContainer: {
+    width: '48%',
+    marginBottom: 12,
+  },
+  categoryCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 999,
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#E5ECD6',
+    padding: 14,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.03)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    gap: 10,
+    minHeight: 56,
+  },
+  categoryCardSelected: {
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    borderColor: 'rgba(0, 0, 0, 0.2)',
+  },
+  categoryCardActive: {
+    backgroundColor: '#000000',
+    borderColor: '#000000',
+  },
+  categoryIconContainer: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  categoryIconContainerActive: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  categoryName: {
+    flex: 1,
+    fontSize: 15,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#000000',
+  },
+  categoryNameActive: {
+    color: '#FFFFFF',
+  },
+  selectedIndicator: {
+    marginLeft: 4,
+  },
+  subcategoryContainer: {
+    marginTop: 8,
+    marginLeft: 12,
+    paddingLeft: 12,
+    borderLeftWidth: 2,
+    borderLeftColor: 'rgba(0, 0, 0, 0.1)',
+  },
+  subcategoryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  subcategoryConnector: {
+    width: 8,
+    height: 2,
+    backgroundColor: 'rgba(0, 0, 0, 0.2)',
     marginRight: 8,
   },
-  pillButtonActive: {
-    backgroundColor: '#F7F9F2',
-    borderColor: '#4F6F3E',
-  },
-  pillText: {
-    fontSize: 14,
+  subcategoryLabel: {
+    fontSize: 11,
     fontFamily: 'Poppins-Medium',
-    color: '#6B7D5D',
+    color: 'rgba(0, 0, 0, 0.5)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
-  pillTextActive: {
-    color: '#4F6F3E',
+  subcategoryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  subcategoryCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.03)',
+    borderWidth: 1,
+    borderColor: 'rgba(0, 0, 0, 0.1)',
+    gap: 6,
+    marginBottom: 6,
+  },
+  subcategoryCardActive: {
+    backgroundColor: '#000000',
+    borderColor: '#000000',
+  },
+  subcategoryIcon: {
+    marginRight: 2,
+  },
+  subcategoryName: {
+    fontSize: 13,
+    fontFamily: 'Poppins-Medium',
+    color: 'rgba(0, 0, 0, 0.7)',
+  },
+  subcategoryNameActive: {
+    color: '#FFFFFF',
     fontFamily: 'Poppins-SemiBold',
-  },
-  detailsSection: {
-    marginTop: 8,
-    gap: 1,
-    backgroundColor: '#F7F9F2',
-    borderRadius: 16,
-    overflow: 'hidden',
   },
   detailRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 16,
+    paddingHorizontal: 20,
     paddingVertical: 16,
-    backgroundColor: '#FFFFFF',
-    gap: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
+  },
+  detailRowFirst: {
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+  },
+  detailIconContainer: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  detailContent: {
+    flex: 1,
+  },
+  detailLabel: {
+    fontSize: 12,
+    fontFamily: 'Poppins-Medium',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginBottom: 4,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
   detailText: {
-    flex: 1,
-    fontSize: 15,
-    fontFamily: 'Poppins-Regular',
-    color: '#1F3A24',
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
   },
   detailTextPlaceholder: {
-    color: '#9AA88B',
+    color: 'rgba(0, 0, 0, 0.4)',
   },
   noteInput: {
-    flex: 1,
-    fontSize: 15,
-    fontFamily: 'Poppins-Regular',
-    color: '#1F3A24',
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
     padding: 0,
+    marginTop: 4,
   },
   footer: {
     flexDirection: 'row',
     paddingHorizontal: 20,
-    paddingVertical: 16,
+    paddingTop: 16,
     paddingBottom: 32,
     gap: 12,
     backgroundColor: '#FFFFFF',
     borderTopWidth: 1,
-    borderTopColor: '#E5ECD6',
+    borderTopColor: 'rgba(0, 0, 0, 0.05)',
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
   },
   cancelButton: {
     flex: 1,
     paddingVertical: 16,
     borderRadius: 16,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: 'rgba(0, 0, 0, 0.05)',
     borderWidth: 1,
-    borderColor: '#E5ECD6',
+    borderColor: 'rgba(0, 0, 0, 0.1)',
     alignItems: 'center',
     justifyContent: 'center',
   },
   cancelButtonText: {
     fontSize: 16,
     fontFamily: 'Poppins-SemiBold',
-    color: '#1F3A24',
+    color: '#000000',
   },
   confirmButton: {
     flex: 1,
     paddingVertical: 16,
     borderRadius: 16,
-    backgroundColor: '#4F6F3E',
+    backgroundColor: '#000000',
     alignItems: 'center',
     justifyContent: 'center',
   },
   confirmButtonDisabled: {
-    opacity: 0.5,
+    opacity: 0.4,
   },
   confirmButtonText: {
     fontSize: 16,
@@ -846,7 +1051,7 @@ const styles = StyleSheet.create({
     fontFamily: 'Poppins-Regular',
     color: '#B83228',
     marginTop: 8,
-    marginLeft: 16,
+    marginLeft: 20,
   },
   pickerOverlay: {
     flex: 1,
@@ -866,12 +1071,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 16,
     borderBottomWidth: 1,
-    borderBottomColor: '#E5ECD6',
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
   },
   pickerTitle: {
-    fontSize: 18,
+    fontSize: 20,
     fontFamily: 'Archivo Black',
-    color: '#0E401C',
+    color: '#000000',
   },
   pickerItem: {
     flexDirection: 'row',
@@ -880,14 +1085,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingVertical: 16,
     borderBottomWidth: 1,
-    borderBottomColor: '#F7F9F2',
+    borderBottomColor: 'rgba(0, 0, 0, 0.05)',
   },
   pickerItemActive: {
-    backgroundColor: '#F7F9F2',
+    backgroundColor: 'rgba(0, 0, 0, 0.03)',
   },
   pickerItemText: {
     fontSize: 16,
-    fontFamily: 'Poppins-Regular',
-    color: '#1F3A24',
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
   },
 });

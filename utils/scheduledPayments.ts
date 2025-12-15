@@ -9,59 +9,60 @@ import { calculateStatus as calculateRecurrenceStatus, getDaysUntil } from '@/ut
 export interface ScheduledPayment {
   id: string;
   user_id: string;
-  title: string;
-  description?: string;
+  name: string; // Database column name (maps to title in UI)
   category_id?: string;
   amount: number;
-  currency: string;
-  due_date: string;
+  type?: 'income' | 'expense';
+  account_id?: string; // Database column name (maps to linked_account_id in UI)
+  fund_type?: string;
   scheduled_date: string;
-  linked_account_id?: string;
-  fund_type: 'personal' | 'liability' | 'goal';
-  specific_fund_id?: string;
-  linked_recurring_transaction_id?: string;
+  due_date: string;
+  created_date?: string;
   status: 'scheduled' | 'due_today' | 'overdue' | 'paid' | 'cancelled' | 'skipped' | 'postponed';
-  remind_before: boolean;
-  reminder_days: number[];
-  color: string;
-  icon: string;
-  tags?: string[];
+  status_changed_at?: string;
+  confirmed?: boolean;
+  confirmed_date?: string;
+  actual_amount?: number;
+  actual_date?: string;
+  transaction_id?: string; // Database column name (maps to related_transaction_id)
+  skip_reason?: string;
   notes?: string;
-  metadata?: any;
-  related_transaction_id?: string;
-  linked_bill_id?: string;
-  // is_active is computed from status (status in ['scheduled', 'due_today', 'overdue'])
-  is_active?: boolean; // Optional, computed property
-  // is_deleted is computed from status (status === 'cancelled')
-  is_deleted?: boolean; // Optional, computed property
-  deleted_at?: string;
-  paid_at?: string;
-  created_at: string;
-  updated_at: string;
+  reminder_sent?: boolean;
+  reminder_sent_at?: string;
+  notification_ids?: string[];
+  linked_recurring_transaction_id?: string;
+  recurring_transaction_id?: string;
+  // Computed properties for backward compatibility
+  title?: string; // Alias for name
+  linked_account_id?: string; // Alias for account_id
+  related_transaction_id?: string; // Alias for transaction_id
 }
 
 export interface CreateScheduledPaymentData {
-  title: string;
-  description?: string;
+  title: string; // Will be saved as 'name' in database
   category_id?: string;
   amount: number;
-  currency: string;
+  type?: 'income' | 'expense';
   due_date: string;
-  linked_account_id?: string;
+  linked_account_id?: string; // Will be saved as 'account_id' in database
   fund_type?: 'personal' | 'liability' | 'goal';
-  specific_fund_id?: string;
   linked_recurring_transaction_id?: string;
-  remind_before?: boolean;
-  reminder_days?: number[];
-  color?: string;
-  icon?: string;
-  tags?: string[];
+  recurring_transaction_id?: string;
   notes?: string;
-  metadata?: any;
 }
 
-export interface UpdateScheduledPaymentData extends Partial<CreateScheduledPaymentData> {
+export interface UpdateScheduledPaymentData {
   id: string;
+  title?: string;
+  category_id?: string;
+  amount?: number;
+  type?: 'income' | 'expense';
+  due_date?: string;
+  linked_account_id?: string;
+  fund_type?: 'personal' | 'liability' | 'goal';
+  linked_recurring_transaction_id?: string;
+  notes?: string;
+  status?: ScheduledPayment['status'];
 }
 
 /**
@@ -132,9 +133,12 @@ export async function fetchScheduledPayments(
 
     if (error) throw error;
 
-    // Calculate status for each payment
+    // Calculate status for each payment and map fields
     const payments = (data || []).map(payment => ({
       ...payment,
+      title: payment.name, // Map name to title
+      linked_account_id: payment.account_id, // Map account_id to linked_account_id
+      related_transaction_id: payment.transaction_id, // Map transaction_id to related_transaction_id
       status: calculateScheduledPaymentStatus(payment as ScheduledPayment),
     }));
 
@@ -168,6 +172,9 @@ export async function fetchScheduledPaymentById(id: string): Promise<ScheduledPa
     const payment = data as ScheduledPayment;
     return {
       ...payment,
+      title: payment.name, // Map name to title
+      linked_account_id: payment.account_id, // Map account_id to linked_account_id
+      related_transaction_id: payment.transaction_id, // Map transaction_id to related_transaction_id
       status: calculateScheduledPaymentStatus(payment),
     };
   } catch (error) {
@@ -193,32 +200,31 @@ export async function createScheduledPayment(
       .from('scheduled_transactions')
       .insert({
         user_id: user.user.id,
-        title: data.title,
-        description: data.description,
+        name: data.title, // Map title to name column
         category_id: data.category_id,
         amount: data.amount,
-        currency: data.currency,
+        type: data.type || 'expense',
         due_date: data.due_date,
         scheduled_date: today,
-        linked_account_id: data.linked_account_id,
+        account_id: data.linked_account_id, // Map linked_account_id to account_id column
         fund_type: data.fund_type || 'personal',
-        specific_fund_id: data.specific_fund_id,
         linked_recurring_transaction_id: data.linked_recurring_transaction_id,
+        recurring_transaction_id: data.recurring_transaction_id,
         status: status === 'upcoming' ? 'scheduled' : (status === 'due_today' ? 'due_today' : 'overdue'),
-        remind_before: data.remind_before !== false,
-        reminder_days: data.reminder_days || [7, 3, 1],
-        color: data.color || '#F59E0B',
-        icon: data.icon || 'calendar',
-        tags: data.tags,
         notes: data.notes,
-        metadata: data.metadata || {},
       })
       .select()
       .single();
 
     if (error) throw error;
 
-    return payment as ScheduledPayment;
+    // Map database fields back to interface for consistency
+    return {
+      ...payment,
+      title: payment.name,
+      linked_account_id: payment.account_id,
+      related_transaction_id: payment.transaction_id,
+    } as ScheduledPayment;
   } catch (error) {
     console.error('Error creating scheduled payment:', error);
     throw error;
@@ -236,8 +242,8 @@ export async function updateScheduledPayment(
     if (!user.user) throw new Error('User not authenticated');
 
     // Recalculate status if due_date changed
-    let status: ScheduledPayment['status'] | undefined = undefined;
-    if (data.due_date) {
+    let status: ScheduledPayment['status'] | undefined = data.status;
+    if (data.due_date && !data.status) {
       const today = new Date().toISOString().split('T')[0];
       const current = await fetchScheduledPaymentById(data.id);
       const calculatedStatus = calculateRecurrenceStatus(
@@ -259,21 +265,23 @@ export async function updateScheduledPayment(
       }
     }
 
-    const updateData: any = {
-      ...data,
-      id: undefined, // Remove id from update data
-    };
-
-    if (status !== undefined) {
-      updateData.status = status;
-    }
+    // Build update object with correct column names
+    const updateData: Record<string, any> = {};
+    if (data.title !== undefined) updateData.name = data.title;
+    if (data.category_id !== undefined) updateData.category_id = data.category_id;
+    if (data.amount !== undefined) updateData.amount = data.amount;
+    if (data.type !== undefined) updateData.type = data.type;
+    if (data.due_date !== undefined) updateData.due_date = data.due_date;
+    if (data.linked_account_id !== undefined) updateData.account_id = data.linked_account_id;
+    if (data.fund_type !== undefined) updateData.fund_type = data.fund_type;
+    if (data.linked_recurring_transaction_id !== undefined) updateData.linked_recurring_transaction_id = data.linked_recurring_transaction_id;
+    if (data.notes !== undefined) updateData.notes = data.notes;
+    if (status !== undefined) updateData.status = status;
+    updateData.status_changed_at = new Date().toISOString();
 
     const { data: payment, error } = await supabase
       .from('scheduled_transactions')
-      .update({
-        ...updateData,
-        updated_at: new Date().toISOString(),
-      })
+      .update(updateData)
       .eq('id', data.id)
       .eq('user_id', user.user.id)
       .select()
@@ -283,6 +291,9 @@ export async function updateScheduledPayment(
 
     return {
       ...payment,
+      title: payment.name,
+      linked_account_id: payment.account_id,
+      related_transaction_id: payment.transaction_id,
       status: calculateScheduledPaymentStatus(payment as ScheduledPayment),
     } as ScheduledPayment;
   } catch (error) {
@@ -303,7 +314,7 @@ export async function deleteScheduledPayment(id: string): Promise<void> {
       .from('scheduled_transactions')
       .update({
         status: 'cancelled',
-        updated_at: new Date().toISOString(),
+        status_changed_at: new Date().toISOString(),
       })
       .eq('id', id)
       .eq('user_id', user.user.id);
@@ -330,9 +341,10 @@ export async function markScheduledPaymentPaid(
       .from('scheduled_transactions')
       .update({
         status: 'paid',
-        paid_at: new Date().toISOString(),
-        related_transaction_id: transactionId,
-        updated_at: new Date().toISOString(),
+        confirmed: true,
+        confirmed_date: new Date().toISOString(),
+        transaction_id: transactionId, // Correct column name
+        status_changed_at: new Date().toISOString(),
       })
       .eq('id', id)
       .eq('user_id', user.user.id)
@@ -341,7 +353,12 @@ export async function markScheduledPaymentPaid(
 
     if (error) throw error;
 
-    return payment as ScheduledPayment;
+    return {
+      ...payment,
+      title: payment.name,
+      linked_account_id: payment.account_id,
+      related_transaction_id: payment.transaction_id,
+    } as ScheduledPayment;
   } catch (error) {
     console.error('Error marking scheduled payment as paid:', error);
     throw error;

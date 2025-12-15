@@ -26,7 +26,6 @@ import { createRecurringTransaction, CreateRecurringTransactionData } from '@/ut
 import {
   RECURRING_TRANSACTION_TYPES,
   getAllRecurringTypeDefinitions,
-  FREQUENCY_LABELS,
 } from '@/constants/recurringTransactionTypes';
 
 type Direction = 'income' | 'expense';

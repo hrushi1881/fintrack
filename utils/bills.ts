@@ -71,6 +71,136 @@ export interface CreateBillData {
   day_of_month?: number;
 }
 
+
+/**
+ * Upsert a bill for a given liability and cycle_number.
+ * Ensures one bill per cycle. If exists, updates amounts/date/account/category and metadata.
+ */
+/**
+ * Upsert a bill for a given liability and cycle_number.
+ * Ensures one bill per cycle. If exists, updates amounts/date/account/category and metadata.
+ * 
+ * ENFORCES: cycle_number must be present in metadata for liability-linked bills.
+ */
+export async function upsertBillWithCycle(params: {
+  userId: string;
+  liabilityId: string;
+  cycleNumber: number;
+  amount: number;
+  currency: string;
+  dueDate: string;
+  originalDueDate?: string | null;
+  linkedAccountId?: string | null;
+  categoryId?: string | null;
+  interestAmount?: number | null;
+  principalAmount?: number | null;
+  interestIncluded?: boolean;
+  paymentNumber?: number | null;
+  frequency?: string | null;
+  recurrencePattern?: string | null;
+  recurrenceInterval?: number | null;
+  description?: string | null;
+  title?: string | null;
+  totalAmount?: number | null;
+  metadata?: any;
+  color?: string | null;
+  icon?: string | null;
+}): Promise<{ id: string }> {
+  const {
+    userId,
+    liabilityId,
+    cycleNumber,
+    amount,
+    currency,
+    dueDate,
+    originalDueDate = dueDate,
+    linkedAccountId = null,
+    categoryId = null,
+    interestAmount = null,
+    principalAmount = null,
+    interestIncluded = true,
+    paymentNumber = null,
+    frequency = 'monthly',
+    recurrencePattern = 'monthly',
+    recurrenceInterval = 1,
+    description = null,
+    title = null,
+    totalAmount = null,
+    metadata = {},
+    color = '#10B981',
+    icon = 'receipt-outline',
+  } = params;
+
+  // Ensure recurrence_pattern/frequency to satisfy constraints
+  const freq = frequency || 'monthly';
+  const recPattern = recurrencePattern || 'monthly';
+
+  // Try to find existing bill for this liability + cycle_number
+  const { data: existing } = await supabase
+    .from('bills')
+    .select('id, metadata')
+    .eq('user_id', userId)
+    .eq('liability_id', liabilityId)
+    .contains('metadata', { cycle_number: cycleNumber })
+    .limit(1);
+
+  const billPayload: any = {
+    user_id: userId,
+    liability_id: liabilityId,
+    title: title || `Payment #${paymentNumber ?? cycleNumber}`,
+    description,
+    amount,
+    currency,
+    due_date: dueDate,
+    original_due_date: originalDueDate,
+    status: 'upcoming',
+    bill_type: 'liability_linked',
+    recurrence_pattern: recPattern,
+    recurrence_interval: recurrenceInterval ?? 1,
+    frequency: freq,
+    nature: 'payment',
+    linked_account_id: linkedAccountId,
+    interest_amount: interestAmount,
+    principal_amount: principalAmount,
+    total_amount: totalAmount ?? amount,
+    payment_number: paymentNumber ?? cycleNumber,
+    interest_included: interestIncluded,
+    category_id: categoryId,
+    color,
+    icon,
+    reminder_days: [1, 3, 7],
+    metadata: {
+      ...(existing?.[0]?.metadata || {}),
+      ...metadata,
+      // ENFORCE: cycle_number must always be present for liability-linked bills
+      cycle_number: cycleNumber,
+      liability_id: liabilityId, // Also store liability_id in metadata for easier querying
+    },
+    is_active: true,
+    is_deleted: false,
+    parent_bill_id: null,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (existing && existing.length > 0) {
+    const billId = existing[0].id;
+    const { error: updateError } = await supabase
+      .from('bills')
+      .update(billPayload)
+      .eq('id', billId);
+    if (updateError) throw updateError;
+    return { id: billId };
+  }
+
+  const { data: created, error: insertError } = await supabase
+    .from('bills')
+    .insert(billPayload)
+    .select('id')
+    .single();
+  if (insertError) throw insertError;
+  return { id: created!.id };
+}
+
 export interface UpdateBillData extends Partial<CreateBillData> {
   id: string;
 }
@@ -665,8 +795,13 @@ export async function generatePaymentBillFromContainer(
       ? actualAmount 
       : (containerBill.amount || 0);
 
+    // Derive frequency for constraint compliance
+    const paymentFrequency =
+      containerBill.frequency ||
+      (containerBill.recurrence_pattern ? mapOldPatternToFrequency(containerBill.recurrence_pattern) : null);
+
     // Create payment bill (only use fields that exist in bills table)
-    // Payment bills should NOT have recurrence_pattern (only containers do)
+    // Payment bills should NOT have recurrence_pattern (only containers do), but must carry frequency for check constraint
     const { data: paymentBill, error: paymentError } = await supabase
       .from('bills')
       .insert({
@@ -687,6 +822,7 @@ export async function generatePaymentBillFromContainer(
         reminder_days: containerBill.reminder_days || [3, 1],
         notes: containerBill.notes,
         metadata: containerBill.metadata || {},
+        frequency: paymentFrequency || 'monthly',
         
         // Payment bill doesn't have recurrence fields (only container has them)
         // Do NOT set recurrence_pattern, recurrence_interval, or recurrence_end_date
@@ -890,7 +1026,7 @@ export async function markBillAsPaid(billId: string, paymentData: PaymentData): 
       throw rpcError;
     }
 
-    const createdTransactionId = (rpcResult as any)?.id || (rpcResult as any)?.transaction_id || null;
+    const createdTransactionId = (rpcResult as string) || null;
 
     // If we got a transaction id, attach bill metadata for richer context
     if (createdTransactionId) {

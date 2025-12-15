@@ -23,8 +23,7 @@ import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { supabase } from '@/lib/supabase';
 import CustomDropdown from '@/components/CustomDropdown';
 import { COUNTRIES, PROFESSIONS } from '@/data/countries';
-import { createOrganization } from '@/utils/organizations';
-import { getSuggestedOrganizationSettings } from '@/utils/organizations';
+import { createOrganization , getSuggestedOrganizationSettings } from '@/utils/organizations';
 import { createCategory } from '@/utils/categories';
 import { formatCurrency, CURRENCY_CONFIGS } from '@/utils/currency';
 
@@ -105,7 +104,7 @@ export default function OnboardingScreen() {
   const [customSubInput, setCustomSubInput] = useState<{ [mainId: string]: string }>({});
   
   // Custom categories (user-created main categories)
-  const [customCategories, setCustomCategories] = useState<Array<{
+  const [customCategories, setCustomCategories] = useState<{
     id: string;
     name: string;
     icon: string;
@@ -113,7 +112,7 @@ export default function OnboardingScreen() {
     subs: string[];
     defaultActivityTypes: ('income' | 'expense' | 'goal' | 'bill' | 'liability' | 'budget')[];
     availableActivityTypes: ('income' | 'expense' | 'goal' | 'bill' | 'liability' | 'budget')[];
-  }>>([]);
+  }[]>([]);
   const [addingCustomCategory, setAddingCustomCategory] = useState(false);
   const [newCategoryData, setNewCategoryData] = useState<{
     name: string;
@@ -349,7 +348,7 @@ export default function OnboardingScreen() {
           .from('users_profile')
           .select('onboarding_completed')
           .eq('user_id', user.id)
-          .single();
+          .maybeSingle();
 
         if (error) {
           console.error('Error checking onboarding status:', error);
@@ -368,15 +367,21 @@ export default function OnboardingScreen() {
       }
     };
 
-    checkOnboardingStatus();
+    // Delay navigation until after first paint to avoid "navigate before mounting root layout"
+    const timer = setTimeout(() => {
+      checkOnboardingStatus();
+    }, 0);
+
+    return () => clearTimeout(timer);
   }, [user, isPreview]);
 
   const handleNext = () => {
     // Validate current step before proceeding
+    // Note: Validation applies in both preview and normal mode to ensure proper flow
     if (currentStep === 0) {
       // Step 1: Profile Information - Name and currency are required
-      if (!profileData.name.trim()) {
-        Alert.alert('Error', 'Please enter your full name to continue');
+      if (!profileData.name || profileData.name.trim().length < 2) {
+        Alert.alert('Error', 'Please enter your full name (at least 2 characters) to continue');
         return;
       }
       if (!profileData.currency) {
@@ -389,22 +394,55 @@ export default function OnboardingScreen() {
         Alert.alert('Error', 'Please add at least one organization with at least one account');
         return;
       }
+      
+      // Validate all organizations have names
+      for (const org of organizations) {
+        if (!org.name || org.name.trim().length === 0) {
+          Alert.alert('Error', 'All organizations must have a name');
+          return;
+        }
+      }
+      
       // Check if we have at least one account across all organizations
       const totalAccounts = organizations.reduce((sum, org) => sum + org.accounts.length, 0);
       if (totalAccounts === 0) {
         Alert.alert('Error', 'Please add at least one account to an organization');
         return;
       }
+      
       // Verify at least one organization has at least one account
       const hasOrgWithAccount = organizations.some((org) => org.accounts.length > 0);
       if (!hasOrgWithAccount) {
         Alert.alert('Error', 'Please add at least one account to an organization');
         return;
       }
+      
+      // Validate all accounts have names and valid balances
+      for (const org of organizations) {
+        for (const account of org.accounts) {
+          if (!account.name || account.name.trim().length === 0) {
+            Alert.alert('Error', `Account in "${org.name}" must have a name`);
+            return;
+          }
+          const balance = parseFloat(account.balance || '0') || 0;
+          if (isNaN(balance) || balance < 0) {
+            Alert.alert('Error', `Account "${account.name}" must have a valid balance (≥ 0)`);
+            return;
+          }
+          if (account.type === 'credit') {
+            const creditLimit = parseFloat(account.creditLimit || '0') || 0;
+            if (isNaN(creditLimit) || creditLimit <= 0) {
+              Alert.alert('Error', `Credit account "${account.name}" must have a valid credit limit (> 0)`);
+              return;
+            }
+          }
+        }
+      }
     } else if (currentStep === 2) {
       // Step 3: Categories - Require at least one category selected
       const selectedCategoriesCount = Object.values(categories).reduce((sum, subs) => sum + subs.length, 0);
-      if (selectedCategoriesCount === 0) {
+      const customCategoriesCount = customCategories.reduce((sum, cat) => sum + cat.subs.length, 0);
+      if (selectedCategoriesCount === 0 && customCategoriesCount === 0) {
         Alert.alert('Error', 'Please select at least one category to continue');
         return;
       }
@@ -638,7 +676,7 @@ export default function OnboardingScreen() {
         .eq('user_id', user!.id)
         .eq('is_deleted', false);
 
-      const createdOrgs: Array<{ id: string; name: string; accounts: AccountData[] }> = [];
+      const createdOrgs: { id: string; name: string; accounts: AccountData[] }[] = [];
       let organizationsCreated = 0;
 
       for (const org of organizations) {
@@ -665,7 +703,7 @@ export default function OnboardingScreen() {
               user!.id
             );
             createdOrgs.push({ ...newOrg, accounts: org.accounts });
-            organizationsCreated++;
+            // organizationsCreated++;
           } catch (orgError: any) {
             console.error(`Error creating organization ${org.name}:`, orgError);
             throw new Error(`Failed to create organization "${org.name}": ${orgError?.message || 'Unknown error'}`);
@@ -917,11 +955,57 @@ export default function OnboardingScreen() {
               }
             } else {
               // Create new category
+              // First, check if we need to create the main category as a parent
+              let parentId: string | null = null;
+              
+              if (!mainId.startsWith('custom_') && mainCat) {
+                // For predefined main categories, check if parent exists
+                const { data: mainCategoryDb } = await supabase
+                  .from('categories')
+                  .select('id')
+                  .eq('user_id', user!.id)
+                  .eq('name', mainCat.name)
+                  .eq('is_deleted', false)
+                  .maybeSingle();
+
+                if (mainCategoryDb) {
+                  parentId = mainCategoryDb.id;
+                } else {
+                  // Create main category as parent first
+                  try {
+                    const mainCategoryCreated = await createCategory({
+                      name: mainCat.name,
+                      color: mainCat.color,
+                      icon: mainCat.icon,
+                      activity_types: mainCat.defaultActivityTypes,
+                      parent_id: null,
+                    });
+                    parentId = mainCategoryCreated.id;
+                  } catch (mainError: any) {
+                    // If main category already exists (race condition), fetch it
+                    if (mainError?.message?.includes('already exists')) {
+                      const { data: existingMain } = await supabase
+                        .from('categories')
+                        .select('id')
+                        .eq('user_id', user!.id)
+                        .eq('name', mainCat.name)
+                        .eq('is_deleted', false)
+                        .maybeSingle();
+                      if (existingMain) {
+                        parentId = existingMain.id;
+                      }
+                    }
+                  }
+                }
+              }
+
+              // Create subcategory with parent_id
               await createCategory({
                 name: categoryName,
                 color,
                 icon,
                 activity_types: activityTypes as any,
+                parent_id: parentId,
               });
               categoriesCreated.push(categoryName);
             }
@@ -1922,7 +2006,7 @@ export default function OnboardingScreen() {
                             })}
                           </View>
                           <Text style={styles.activityTypesHint}>
-                            Select how you'll use these categories (e.g., Pay for expenses, Set goals, etc.)
+                            Select how you&apos;ll use these categories (e.g., Pay for expenses, Set goals, etc.)
                           </Text>
                         </View>
                       )}
@@ -2281,7 +2365,7 @@ export default function OnboardingScreen() {
               <Ionicons name="checkmark-circle" size={48} color="#10B981" />
               <Text style={styles.previewFooterTitle}>Ready to Get Started!</Text>
               <Text style={styles.previewFooterText}>
-                Everything looks good. Click "Complete Setup" to finish onboarding and start managing your finances.
+                Everything looks good. Click &quot;Complete Setup&quot; to finish onboarding and start managing your finances.
               </Text>
             </View>
           </View>
@@ -2292,7 +2376,20 @@ export default function OnboardingScreen() {
     }
   };
 
+  // Auto-navigate on success (Phase 7)
+  // IMPORTANT: This hook must be called BEFORE any conditional returns
+  // to maintain consistent hook order between renders
+  useEffect(() => {
+    if (showSuccess) {
+      const timer = setTimeout(() => {
+        router.replace('/(tabs)');
+      }, 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [showSuccess]);
+
   // Show loading while checking onboarding status
+  // This early return must come AFTER all hooks
   if (checkingExisting) {
     return (
       <View style={styles.container}>
@@ -2306,16 +2403,6 @@ export default function OnboardingScreen() {
       </View>
     );
   }
-
-  // Auto-navigate on success (Phase 7)
-  useEffect(() => {
-    if (showSuccess) {
-      const timer = setTimeout(() => {
-        router.replace('/(tabs)');
-      }, 2000);
-      return () => clearTimeout(timer);
-    }
-  }, [showSuccess]);
 
   return (
     <View style={styles.container}>
@@ -3248,14 +3335,6 @@ const styles = StyleSheet.create({
   },
   addCustomCategoryForm: {
     padding: 16,
-  },
-  inputLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#000000',
-    fontFamily: 'Poppins-SemiBold',
-    marginBottom: 8,
-    marginTop: 12,
   },
   colorGrid: {
     flexDirection: 'row',

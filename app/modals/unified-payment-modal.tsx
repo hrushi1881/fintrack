@@ -43,9 +43,8 @@ import {
   calculatePaymentImpact, 
   calculatePaymentIntelligence, 
   autoAllocatePayment,
-  LiabilityPaymentAllocation 
 } from '@/utils/paymentImpact';
-import { PAYMENT_PURPOSES, PaymentPurpose } from '@/constants/paymentPurposes';
+import { PAYMENT_PURPOSES } from '@/constants/paymentPurposes';
 
 type BillData = {
   id: string;
@@ -97,6 +96,8 @@ interface UnifiedPaymentModalProps {
       remainingBalance?: number;
     };
   };
+  // For recurring transactions - pass the ID to auto-detect type
+  recurringTransactionId?: string;
   // Pre-filled values
   prefillAmount?: number;
   prefillDate?: Date;
@@ -110,6 +111,7 @@ export default function UnifiedPaymentModal({
   liabilityId,
   liabilityIds, // New: for multi-liability payments
   createBillFromCycle,
+  recurringTransactionId,
   prefillAmount,
   prefillDate,
 }: UnifiedPaymentModalProps) {
@@ -120,6 +122,7 @@ export default function UnifiedPaymentModal({
   const [bill, setBill] = useState<BillData | null>(null);
   const [liability, setLiability] = useState<LiabilityData | null>(null);
   const [liabilities, setLiabilities] = useState<LiabilityData[]>([]); // New: for multi-liability
+  const [recurringTransaction, setRecurringTransaction] = useState<{ type: 'income' | 'expense'; title?: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [accounts, setAccounts] = useState<any[]>([]);
@@ -136,13 +139,13 @@ export default function UnifiedPaymentModal({
   const [showPurposePicker, setShowPurposePicker] = useState(false);
 
   // Multi-liability allocation state
-  const [allocations, setAllocations] = useState<Array<{
+  const [allocations, setAllocations] = useState<{
     liabilityId: string;
     allocatedAmount: number;
     interest: number;
     fees: number;
     principal: number;
-  }>>([]);
+  }[]>([]);
 
   // Interest handling
   const [interestIncluded, setInterestIncluded] = useState(true);
@@ -336,6 +339,12 @@ export default function UnifiedPaymentModal({
             .single();
 
           if (!error && recurringData) {
+            // Store recurring transaction type (income vs expense)
+            setRecurringTransaction({
+              type: recurringData.type as 'income' | 'expense',
+              title: recurringData.title || recurringData.name,
+            });
+            
             if (recurringData.account_id) {
               setSelectedAccountId(recurringData.account_id);
             }
@@ -346,6 +355,23 @@ export default function UnifiedPaymentModal({
               // Category will be used when creating bill
             }
           }
+        }
+      }
+      
+      // Also fetch recurring transaction type if recurringTransactionId is provided directly
+      if (recurringTransactionId && !createBillFromCycle?.recurringTransactionId) {
+        const { data: recurringData, error } = await supabase
+          .from('recurring_transactions')
+          .select('id, type, title, name, account_id')
+          .eq('id', recurringTransactionId)
+          .eq('user_id', user.id)
+          .single();
+
+        if (!error && recurringData) {
+          setRecurringTransaction({
+            type: recurringData.type as 'income' | 'expense',
+            title: recurringData.title || recurringData.name,
+          });
         }
       }
       // Fetch liability if liabilityId provided
@@ -972,10 +998,35 @@ export default function UnifiedPaymentModal({
     try {
       setSaving(true);
 
-      // Get category
+      // If we were opened to create a bill from a cycle and no bill exists yet, force scheduling first.
+      if (createBillFromCycle && !bill?.id) {
+        Alert.alert(
+          'Create bill first',
+          'This action creates the bill only. Use Schedule to generate the bill, then pay it.',
+        );
+        return;
+      }
+
+      // Get category - use 'income' category for income type recurring transactions
       let categoryId: string | null = null;
+      const isIncomeType = recurringTransaction?.type === 'income';
       try {
-        const categories = await fetchCategories(user.id, { activityType: 'expense' });
+        const categories = await fetchCategories(user.id, { activityType: isIncomeType ? 'income' : 'expense' });
+        
+        if (isIncomeType) {
+          // For income, try to find salary/income category
+          const incomeCategory = categories.find(c => 
+            c.name.toLowerCase().includes('salary') || 
+            c.name.toLowerCase().includes('income') ||
+            c.name.toLowerCase().includes('earning')
+          );
+          if (incomeCategory) {
+            categoryId = incomeCategory.id;
+          } else if (categories.length > 0) {
+            categoryId = categories[0].id;
+          }
+        } else {
+          // For expenses, try to find loan/debt category
         const loanCategory = categories.find(c => 
           c.name.toLowerCase().includes('loan') || 
           c.name.toLowerCase().includes('debt')
@@ -986,6 +1037,7 @@ export default function UnifiedPaymentModal({
           categoryId = bill.category_id;
         } else if (categories.length > 0) {
           categoryId = categories[0].id;
+          }
         }
       } catch (error) {
         console.error('Error fetching category:', error);
@@ -1021,7 +1073,7 @@ export default function UnifiedPaymentModal({
             continue;
           }
 
-          const allocTransactionId = (allocRpcData as any)?.id;
+          const allocTransactionId = allocRpcData as string;
 
           // Create liability_payment record
           const { error: paymentError } = await supabase
@@ -1081,7 +1133,7 @@ export default function UnifiedPaymentModal({
         if (impact) {
           finalPrincipal = impact.principalPaid;
           finalInterest = impact.interestPaid;
-          finalFees = impact.feesPaid;
+          const finalFees = impact.feesPaid;
         } else if (interestIncluded) {
           // Interest is included in amount, calculate breakdown
           if (paymentBreakdown) {
@@ -1098,21 +1150,44 @@ export default function UnifiedPaymentModal({
           finalInterest = parseFloat(interestAmount) || 0;
         }
 
-        // Create expense transaction
+        // Create transaction - use receive RPC for income, spend RPC for expense
+        const isIncomeType = recurringTransaction?.type === 'income';
+        const transactionTitle = recurringTransaction?.title || bill?.title || liability?.title;
+        
+        let transactionId: string;
+        
+        if (isIncomeType) {
+          // Income transaction - money coming IN
+          const { data: rpcData, error: rpcError } = await supabase.rpc('receive_to_account_bucket', {
+            p_user_id: user.id,
+            p_account_id: selectedAccountId,
+            p_bucket_type: bucketParam.type,
+            p_bucket_id: bucketParam.id,
+            p_amount: amountNum,
+            p_category: categoryId,
+            p_description: description || `${transactionTitle} - Cycle income received`,
+            p_date: paymentDate.toISOString().split('T')[0],
+            p_currency: currency,
+          });
+
+          if (rpcError) throw rpcError;
+          transactionId = rpcData as string;
+        } else {
+          // Expense transaction - money going OUT
         const { data: rpcData, error: rpcError } = await supabase.rpc('spend_from_account_bucket', {
           p_user_id: user.id,
           p_account_id: selectedAccountId,
           p_bucket: bucketParam,
           p_amount: amountNum,
           p_category: categoryId,
-          p_description: description || `${purposeTag} payment for ${bill?.title || liability?.title}`,
+            p_description: description || `${purposeTag} payment for ${transactionTitle}`,
           p_date: paymentDate.toISOString().split('T')[0],
           p_currency: currency,
         });
 
         if (rpcError) throw rpcError;
-
-        const transactionId = (rpcData as any)?.id;
+          transactionId = rpcData as string;
+        }
 
         // If paying a bill
         if (bill) {
@@ -1191,7 +1266,7 @@ export default function UnifiedPaymentModal({
                 amount: amountNum,
                 payment_date: paymentDate.toISOString().split('T')[0],
                 description: description || `${purposeTag} payment for ${bill?.title || liability?.title}`,
-                payment_type: bill ? 'bill' : 'manual',
+                payment_type: bill ? 'scheduled' : 'manual', // scheduled for bill payments, manual for direct payments
                 principal_component: finalPrincipal,
                 interest_component: finalInterest,
                 transaction_id: transactionId,
@@ -1271,7 +1346,13 @@ export default function UnifiedPaymentModal({
             {/* Header */}
             <View style={styles.header}>
               <Text style={styles.title}>
-                {bill ? `Pay ${bill.title}` : liability ? `Pay ${liability.title}` : 'Make Payment'}
+                {recurringTransaction?.type === 'income' 
+                  ? `Record ${recurringTransaction?.title || 'Income'}`
+                  : bill 
+                    ? `Pay ${bill.title}` 
+                    : liability 
+                      ? `Pay ${liability.title}` 
+                      : 'Make Payment'}
               </Text>
               <TouchableOpacity onPress={onClose} style={styles.closeButton}>
                 <Ionicons name="close" size={24} color="#000000" />
@@ -1486,40 +1567,65 @@ export default function UnifiedPaymentModal({
                     )}
                   </View>
                   
-                  <View style={styles.interestToggleRow}>
-                    <Text style={styles.interestToggleLabel}>Included</Text>
-                    <Switch
-                      value={interestIncluded}
-                      onValueChange={setInterestIncluded}
-                      trackColor={{ false: '#D1D5DB', true: '#10B981' }}
-                      thumbColor="#FFFFFF"
-                    />
-                  </View>
-
-                  {!interestIncluded && (
-                    <View style={styles.interestInputs}>
+                  {/* Interest Section */}
+                  <View style={styles.interestSection}>
                       <View style={styles.interestInputRow}>
-                        <Text style={styles.interestLabel}>Principal</Text>
-                        <TextInput
-                          style={styles.interestInput}
-                          value={principalAmount}
-                          onChangeText={setPrincipalAmount}
-                          placeholder="0.00"
-                          keyboardType="decimal-pad"
-                        />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.interestLabel}>Interest Amount</Text>
+                        <Text style={styles.interestHint}>Optional - enter if applicable</Text>
                       </View>
-                      <View style={styles.interestInputRow}>
-                        <Text style={styles.interestLabel}>Interest</Text>
                         <TextInput
                           style={styles.interestInput}
                           value={interestAmount}
-                          onChangeText={setInterestAmount}
+                        onChangeText={(val) => {
+                          setInterestAmount(val);
+                          // Recalculate total based on inclusion
+                          const p = parseFloat(principalAmount || totalAmount || '0') || 0;
+                          const i = parseFloat(val || '0') || 0;
+                          const f = parseFloat(feesAmount || '0') || 0;
+                          if (!interestIncluded) {
+                            setTotalAmount((p + i + f).toFixed(2));
+                          }
+                        }}
                           placeholder="0.00"
                           keyboardType="decimal-pad"
                         />
                       </View>
-                    </View>
+                    
+                    <TouchableOpacity
+                      onPress={() => {
+                        const newIncluded = !interestIncluded;
+                        setInterestIncluded(newIncluded);
+                        // Recalculate total
+                        const p = parseFloat(principalAmount || totalAmount || '0') || 0;
+                        const i = parseFloat(interestAmount || '0') || 0;
+                        const f = parseFloat(feesAmount || '0') || 0;
+                        if (newIncluded) {
+                          // Interest is included in principal
+                          setTotalAmount((p + f).toFixed(2));
+                        } else {
+                          // Interest is additional
+                          setTotalAmount((p + i + f).toFixed(2));
+                        }
+                      }}
+                      style={styles.interestToggleRow}
+                      activeOpacity={0.7}
+                    >
+                      <View style={[styles.toggleCheckbox, interestIncluded && styles.toggleCheckboxChecked]}>
+                        {interestIncluded && (
+                          <Ionicons name="checkmark" size={14} color="#FFFFFF" />
                   )}
+                      </View>
+                      <View style={{ flex: 1, marginLeft: 10 }}>
+                        <Text style={styles.interestToggleLabel}>Interest included in amount</Text>
+                        <Text style={styles.interestHint}>
+                          {interestIncluded 
+                            ? 'Interest is already part of the amount entered'
+                            : 'Interest will be added to amount for total'}
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  </View>
 
                   {paymentBreakdown && interestIncluded && (
                     <View style={styles.breakdown}>
@@ -1830,7 +1936,9 @@ export default function UnifiedPaymentModal({
                 {saving ? (
                   <ActivityIndicator size="small" color="#FFFFFF" />
                 ) : (
-                  <Text style={styles.confirmButtonText}>Confirm Payment</Text>
+                  <Text style={styles.confirmButtonText}>
+                    {recurringTransaction?.type === 'income' ? 'Record Income' : 'Confirm Payment'}
+                  </Text>
                 )}
               </TouchableOpacity>
             </View>
@@ -2220,16 +2328,44 @@ const styles = StyleSheet.create({
   interestHeader: {
     marginBottom: 12,
   },
+  interestSection: {
+    marginTop: 16,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0, 0, 0, 0.08)',
+  },
   interestToggleRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: 8,
+    alignItems: 'flex-start',
+    marginTop: 16,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(0, 0, 0, 0.08)',
   },
   interestToggleLabel: {
     fontSize: 14,
     fontFamily: 'InstrumentSerif-Regular',
     color: 'rgba(0, 0, 0, 0.7)',
+  },
+  interestHint: {
+    fontSize: 11,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: 'rgba(0, 0, 0, 0.5)',
+    marginTop: 2,
+  },
+  toggleCheckbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 2,
+    borderColor: '#10B981',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+  },
+  toggleCheckboxChecked: {
+    backgroundColor: '#10B981',
+    borderColor: '#10B981',
   },
   switchRow: {
     flexDirection: 'row',

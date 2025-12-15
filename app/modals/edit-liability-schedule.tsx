@@ -20,7 +20,6 @@ import { formatCurrencyAmount } from '@/utils/currency';
 import GlassCard from '@/components/GlassCard';
 import { updateLiabilitySchedule, deleteLiabilitySchedule, LiabilitySchedule, validateScheduleDate } from '@/utils/liabilitySchedules';
 import { changePaymentAmount, changePaymentDate, AmountChangeOption } from '@/utils/liabilityPaymentAdjustments';
-import { supabase } from '@/lib/supabase';
 
 interface EditLiabilityScheduleModalProps {
   visible: boolean;
@@ -311,7 +310,7 @@ export default function EditLiabilityScheduleModal({
               </View>
               {isAmountChanged && schedule.status === 'pending' && !showAmountOptions && (
                 <Text style={styles.hintText}>
-                  Amount changed. Tap "Save" to choose how to apply the change.
+                  Amount changed. Tap &quot;Save&quot; to choose how to apply the change.
                 </Text>
               )}
             </View>
