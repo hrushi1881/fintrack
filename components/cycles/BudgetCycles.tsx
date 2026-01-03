@@ -95,8 +95,9 @@ export default function BudgetCycles({
 
   const currentCycleData = currentCycle?.metadata;
   const percentUsed = currentCycleData?.percentUsed || 0;
-  const isOverBudget = percentUsed > 100;
-  const isWarning = percentUsed > 90 && percentUsed <= 100;
+  const isSaveTarget = budget?.budget_mode === 'save';
+  const isOverBudget = isSaveTarget ? percentUsed < 100 : percentUsed > 100;
+  const isWarning = isSaveTarget ? percentUsed < 50 : percentUsed > 90;
 
   return (
     <View style={styles.container}>
@@ -104,7 +105,10 @@ export default function BudgetCycles({
       <View style={styles.header}>
         <Text style={styles.title}>Budget Cycles</Text>
         <Text style={styles.subtitle}>
-          Track spending across budget periods
+          {budget?.budget_mode === 'save'
+            ? 'Track contributions across saving periods'
+            : 'Track spending across budget periods'
+          }
         </Text>
       </View>
 
@@ -127,7 +131,9 @@ export default function BudgetCycles({
 
           <View style={styles.progressAmounts}>
             <View>
-              <Text style={styles.progressLabel}>Spent</Text>
+              <Text style={styles.progressLabel}>
+                {isSaveTarget ? 'Contributed' : 'Spent'}
+              </Text>
               <Text style={[
                 styles.progressValue,
                 { color: isOverBudget ? '#EF4444' : '#1F2937' }
@@ -137,7 +143,9 @@ export default function BudgetCycles({
             </View>
             <View style={styles.progressDivider} />
             <View>
-              <Text style={styles.progressLabel}>Budget</Text>
+              <Text style={styles.progressLabel}>
+                {isSaveTarget ? 'Target' : 'Budget'}
+              </Text>
               <Text style={styles.progressValue}>
                 {formatCurrency(currentCycleData.budgetAmount)}
               </Text>
@@ -158,12 +166,18 @@ export default function BudgetCycles({
 
           {!isOverBudget && (
             <Text style={styles.remainingText}>
-              {formatCurrency(currentCycleData.remaining)} remaining
+              {isSaveTarget
+                ? `${formatCurrency(currentCycleData.remaining)} to target`
+                : `${formatCurrency(currentCycleData.remaining)} remaining`
+              }
             </Text>
           )}
           {isOverBudget && (
             <Text style={styles.overbudgetText}>
-              {formatCurrency(currentCycleData.spent - currentCycleData.budgetAmount)} over budget!
+              {isSaveTarget
+                ? `${formatCurrency(currentCycleData.budgetAmount - currentCycleData.spent)} short of target!`
+                : `${formatCurrency(currentCycleData.spent - currentCycleData.budgetAmount)} over budget!`
+              }
             </Text>
           )}
         </GlassmorphCard>

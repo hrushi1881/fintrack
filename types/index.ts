@@ -649,7 +649,7 @@ export interface Budget {
   currency: string;
   created_by: string;
   budget_type: 'monthly' | 'category' | 'goal_based' | 'smart' | 'custom';
-  budget_mode?: 'spend_cap' | 'save_target'; // NEW: Determines what we're tracking
+  budget_mode?: 'spend_cap' | 'save'; // NEW: Determines what we're tracking
   start_date: string;
   end_date: string;
   recurrence_pattern?: 'monthly' | 'weekly' | 'yearly' | 'custom';
@@ -665,6 +665,10 @@ export interface Budget {
     goal_subtype?: 'A' | 'B' | 'C'; // A: Saving Target, B: Under Budget Saving, C: Category-Linked Goal
     baseline_category_avg?: number; // For subtype C
     auto_calculate_amount?: boolean; // For subtype A
+    custom_frequency?: {
+      interval: number;
+      unit: 'day' | 'week' | 'month' | 'year';
+    }; // For custom recurring budgets
     ui_settings?: any;
     template?: any;
     reflection_ready?: boolean; // For end-of-period ritual

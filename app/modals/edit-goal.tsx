@@ -170,13 +170,10 @@ export default function EditGoalModal({
     }
   };
 
-  // Filter accounts for linking (exclude liability and goals_savings, match currency from settings)
+  // Linkable accounts: allow all active accounts (no type/currency restriction)
   const linkableAccounts = accounts?.filter(
-    (account) => 
-      account.type !== 'liability' && 
-      account.type !== 'goals_savings' &&
-      (account.is_active === true || account.is_active === undefined || account.is_active === null) &&
-      (!currency || account.currency === currency) // Match currency from settings
+    (account) =>
+      account.is_active === true || account.is_active === undefined || account.is_active === null
   ) || [];
 
   // Accounts that have goal funds (cannot be removed)

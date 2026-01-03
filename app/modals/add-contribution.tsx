@@ -15,6 +15,7 @@ import {
   validateContributionData,
   getGoalAccounts,
   getLinkedAccountsForGoal,
+  linkAccountsToGoal,
 } from '@/utils/goals';
 import { formatCurrencyAmount, formatCurrencySymbol } from '@/utils/currency';
 import { Goal, Account } from '@/types';
@@ -39,7 +40,7 @@ export default function AddContributionModal({
   
   const [amount, setAmount] = useState('');
   const [sourceAccountId, setSourceAccountId] = useState('');
-  const [destinationAccountId, setDestinationAccountId] = useState(''); // Keep for backward compatibility, but we'll use selectedDestinationAccounts
+  const [destinationAccountId, setDestinationAccountId] = useState('');
   const [description, setDescription] = useState('');
   const [date, setDate] = useState(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -51,29 +52,21 @@ export default function AddContributionModal({
   const [linkedAccounts, setLinkedAccounts] = useState<Account[]>([]);
   const [, setLoadingLinkedAccounts] = useState(false);
   const [showAddNewAccount, setShowAddNewAccount] = useState(false);
-  const [selectedDestinationAccounts, setSelectedDestinationAccounts] = useState<string[]>([]); // Multiple selection for destination
 
-  // Source accounts: ALL accounts (except inactive ones) - user can contribute from any account
-  // Prioritize accounts that have goal funds for this goal or are linked
-  // Then include all other accounts
-  // IMPORTANT: Filter by goal currency to prevent currency mismatch errors
+  // Source accounts: ALL active accounts - user can contribute from any account
+  // Prioritize accounts that have goal funds or are linked, then others
   const sourceAccounts = useMemo(() => {
     if (!accounts || accounts.length === 0 || !goal) {
       console.log('⚠️ add-contribution: No accounts available or no goal');
       return [];
     }
-    
-    // Use goal's currency - source accounts MUST match goal currency
-    const targetCurrency = goal.currency || currency || 'INR';
-    
+
     const accountMap = new Map<string, Account & { hasGoalFunds?: boolean; isLinked?: boolean }>();
     
     // First priority: Accounts that have goal funds for this goal (these are the accounts shown in Goal Funds Breakdown)
     goalAccounts.forEach(({ account }) => {
-      // Include ALL active accounts that match goal currency
       if (
-        (account.is_active === true || account.is_active === undefined || account.is_active === null) &&
-        account.currency === targetCurrency // Match goal currency
+        account.is_active === true || account.is_active === undefined || account.is_active === null
       ) {
         accountMap.set(account.id, { 
           ...account as Account,
@@ -85,10 +78,8 @@ export default function AddContributionModal({
     
     // Second priority: Linked accounts (accounts linked to the goal via goal_accounts)
     linkedAccounts.forEach((account) => {
-      // Include ALL active accounts that match goal currency
       if (
-        (account.is_active === true || account.is_active === undefined || account.is_active === null) &&
-        account.currency === targetCurrency // Match goal currency
+        account.is_active === true || account.is_active === undefined || account.is_active === null
       ) {
         // Don't override if account already in map (from goalAccounts)
         if (!accountMap.has(account.id)) {
@@ -108,12 +99,8 @@ export default function AddContributionModal({
     // Third priority: ALL other accounts that match goal currency
     accounts.forEach((account) => {
       const acc = account as Account;
-      // Include ALL active accounts with matching currency
-      // (liability accounts, goals_savings accounts, etc. are all allowed if currency matches)
-      // The only restriction is fund type: goal funds cannot be used for contributions (enforced by FundPicker)
       if (
-        (acc.is_active === true || acc.is_active === undefined || acc.is_active === null) &&
-        acc.currency === targetCurrency // Match goal currency
+        acc.is_active === true || acc.is_active === undefined || acc.is_active === null
       ) {
         // Only add if not already in map (prioritized accounts already added)
         if (!accountMap.has(acc.id)) {
@@ -139,25 +126,21 @@ export default function AddContributionModal({
       return a.name.localeCompare(b.name);
     });
     
-    console.log('✅ add-contribution sourceAccounts:', result.length, 'total (prioritized: goal funds:', goalAccounts.length, 'linked:', linkedAccounts.length, ', goal currency:', targetCurrency, ')');
+    console.log('✅ add-contribution sourceAccounts:', result.length, 'total (prioritized: goal funds:', goalAccounts.length, 'linked:', linkedAccounts.length, ')');
     return result as Account[];
-  }, [accounts, goalAccounts, linkedAccounts, goal, currency]);
+  }, [accounts, goalAccounts, linkedAccounts, goal]);
   
-  // ROW 1: Accounts with funds OR accounts linked during goal creation (show even if zero balance)
-  // These are the accounts where goal funds can stay
+  // ROW 1: Linked accounts or accounts already holding goal funds (store goal funds here)
   const destinationAccountsRow1 = useMemo(() => {
     if (!goal) return [];
     
-    const targetCurrency = goal.currency || currency || 'INR';
     const accountMap = new Map<string, Account & { goalFundBalance?: number; isLinked?: boolean }>();
     
     // Add accounts that have goal funds (even if balance is 0)
     goalAccounts.forEach(({ account, balance }) => {
       const acc = account as Account;
       if (
-        acc.type !== 'liability' && // Only exclude liability accounts - goals_savings is valid for goal funds
-        (acc.is_active === true || acc.is_active === undefined || acc.is_active === null) &&
-        acc.currency === targetCurrency
+        (acc.is_active === true || acc.is_active === undefined || acc.is_active === null)
       ) {
         accountMap.set(acc.id, {
           ...acc,
@@ -171,9 +154,7 @@ export default function AddContributionModal({
     if (linkedAccounts && linkedAccounts.length > 0) {
       linkedAccounts.forEach((acc) => {
         if (
-          acc.type !== 'liability' && // Only exclude liability accounts - goals_savings is valid for goal funds
-          (acc.is_active === true || acc.is_active === undefined || acc.is_active === null) &&
-          acc.currency === targetCurrency
+          (acc.is_active === true || acc.is_active === undefined || acc.is_active === null)
         ) {
           if (!accountMap.has(acc.id)) {
             const goalAccount = goalAccounts.find(ga => ga.account.id === acc.id);
@@ -210,7 +191,6 @@ export default function AddContributionModal({
   const destinationAccountsRow2 = useMemo(() => {
     if (!goal || !showAddNewAccount) return [];
     
-    const targetCurrency = goal.currency || currency || 'INR';
     const row1AccountIds = new Set(destinationAccountsRow1.map(acc => acc.id));
     
     return (accounts || [])
@@ -218,9 +198,7 @@ export default function AddContributionModal({
         const acc = account as Account;
         return (
           !row1AccountIds.has(acc.id) && // Exclude Row 1 accounts
-          acc.type !== 'liability' && // Only exclude liability accounts - goals_savings is valid for goal funds
-          (acc.is_active === true || acc.is_active === undefined || acc.is_active === null) &&
-          acc.currency === targetCurrency
+          (acc.is_active === true || acc.is_active === undefined || acc.is_active === null)
         );
       })
       .map(account => account as Account)
@@ -295,7 +273,6 @@ export default function AddContributionModal({
       if (destinationAccountsRow1.length > 0 && !destinationAccountId) {
         const firstAccountId = destinationAccountsRow1[0].id;
         setDestinationAccountId(firstAccountId);
-        setSelectedDestinationAccounts([firstAccountId]);
       }
     }
   }, [visible, destinationAccountsRow1, goal, destinationAccountId]);
@@ -331,26 +308,25 @@ export default function AddContributionModal({
       return;
     }
 
-    // Validate currency match before submitting
-    const sourceAccount = sourceAccounts.find(acc => acc.id === sourceAccountId);
-    const allDestinationAccounts = [...destinationAccountsRow1, ...destinationAccountsRow2];
-    const destinationAccount = allDestinationAccounts.find(acc => acc.id === destinationAccountId);
-    const goalCurrency = goal.currency || currency;
-    
-    if (sourceAccount && destinationAccount) {
-      if (sourceAccount.currency !== destinationAccount.currency) {
-        Alert.alert(
-          'Currency Mismatch',
-          `Source account (${sourceAccount.name}) uses ${sourceAccount.currency}, but destination account (${destinationAccount.name}) uses ${destinationAccount.currency}. Both accounts must use the same currency.`
-        );
+    // Ensure destination is linked (or already has funds). If not, link it now.
+    const linkedIds = new Set(linkedAccounts.map(acc => acc.id));
+    const destAlreadyLinked = linkedIds.has(destinationAccountId);
+    const destHasFunds = goalAccounts.some((ga) => ga.account.id === destinationAccountId);
+
+    let effectiveLinkedIds = Array.from(linkedIds);
+    if (!destAlreadyLinked && !destHasFunds) {
+      if (!user?.id) {
+        Alert.alert('Error', 'User not found. Please sign in again.');
         return;
       }
-      
-      if (sourceAccount.currency !== goalCurrency) {
-        Alert.alert(
-          'Currency Mismatch',
-          `Selected accounts use ${sourceAccount.currency}, but the goal uses ${goalCurrency}. Please select accounts that match the goal currency.`
-        );
+      try {
+        effectiveLinkedIds = Array.from(new Set([...linkedIds, destinationAccountId]));
+        await linkAccountsToGoal(goal.id, effectiveLinkedIds, user.id);
+        await fetchLinkedAccounts();
+        await fetchGoalAccounts(true);
+      } catch (error: any) {
+        console.error('Error linking account before contribution:', error);
+        Alert.alert('Error', error.message || 'Failed to link account for this goal.');
         return;
       }
     }
@@ -432,7 +408,6 @@ export default function AddContributionModal({
       setDescription('');
       setSelectedFundBucket(null);
       setShowAddNewAccount(false);
-      setSelectedDestinationAccounts([]);
       // Refresh goal accounts to show updated balances
       await fetchGoalAccounts();
     } catch (error: any) {
@@ -512,13 +487,13 @@ export default function AddContributionModal({
             <View style={styles.accountsSection}>
               <Text style={styles.sectionTitle}>Accounts for Funds to Stay In</Text>
               <Text style={styles.sectionSubtitle}>
-                Select account(s) where goal funds will be stored
+                Select the account where goal funds will be stored
               </Text>
               {destinationAccountsRow1.length > 0 ? (
                 <View style={styles.accountRow}>
                   {destinationAccountsRow1.map((acc) => {
                     const goalFundBalance = (acc as any).goalFundBalance ?? 0;
-                    const isSelected = selectedDestinationAccounts.includes(acc.id) || destinationAccountId === acc.id;
+                    const isSelected = destinationAccountId === acc.id;
                     return (
                       <TouchableOpacity
                         key={acc.id}
@@ -528,11 +503,6 @@ export default function AddContributionModal({
                         ]}
                         onPress={() => {
                           setDestinationAccountId(acc.id);
-                          if (selectedDestinationAccounts.includes(acc.id)) {
-                            setSelectedDestinationAccounts(selectedDestinationAccounts.filter(id => id !== acc.id));
-                          } else {
-                            setSelectedDestinationAccounts([...selectedDestinationAccounts, acc.id]);
-                          }
                         }}
                       >
                         <View style={styles.accountCardContent}>
@@ -580,7 +550,7 @@ export default function AddContributionModal({
                   {destinationAccountsRow2.length > 0 ? (
                     <View style={styles.accountRow}>
                       {destinationAccountsRow2.map((acc) => {
-                        const isSelected = selectedDestinationAccounts.includes(acc.id) || destinationAccountId === acc.id;
+                        const isSelected = destinationAccountId === acc.id;
                         return (
                           <TouchableOpacity
                             key={acc.id}
@@ -590,11 +560,6 @@ export default function AddContributionModal({
                             ]}
                             onPress={() => {
                               setDestinationAccountId(acc.id);
-                              if (selectedDestinationAccounts.includes(acc.id)) {
-                                setSelectedDestinationAccounts(selectedDestinationAccounts.filter(id => id !== acc.id));
-                              } else {
-                                setSelectedDestinationAccounts([...selectedDestinationAccounts, acc.id]);
-                              }
                             }}
                           >
                             <View style={styles.accountCardContent}>

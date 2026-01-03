@@ -53,7 +53,7 @@ const EditBudgetModal: React.FC<EditBudgetModalProps> = ({
     endDate: '',
     recurrencePattern: 'monthly' as 'monthly' | 'weekly' | 'yearly' | 'custom',
     recurringBudget: false,
-    budgetMode: 'spend_cap' as 'spend_cap' | 'save_target',
+    budgetMode: 'spend_cap' as 'spend_cap' | 'save',
     categoryId: '',
     goalId: '',
     accountIds: [] as string[],
@@ -116,7 +116,7 @@ const EditBudgetModal: React.FC<EditBudgetModalProps> = ({
             endDate: budget.end_date || '',
             recurrencePattern: (budget.recurrence_pattern as any) || 'monthly',
             recurringBudget: !!budget.recurrence_pattern,
-            budgetMode: (budget.budget_mode as 'spend_cap' | 'save_target') || 'spend_cap',
+            budgetMode: (budget.budget_mode as 'spend_cap' | 'save') || 'spend_cap',
             categoryId: budget.category_id || '',
             goalId: budget.goal_id || '',
             accountIds: accountIds,
@@ -398,14 +398,14 @@ const EditBudgetModal: React.FC<EditBudgetModalProps> = ({
                 <TouchableOpacity
                   style={[
                     styles.modeButton,
-                    formData.budgetMode === 'save_target' && styles.modeButtonActive,
+                    formData.budgetMode === 'save' && styles.modeButtonActive,
                   ]}
-                  onPress={() => setFormData(prev => ({ ...prev, budgetMode: 'save_target' }))}
+                  onPress={() => setFormData(prev => ({ ...prev, budgetMode: 'save' }))}
                 >
                   <Text
                     style={[
                       styles.modeButtonText,
-                      formData.budgetMode === 'save_target' && styles.modeButtonTextActive,
+                      formData.budgetMode === 'save' && styles.modeButtonTextActive,
                     ]}
                   >
                     Save Target

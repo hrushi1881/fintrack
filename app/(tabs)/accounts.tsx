@@ -11,7 +11,7 @@ import { useOrganizations } from '@/contexts/OrganizationsContext';
 import ActionSheet, { ActionSheetItem } from '@/components/ActionSheet';
 import { useAuth } from '@/contexts/AuthContext';
 import { Account } from '@/types';
-import { deleteAccount } from '@/utils/accounts';
+import { deleteAccount, archiveAccount } from '@/utils/accounts';
 
 export default function AccountsScreen() {
   const { user } = useAuth();
@@ -124,7 +124,6 @@ export default function AccountsScreen() {
           text: 'Archive',
           onPress: async () => {
             try {
-              const { archiveAccount } = await import('@/utils/accounts');
               await archiveAccount(selectedAccount.id, user.id);
               await globalRefresh();
               setShowActionSheet(false);

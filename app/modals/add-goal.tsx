@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, ScrollView, SafeAreaView, TextInput, Modal, Alert } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSettings } from '@/contexts/SettingsContext';
@@ -8,6 +7,8 @@ import { useNotification } from '@/contexts/NotificationContext';
 import { useRealtimeData } from '@/hooks/useRealtimeData';
 import { createGoal, CreateGoalData } from '@/utils/goals';
 import { formatCurrencyAmount } from '@/utils/currency';
+import CategoryPicker from '@/components/CategoryPicker';
+import { Category } from '@/types';
 
 interface AddGoalModalProps {
   visible: boolean;
@@ -15,35 +16,24 @@ interface AddGoalModalProps {
   onSuccess?: () => void;
 }
 
-const GOAL_CATEGORIES = [
-  { id: 'emergency', name: 'Emergency Fund', icon: 'shield', color: '#10B981' },
-  { id: 'vacation', name: 'Vacation', icon: 'airplane', color: '#3B82F6' },
-  { id: 'car', name: 'New Car', icon: 'car', color: '#8B5CF6' },
-  { id: 'home', name: 'Home Down Payment', icon: 'home', color: '#F59E0B' },
-  { id: 'education', name: 'Education', icon: 'school', color: '#EF4444' },
-  { id: 'wedding', name: 'Wedding', icon: 'heart', color: '#EC4899' },
-  { id: 'retirement', name: 'Retirement', icon: 'time', color: '#6B7280' },
-  { id: 'debt', name: 'Debt Payoff', icon: 'card', color: '#DC2626' },
-  { id: 'investment', name: 'Investment', icon: 'trending-up', color: '#059669' },
-  { id: 'business', name: 'Business Startup', icon: 'business', color: '#7C3AED' },
-  { id: 'health', name: 'Health & Medical', icon: 'medical', color: '#10B981' },
-  { id: 'technology', name: 'Technology', icon: 'laptop', color: '#3B82F6' },
-  { id: 'furniture', name: 'Furniture', icon: 'bed', color: '#8B5CF6' },
-  { id: 'appliance', name: 'Appliances', icon: 'tv', color: '#F59E0B' },
-  { id: 'jewelry', name: 'Jewelry', icon: 'diamond', color: '#EC4899' },
-  { id: 'sports', name: 'Sports & Fitness', icon: 'fitness', color: '#10B981' },
-  { id: 'hobby', name: 'Hobby & Recreation', icon: 'game-controller', color: '#3B82F6' },
-  { id: 'pet', name: 'Pet Care', icon: 'paw', color: '#8B5CF6' },
-  { id: 'gift', name: 'Gifts & Celebrations', icon: 'gift', color: '#EC4899' },
-  { id: 'travel', name: 'Travel & Adventure', icon: 'map', color: '#059669' },
-  { id: 'other', name: 'Other', icon: 'ellipsis-horizontal', color: '#6B7280' },
+const COLOR_PALETTE = [
+  '#4F6F3E', '#0E401C', '#8BA17B', '#D7DECC', '#E5ECD6',
+  '#F2F5EC', '#F7F9F2', '#FF6B35', '#F59E0B', '#3B82F6',
+  '#8B5CF6', '#EC4899', '#059669', '#1E40AF', '#6B7280'
 ];
 
-const COLOR_PALETTE = [
-  '#10B981', '#3B82F6', '#8B5CF6', '#F59E0B', '#EF4444',
-  '#EC4899', '#6B7280', '#DC2626', '#059669', '#7C3AED',
-  '#DB2777', '#0891B2', '#CA8A04', '#9333EA', '#F97316'
-];
+const palette = {
+  background: '#FFFFFF',
+  surface: '#F7F9F2',
+  surfaceAlt: '#F2F5EC',
+  border: '#E5ECD6',
+  borderMuted: '#D7DECC',
+  primary: '#4F6F3E',
+  primaryStrong: '#0E401C',
+  text: '#1F3A24',
+  muted: '#637050',
+  mutedLight: '#9AA18E',
+};
 
 export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalModalProps) {
   const { user } = useAuth();
@@ -57,7 +47,7 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
     target_amount: 0,
     target_date: '',
     category: '',
-    color: '#10B981',
+    color: '#4F6F3E',
     icon: 'flag',
     currency: currency,
   });
@@ -70,12 +60,12 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
-  const handleCategorySelect = (category: typeof GOAL_CATEGORIES[0]) => {
+  const handleCategoryChange = (category: Category | null) => {
     setFormData(prev => ({
       ...prev,
-      category: category.id,
-      icon: category.icon,
-      color: category.color,
+      category: category?.id || '',
+      icon: category?.icon || 'flag',
+      color: category?.color || '#4F6F3E',
     }));
   };
 
@@ -159,21 +149,11 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
       Alert.alert('Error', 'Please select a category');
       return false;
     }
-    if (linkedAccountIds.length === 0) {
-      Alert.alert('Error', 'Please select at least one account to store goal funds');
-      return false;
-    }
     return true;
   };
 
   // Filter accounts for linking (exclude liability and goals_savings, match currency from settings)
-  const linkableAccounts = accounts?.filter(
-    (account) => 
-      account.type !== 'liability' && 
-      account.type !== 'goals_savings' &&
-      (account.is_active === true || account.is_active === undefined || account.is_active === null) &&
-      (!currency || account.currency === currency) // Use currency from settings, not formData.currency
-  ) || [];
+  const linkableAccounts = accounts || [];
 
   const handleSubmit = async () => {
     if (!user || !validateForm()) return;
@@ -204,7 +184,7 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
         target_amount: 0,
         target_date: '',
         category: '',
-        color: '#10B981',
+        color: '#4F6F3E',
         icon: 'flag',
         currency: currency,
       });
@@ -229,10 +209,7 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
       animationType="slide"
       presentationStyle="pageSheet"
     >
-      <LinearGradient
-        colors={['#99D795', '#99D795', '#99D795']}
-        style={styles.container}
-      >
+      <View style={styles.container}>
         <SafeAreaView style={styles.safeArea}>
           <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
             {/* Header */}
@@ -254,25 +231,25 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
             <View style={styles.form}>
               {/* Title */}
               <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Goal Title</Text>
+                <Text style={styles.inputLabel}>Goal title</Text>
                 <TextInput
                   style={styles.textInput}
                   value={formData.title}
                   onChangeText={(value) => handleInputChange('title', value)}
                   placeholder="e.g., Emergency Fund"
-                  placeholderTextColor="#9CA3AF"
+                  placeholderTextColor="#9AA18E"
                 />
               </View>
 
               {/* Description */}
               <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Description (Optional)</Text>
+                <Text style={styles.inputLabel}>Description (optional)</Text>
                 <TextInput
                   style={[styles.textInput, styles.multilineInput]}
                   value={formData.description}
                   onChangeText={(value) => handleInputChange('description', value)}
                   placeholder="Describe your goal..."
-                  placeholderTextColor="#9CA3AF"
+                  placeholderTextColor="#9AA18E"
                   multiline
                   numberOfLines={3}
                 />
@@ -280,7 +257,7 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
 
               {/* Target Amount */}
               <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Target Amount</Text>
+                <Text style={styles.inputLabel}>Target amount</Text>
                 <View style={styles.amountInputContainer}>
                   <Text style={styles.currencySymbol}>
                     {formatCurrencyAmount(0, currency).charAt(0)}
@@ -293,7 +270,7 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
                       handleInputChange('target_amount', numValue);
                     }}
                     placeholder="0"
-                    placeholderTextColor="#9CA3AF"
+                    placeholderTextColor="#9AA18E"
                     keyboardType="numeric"
                   />
                 </View>
@@ -304,7 +281,7 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
 
               {/* Target Date */}
               <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Target Date (Optional)</Text>
+                <Text style={styles.inputLabel}>Target date (optional)</Text>
                 <TouchableOpacity
                   style={styles.dateInput}
                   onPress={() => setShowDatePicker(true)}
@@ -315,14 +292,14 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
                   ]}>
                     {formData.target_date ? formatDateDisplay(formData.target_date) : 'Select target date'}
                   </Text>
-                  <Ionicons name="calendar" size={20} color="#9CA3AF" />
+                  <Ionicons name="calendar" size={20} color="#637050" />
                 </TouchableOpacity>
                 {formData.target_date && (
                   <TouchableOpacity
                     style={styles.clearDateButton}
                     onPress={() => handleInputChange('target_date', '')}
                   >
-                    <Ionicons name="close-circle" size={16} color="#EF4444" />
+                    <Ionicons name="close-circle" size={16} color="#A33A3A" />
                     <Text style={styles.clearDateText}>Clear date</Text>
                   </TouchableOpacity>
                 )}
@@ -331,37 +308,20 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
               {/* Category Selection */}
               <View style={styles.inputGroup}>
                 <Text style={styles.inputLabel}>Category</Text>
-                <View style={styles.categoryGrid}>
-                  {GOAL_CATEGORIES.map((category) => (
-                    <TouchableOpacity
-                      key={category.id}
-                      style={[
-                        styles.categoryItem,
-                        formData.category === category.id && styles.categoryItemSelected
-                      ]}
-                      onPress={() => handleCategorySelect(category)}
-                    >
-                      <View style={[
-                        styles.categoryIcon,
-                        { backgroundColor: category.color },
-                        formData.category === category.id && styles.categoryIconSelected
-                      ]}>
-                        <Ionicons name={category.icon as any} size={20} color="white" />
-                      </View>
-                      <Text style={[
-                        styles.categoryText,
-                        formData.category === category.id && styles.categoryTextSelected
-                      ]}>
-                        {category.name}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
+                <CategoryPicker
+                  activityType="goal"
+                  selectedCategoryId={formData.category}
+                  onCategorySelect={handleCategoryChange}
+                  placeholder="Select a goal category"
+                />
+                <Text style={styles.helperText}>
+                  Use the new category system — pick a main or subcategory. You can change it later.
+                </Text>
               </View>
 
               {/* Color Selection */}
               <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Color</Text>
+                <Text style={styles.inputLabel}>Accent colour</Text>
                 <View style={styles.colorGrid}>
                   {COLOR_PALETTE.map((color) => (
                     <TouchableOpacity
@@ -383,9 +343,9 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
 
               {/* Account Linking */}
               <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Link Accounts</Text>
+                <Text style={styles.inputLabel}>Link accounts (optional)</Text>
                 <Text style={styles.inputSubLabel}>
-                  Select accounts where goal funds will be stored
+                  Select where you want to store goal funds now. You can add more when contributing later.
                 </Text>
                 {linkableAccounts.length > 0 ? (
                   <>
@@ -412,10 +372,10 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
                             <Ionicons
                               name={isSelected ? 'checkmark-circle' : 'ellipse-outline'}
                               size={20}
-                              color={isSelected ? 'white' : 'rgba(255, 255, 255, 0.7)'}
+                              color={isSelected ? '#FFFFFF' : '#4F6F3E'}
                               style={styles.accountChipIcon}
                             />
-                              <View style={styles.accountChipInfo}>
+                            <View style={styles.accountChipInfo}>
                               <Text style={[styles.accountChipName, isSelected && styles.accountChipNameSelected]}>
                                 {account.name}
                               </Text>
@@ -429,7 +389,7 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
                     </ScrollView>
                     {linkedAccountIds.length > 0 && (
                       <View style={styles.linkedAccountsInfo}>
-                        <Ionicons name="checkmark-circle" size={16} color="white" />
+                        <Ionicons name="checkmark-circle" size={16} color={palette.primary} />
                         <Text style={styles.linkedAccountsText}>
                           {linkedAccountIds.length} account{linkedAccountIds.length !== 1 ? 's' : ''} selected
                         </Text>
@@ -438,7 +398,7 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
                   </>
                 ) : (
                   <View style={styles.noAccountsBanner}>
-                    <Ionicons name="information-circle-outline" size={20} color="rgba(255, 255, 255, 0.7)" />
+                    <Ionicons name="information-circle-outline" size={20} color={palette.muted} />
                     <Text style={styles.noAccountsText}>
                       No accounts available. Please create an account first.
                     </Text>
@@ -448,7 +408,7 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
             </View>
           </ScrollView>
         </SafeAreaView>
-      </LinearGradient>
+      </View>
 
       {/* Calendar Date Picker Modal */}
       <Modal
@@ -463,14 +423,14 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
                 style={styles.calendarNavButton}
                 onPress={() => navigateMonth('prev')}
               >
-                <Ionicons name="chevron-back" size={24} color="white" />
+                <Ionicons name="chevron-back" size={24} color={palette.primary} />
               </TouchableOpacity>
               <Text style={styles.calendarTitle}>{getMonthName(selectedDate)}</Text>
               <TouchableOpacity
                 style={styles.calendarNavButton}
                 onPress={() => navigateMonth('next')}
               >
-                <Ionicons name="chevron-forward" size={24} color="white" />
+                <Ionicons name="chevron-forward" size={24} color={palette.primary} />
               </TouchableOpacity>
             </View>
 
@@ -581,9 +541,11 @@ export default function AddGoalModal({ visible, onClose, onSuccess }: AddGoalMod
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: palette.background,
   },
   safeArea: {
     flex: 1,
+    backgroundColor: palette.background,
   },
   scrollView: {
     flex: 1,
@@ -602,27 +564,27 @@ const styles = StyleSheet.create({
   },
   cancelText: {
     fontSize: 16,
-    color: 'white',
-    fontWeight: '500',
+    color: palette.muted,
+    fontFamily: 'Poppins-SemiBold',
   },
   headerTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
+    fontSize: 22,
+    fontFamily: 'Archivo Black',
+    color: palette.primaryStrong,
   },
   createButton: {
-    backgroundColor: '#10B981',
+    backgroundColor: palette.primary,
     paddingVertical: 8,
     paddingHorizontal: 16,
     borderRadius: 8,
   },
   createButtonDisabled: {
-    backgroundColor: '#6B7280',
+    backgroundColor: palette.borderMuted,
   },
   createText: {
     fontSize: 16,
-    color: 'white',
-    fontWeight: '600',
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-SemiBold',
   },
   form: {
     flex: 1,
@@ -632,18 +594,18 @@ const styles = StyleSheet.create({
   },
   inputLabel: {
     fontSize: 16,
-    fontWeight: '600',
-    color: 'white',
+    fontFamily: 'Poppins-SemiBold',
+    color: palette.text,
     marginBottom: 8,
   },
   textInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: palette.surfaceAlt,
     borderRadius: 12,
     padding: 16,
     fontSize: 16,
-    color: 'white',
+    color: palette.text,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
+    borderColor: palette.border,
   },
   multilineInput: {
     height: 80,
@@ -652,27 +614,27 @@ const styles = StyleSheet.create({
   amountInputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: palette.surfaceAlt,
     borderRadius: 12,
     paddingHorizontal: 16,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
+    borderColor: palette.border,
   },
   currencySymbol: {
     fontSize: 18,
-    color: 'white',
-    fontWeight: '600',
+    color: palette.primaryStrong,
+    fontFamily: 'Poppins-SemiBold',
     marginRight: 8,
   },
   amountInput: {
     flex: 1,
     fontSize: 18,
-    color: 'white',
+    color: palette.text,
     paddingVertical: 16,
   },
   amountPreview: {
     fontSize: 14,
-    color: '#9CA3AF',
+    color: palette.muted,
     marginTop: 4,
     textAlign: 'center',
   },
@@ -731,25 +693,25 @@ const styles = StyleSheet.create({
     borderColor: 'transparent',
   },
   colorItemSelected: {
-    borderColor: 'white',
+    borderColor: palette.primary,
   },
   dateInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: palette.surfaceAlt,
     borderRadius: 12,
     padding: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
+    borderColor: palette.border,
   },
   dateInputText: {
     fontSize: 16,
-    color: 'white',
+    color: palette.text,
     flex: 1,
   },
   dateInputPlaceholder: {
-    color: '#9CA3AF',
+    color: palette.mutedLight,
   },
   clearDateButton: {
     flexDirection: 'row',
@@ -759,18 +721,18 @@ const styles = StyleSheet.create({
   },
   clearDateText: {
     fontSize: 12,
-    color: '#EF4444',
+    color: '#A33A3A',
     marginLeft: 4,
   },
   datePickerOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: 'rgba(0, 0, 0, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 20,
   },
   datePickerContainer: {
-    backgroundColor: '#000000',
+    backgroundColor: palette.background,
     borderRadius: 20,
     padding: 20,
     width: '100%',
@@ -784,8 +746,8 @@ const styles = StyleSheet.create({
   },
   datePickerTitle: {
     fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
+    fontFamily: 'Poppins-SemiBold',
+    color: palette.text,
   },
   datePickerCloseButton: {
     padding: 4,
@@ -795,7 +757,7 @@ const styles = StyleSheet.create({
   },
   datePickerDescription: {
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
+    color: palette.muted,
     textAlign: 'center',
     marginBottom: 20,
   },
@@ -807,37 +769,37 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   datePickerButton: {
-    backgroundColor: '#10B981',
+    backgroundColor: palette.primary,
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 12,
     minWidth: 100,
   },
   datePickerButtonText: {
-    color: 'white',
+    color: '#FFFFFF',
     fontSize: 14,
-    fontWeight: '600',
+    fontFamily: 'Poppins-SemiBold',
     textAlign: 'center',
   },
   datePickerNote: {
     fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.5)',
+    color: palette.muted,
     textAlign: 'center',
     marginBottom: 12,
   },
   dateTextInput: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: palette.surfaceAlt,
     borderRadius: 12,
     padding: 16,
     fontSize: 16,
-    color: 'white',
+    color: palette.text,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
+    borderColor: palette.border,
     width: '100%',
     textAlign: 'center',
   },
   calendarContainer: {
-    backgroundColor: '#000000',
+    backgroundColor: '#FFFFFF',
     borderRadius: 20,
     padding: 20,
     width: '100%',
@@ -853,12 +815,12 @@ const styles = StyleSheet.create({
   calendarNavButton: {
     padding: 8,
     borderRadius: 8,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: palette.surfaceAlt,
   },
   calendarTitle: {
     fontSize: 18,
-    fontWeight: 'bold',
-    color: 'white',
+    fontFamily: 'Poppins-SemiBold',
+    color: palette.text,
   },
   calendarContent: {
     flex: 1,
@@ -870,8 +832,8 @@ const styles = StyleSheet.create({
   },
   calendarDayHeader: {
     fontSize: 12,
-    fontWeight: '600',
-    color: 'rgba(255, 255, 255, 0.7)',
+    fontFamily: 'Poppins-SemiBold',
+    color: palette.muted,
     textAlign: 'center',
     width: 40,
   },
@@ -890,29 +852,29 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   calendarToday: {
-    backgroundColor: '#10B981',
+    backgroundColor: palette.surfaceAlt,
   },
   calendarSelected: {
-    backgroundColor: '#3B82F6',
+    backgroundColor: palette.primary,
   },
   calendarPast: {
-    opacity: 0.3,
+    opacity: 0.35,
   },
   calendarDayText: {
     fontSize: 16,
-    color: 'white',
-    fontWeight: '500',
+    color: palette.text,
+    fontFamily: 'Poppins-SemiBold',
   },
   calendarTodayText: {
-    color: 'white',
-    fontWeight: 'bold',
+    color: palette.primaryStrong,
+    fontFamily: 'Poppins-SemiBold',
   },
   calendarSelectedText: {
-    color: 'white',
-    fontWeight: 'bold',
+    color: '#FFFFFF',
+    fontFamily: 'Poppins-SemiBold',
   },
   calendarPastText: {
-    color: 'rgba(255, 255, 255, 0.3)',
+    color: palette.mutedLight,
   },
   quickDateButtons: {
     flexDirection: 'row',
@@ -920,7 +882,7 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   quickDateButton: {
-    backgroundColor: '#10B981',
+    backgroundColor: palette.primary,
     borderRadius: 12,
     paddingHorizontal: 16,
     paddingVertical: 8,
@@ -928,9 +890,9 @@ const styles = StyleSheet.create({
     marginHorizontal: 4,
   },
   quickDateButtonText: {
-    color: 'white',
+    color: '#FFFFFF',
     fontSize: 14,
-    fontWeight: '600',
+    fontFamily: 'Poppins-SemiBold',
     textAlign: 'center',
   },
   manualDateInput: {
@@ -938,7 +900,7 @@ const styles = StyleSheet.create({
   },
   manualDateLabel: {
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
+    color: palette.muted,
     marginBottom: 8,
     textAlign: 'center',
   },
@@ -947,10 +909,10 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingTop: 16,
     borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.1)',
+    borderTopColor: palette.border,
   },
   calendarCancelButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: palette.surfaceAlt,
     borderRadius: 12,
     paddingHorizontal: 24,
     paddingVertical: 12,
@@ -958,13 +920,13 @@ const styles = StyleSheet.create({
     marginRight: 8,
   },
   calendarCancelText: {
-    color: 'white',
+    color: palette.text,
     fontSize: 16,
-    fontWeight: '600',
+    fontFamily: 'Poppins-SemiBold',
     textAlign: 'center',
   },
   calendarConfirmButton: {
-    backgroundColor: '#10B981',
+    backgroundColor: palette.primary,
     borderRadius: 12,
     paddingHorizontal: 24,
     paddingVertical: 12,
@@ -972,9 +934,9 @@ const styles = StyleSheet.create({
     marginLeft: 8,
   },
   calendarConfirmText: {
-    color: 'white',
+    color: '#FFFFFF',
     fontSize: 16,
-    fontWeight: '600',
+    fontFamily: 'Poppins-SemiBold',
     textAlign: 'center',
   },
   accountsScroll: {
@@ -983,18 +945,18 @@ const styles = StyleSheet.create({
   accountChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: palette.surfaceAlt,
     borderRadius: 16,
     paddingVertical: 12,
     paddingHorizontal: 16,
     marginRight: 12,
     borderWidth: 2,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
+    borderColor: palette.border,
     minWidth: 120,
   },
   accountChipSelected: {
-    backgroundColor: 'rgba(16, 185, 129, 0.3)',
-    borderColor: '#10B981',
+    backgroundColor: palette.primary,
+    borderColor: palette.primary,
   },
   accountChipIcon: {
     marginRight: 8,
@@ -1004,55 +966,60 @@ const styles = StyleSheet.create({
   },
   accountChipName: {
     fontSize: 14,
-    color: 'white',
-    fontWeight: '600',
+    color: palette.text,
+    fontFamily: 'Poppins-SemiBold',
     marginBottom: 2,
   },
   accountChipNameSelected: {
-    color: '#10B981',
+    color: '#FFFFFF',
   },
   accountChipBalance: {
     fontSize: 12,
-    color: 'rgba(255, 255, 255, 0.7)',
+    color: palette.muted,
   },
   accountChipBalanceSelected: {
-    color: 'rgba(16, 185, 129, 0.9)',
+    color: '#FFFFFF',
   },
   linkedAccountsInfo: {
     flexDirection: 'row',
     alignItems: 'center',
     marginTop: 12,
     padding: 12,
-    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    backgroundColor: palette.surface,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.3)',
+    borderColor: palette.border,
   },
   linkedAccountsText: {
     fontSize: 14,
-    color: 'white',
-    fontWeight: '500',
+    color: palette.text,
+    fontFamily: 'Poppins-SemiBold',
     marginLeft: 8,
   },
   noAccountsBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     padding: 16,
-    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: palette.surfaceAlt,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
+    borderColor: palette.border,
     gap: 12,
   },
   noAccountsText: {
     flex: 1,
     fontSize: 14,
-    color: 'rgba(255, 255, 255, 0.7)',
+    color: palette.muted,
   },
   inputSubLabel: {
     fontSize: 13,
-    color: 'rgba(255, 255, 255, 0.7)',
+    color: palette.muted,
     marginTop: 4,
     marginBottom: 8,
+  },
+  helperText: {
+    fontSize: 12,
+    color: palette.muted,
+    marginTop: 6,
   },
 });

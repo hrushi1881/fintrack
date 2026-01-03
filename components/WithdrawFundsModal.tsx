@@ -46,6 +46,14 @@ export default function WithdrawFundsModal({
     return formatCurrencyAmount(amount, currency);
   };
 
+  // Log when accounts change to debug refresh issues
+  useEffect(() => {
+    if (visible && accounts) {
+      console.log('🔄 Withdraw modal: Accounts updated, count:', accounts.length);
+      console.log('📋 All accounts:', accounts.map(acc => `${acc.name} (${acc.currency}, active: ${acc.is_active})`).join(', '));
+    }
+  }, [accounts, visible]);
+
   // Refresh accounts and account funds when modal opens, then fetch goal accounts
   useEffect(() => {
     if (visible && goal) {
@@ -59,15 +67,18 @@ export default function WithdrawFundsModal({
       setSourceAccountId(null);
       setDestinationAccountId(null);
       
-      // Refresh data first
-      refreshAccounts();
-      refreshAccountFunds();
-      
       // Fetch linked accounts first, then goal accounts
       const fetchLinkedAccounts = async () => {
         if (!goal) return;
         
         try {
+          // Refresh accounts first to ensure we have latest data
+          await refreshAccounts();
+          await refreshAccountFunds();
+          
+          // Small delay to ensure accounts state updates
+          await new Promise(resolve => setTimeout(resolve, 200));
+          
           const accounts = await getLinkedAccountsForGoal(goal.id);
           setLinkedAccounts(accounts);
           console.log(`📊 WithdrawFundsModal: Fetched ${accounts.length} linked account(s) for "${goal.title}"`);
@@ -76,7 +87,7 @@ export default function WithdrawFundsModal({
           if (accounts.length > 0) {
             await fetchGoalAccounts(accounts);
           } else {
-            setGoalAccounts([]);
+            await fetchGoalAccounts([]);
           }
         } catch (error) {
           console.error('Error fetching linked accounts:', error);
@@ -92,18 +103,9 @@ export default function WithdrawFundsModal({
           const accountsWithFunds = await getGoalAccounts(goal.id);
           console.log(`📊 WithdrawFundsModal: Fetched ${accountsWithFunds.length} account(s) with goal funds for "${goal.title}"`);
           
-          // Filter by goal currency - accounts MUST match goal currency
-          const goalCurrency = goal.currency || currency;
-          const filteredAccounts = accountsWithFunds.filter(({ account }) => {
-            return account.currency === goalCurrency;
-          });
-          
-          console.log(`📊 WithdrawFundsModal: Filtered to ${filteredAccounts.length} account(s) matching goal currency (${goalCurrency})`);
-          
-          // Show all accounts with funds (linked or not) that match goal currency
-          // Priority: linked accounts with funds first, then non-linked accounts with funds
+          // Show all accounts with funds (linked or not)
           const linkedAccountIds = new Set(linkedAccts.map(acc => acc.id));
-          const sorted = filteredAccounts.sort((a, b) => {
+          const sorted = accountsWithFunds.sort((a, b) => {
             const aIsLinked = linkedAccountIds.has(a.account.id);
             const bIsLinked = linkedAccountIds.has(b.account.id);
             if (aIsLinked && !bIsLinked) return -1;
@@ -130,86 +132,65 @@ export default function WithdrawFundsModal({
         }
       };
 
-      // Then fetch linked accounts after a short delay to ensure refresh completes
-      const timer = setTimeout(() => {
-        fetchLinkedAccounts();
-      }, 100);
-      
-      return () => clearTimeout(timer);
+      // Fetch linked accounts immediately
+      fetchLinkedAccounts();
     }
-  }, [visible, goal, refreshAccounts, refreshAccountFunds]);
+  }, [visible, goal, refreshAccounts, refreshAccountFunds, currency]);
 
-  // Destination accounts: Show ALL accounts (money goes to personal funds in any account)
-  // Since money goes to personal funds, any account can receive the withdrawal
-  // Filter: exclude liability and Goals Savings accounts, must be active, must match GOAL currency (not settings)
-  // IMPORTANT: Goal funds are stored in goal currency, so destination account must match goal currency
-  // Goals Savings account is only for displaying aggregate statistics
+  // Destination accounts: Show ALL active accounts (money goes to personal funds in any account)
+  // Currency validation happens on submit, not as a filter
   const destinationAccounts = useMemo(() => {
     if (!accounts || accounts.length === 0 || !goal) {
       console.log('⚠️ Withdraw modal: No accounts available for destination or no goal');
       return [];
     }
     
-    // Use goal currency - destination account must match goal currency
-    const targetCurrency = goal.currency || currency;
-    if (!targetCurrency) {
-      console.log('⚠️ Withdraw modal: No currency available (goal or settings)');
-      return [];
-    }
-    
-    // Show ALL accounts: exclude only liability and goals_savings, must be active, must match GOAL currency
-    // Money goes to personal funds, so any account can receive it (as long as currency matches)
+    // Show ALL active accounts - no currency filter
+    // Currency mismatch will be validated on submit
     const filtered = accounts
       .filter((account) => {
         const acc = account as Account;
         return (
-          acc.type !== 'liability' && 
-          acc.type !== 'goals_savings' &&
-          (acc.is_active === true || acc.is_active === undefined || acc.is_active === null) &&
-          acc.currency === targetCurrency // Match GOAL currency (not settings currency)
+          acc.is_active === true || acc.is_active === undefined || acc.is_active === null
         );
       })
       .map((account) => account as Account);
     
-    console.log('✅ Withdraw modal destinationAccounts:', filtered.length, 'from', accounts.length, 'total (ALL accounts, goal currency:', targetCurrency, ')');
-    if (filtered.length === 0) {
-      console.warn('⚠️ No accounts found matching goal currency:', targetCurrency);
-    }
+    console.log('✅ Withdraw modal destinationAccounts:', filtered.length, 'from', accounts.length, 'total (ALL active accounts)');
+    console.log('📋 Destination account names:', filtered.map(acc => `${acc.name} (${acc.currency})`).join(', '));
     return filtered;
-  }, [accounts, goal, currency]);
+  }, [accounts, goal]);
+
+  // Source accounts for withdrawal: prefer accounts with goal funds; fall back to linked accounts if none
+  const sourceAccounts = useMemo(() => {
+    if (goalAccounts.length > 0) return goalAccounts;
+
+    const linkedFallback = linkedAccounts
+      .filter(
+        (acc) =>
+          acc.is_active === true || acc.is_active === undefined || acc.is_active === null
+      )
+      .map((acc) => ({ account: acc, balance: 0 }));
+
+    return linkedFallback;
+  }, [goalAccounts, linkedAccounts]);
 
   // Check if there are any accounts at all (for helpful error message)
   const hasAnyAccounts = useMemo(() => {
     return accounts && accounts.length > 0;
   }, [accounts]);
 
-  // Check if accounts exist but don't match goal currency
-  const accountsWithDifferentCurrency = useMemo(() => {
-    if (!accounts || !goal) return [];
-    const targetCurrency = goal.currency || currency;
-    if (!targetCurrency) return [];
-    return accounts.filter((account) => {
-      const acc = account as Account;
-      return (
-        acc.type !== 'liability' && 
-        acc.type !== 'goals_savings' &&
-        (acc.is_active === true || acc.is_active === undefined || acc.is_active === null) &&
-        acc.currency !== targetCurrency
-      );
-    });
-  }, [accounts, goal, currency]);
-
   // Get selected accounts
-  const sourceAccount = goalAccounts.find((ga) => ga.account.id === sourceAccountId)?.account;
+  const sourceAccount = sourceAccounts.find((ga) => ga.account.id === sourceAccountId)?.account;
   const destinationAccount = destinationAccounts.find((acc) => acc.id === destinationAccountId);
   
   // Get available balance for selected source account
   // Use useMemo to ensure it updates when sourceAccountId or goalAccounts change
   const availableBalance = useMemo(() => {
     if (!sourceAccountId) return 0;
-    const goalAccount = goalAccounts.find((ga) => ga.account.id === sourceAccountId);
+    const goalAccount = sourceAccounts.find((ga) => ga.account.id === sourceAccountId);
     return goalAccount?.balance || 0;
-  }, [sourceAccountId, goalAccounts]);
+  }, [sourceAccountId, sourceAccounts]);
 
   // Auto-select first destination account when source account is selected and destination is empty
   // Note: Same account can be selected for both source and destination (different fund sources)
@@ -246,32 +227,6 @@ export default function WithdrawFundsModal({
       Alert.alert('Error', 'Please select a destination account');
       return;
     }
-
-    // Validate currency match before withdrawing
-    const sourceAccount = goalAccounts.find(ga => ga.account.id === sourceAccountId)?.account;
-    const destinationAccount = destinationAccounts.find(acc => acc.id === destinationAccountId);
-    const goalCurrency = goal.currency || currency;
-    
-    if (sourceAccount && destinationAccount) {
-      if (sourceAccount.currency !== destinationAccount.currency) {
-        Alert.alert(
-          'Currency Mismatch',
-          `Source account (${sourceAccount.name}) uses ${sourceAccount.currency}, but destination account (${destinationAccount.name}) uses ${destinationAccount.currency}. Both accounts must use the same currency.`
-        );
-        return;
-      }
-      
-      if (sourceAccount.currency !== goalCurrency) {
-        Alert.alert(
-          'Currency Mismatch',
-          `Selected accounts use ${sourceAccount.currency}, but the goal uses ${goalCurrency}. Please select accounts that match the goal currency.`
-        );
-        return;
-      }
-    }
-
-    // Note: Same account is allowed - source is goal fund, destination is personal fund
-    // No need to check if sourceAccountId === destinationAccountId
 
     onWithdraw({ 
       amount: withdrawAmount, 
@@ -335,9 +290,9 @@ export default function WithdrawFundsModal({
               </View>
             </View>
 
-            {/* Source Account Selection - Only Linked Accounts with Funds for THIS Goal */}
+            {/* Source Account Selection - Linked accounts (prefer those with goal funds) */}
             <InlineAccountSelector
-              accounts={goalAccounts.map((ga) => ({
+              accounts={sourceAccounts.map((ga) => ({
                 ...ga.account,
                 balance: ga.balance, // Override account balance with goal fund balance
               }))}
@@ -354,7 +309,7 @@ export default function WithdrawFundsModal({
                 <Text style={styles.balanceAmount}>{formatCurrency(availableBalance)}</Text>
               </View>
             )}
-            {goalAccounts.length === 0 && linkedAccounts.length === 0 && (
+            {sourceAccounts.length === 0 && linkedAccounts.length === 0 && (
               <View style={styles.infoBanner}>
                 <Ionicons name="information-circle-outline" size={16} color="#F59E0B" />
                 <Text style={styles.infoText}>
@@ -362,7 +317,7 @@ export default function WithdrawFundsModal({
                 </Text>
               </View>
             )}
-            {goalAccounts.length === 0 && linkedAccounts.length > 0 && (
+            {sourceAccounts.length === 0 && linkedAccounts.length > 0 && (
               <View style={styles.infoBanner}>
                 <Ionicons name="information-circle-outline" size={16} color="#F59E0B" />
                 <Text style={styles.infoText}>
@@ -399,16 +354,9 @@ export default function WithdrawFundsModal({
                 <Ionicons name="alert-circle-outline" size={20} color="#EF4444" />
                 <View style={styles.errorContent}>
                   <Text style={styles.errorTitle}>No Accounts Available</Text>
-                  {hasAnyAccounts && accountsWithDifferentCurrency.length > 0 ? (
-                    <Text style={styles.errorText}>
-                      You need an account with currency {goal?.currency || currency} to receive the withdrawal. 
-                      Your accounts use different currencies. Please create an account with currency {goal?.currency || currency} first.
-                    </Text>
-                  ) : (
-                    <Text style={styles.errorText}>
-                      You need at least one active account to receive the withdrawal. Please create an account first.
-                    </Text>
-                  )}
+                  <Text style={styles.errorText}>
+                    You need at least one active account to receive the withdrawal. Please create an account first.
+                  </Text>
                 </View>
               </View>
             )}

@@ -19,6 +19,7 @@ import {
 import { BudgetTransaction } from '@/types';
 import EditBudgetModal from '@/app/modals/edit-budget';
 import BudgetReflectionModal from '@/app/modals/budget-reflection';
+import BudgetCycles from '@/components/cycles/BudgetCycles';
 
 export default function BudgetDetailScreen() {
   const { id } = useLocalSearchParams();
@@ -338,7 +339,7 @@ export default function BudgetDetailScreen() {
   const renderOverview = () => {
     const percentage = budget.amount > 0 ? (budget.spent_amount / budget.amount) * 100 : 0;
     // const status = getBudgetStatus(percentage);
-    const isSaveTarget = (budget.budget_mode || 'spend_cap') === 'save_target'; // Default to spend_cap if not set
+    const isSaveTarget = (budget.budget_mode || 'spend_cap') === 'save'; // Default to spend_cap if not set
     
     return (
       <View style={styles.tabContent}>
@@ -770,10 +771,10 @@ export default function BudgetDetailScreen() {
               ]}
               onPress={() => setActiveTab('accounts')}
             >
-              <Ionicons 
-                name={activeTab === 'accounts' ? 'card' : 'card-outline'} 
-                size={18} 
-                color={activeTab === 'accounts' ? '#10B981' : '#6B7280'} 
+              <Ionicons
+                name={activeTab === 'accounts' ? 'card' : 'card-outline'}
+                size={18}
+                color={activeTab === 'accounts' ? '#10B981' : '#6B7280'}
               />
               <Text
                 style={[
@@ -784,12 +785,38 @@ export default function BudgetDetailScreen() {
                 Accounts
               </Text>
             </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.tabButton,
+                activeTab === 'cycles' && styles.activeTab,
+              ]}
+              onPress={() => setActiveTab('cycles')}
+            >
+              <Ionicons
+                name={activeTab === 'cycles' ? 'time' : 'time-outline'}
+                size={18}
+                color={activeTab === 'cycles' ? '#10B981' : '#6B7280'}
+              />
+              <Text
+                style={[
+                  styles.tabText,
+                  activeTab === 'cycles' && styles.activeTabText,
+                ]}
+              >
+                Cycles
+              </Text>
+            </TouchableOpacity>
           </View>
 
           {/* Tab Content */}
           {activeTab === 'overview' && renderOverview()}
           {activeTab === 'transactions' && renderTransactions()}
           {activeTab === 'accounts' && renderAccounts()}
+          {activeTab === 'cycles' && budget && (
+            <View style={styles.cyclesContainer}>
+              <BudgetCycles budgetId={budget.id} maxCycles={12} />
+            </View>
+          )}
         </ScrollView>
 
         {/* Exclude Transaction Modal */}
@@ -1765,6 +1792,10 @@ const styles = StyleSheet.create({
   goalProgressFill: {
     height: '100%',
     borderRadius: 4,
+  },
+  cyclesContainer: {
+    marginTop: 12,
+    minHeight: 400,
   },
 });
 

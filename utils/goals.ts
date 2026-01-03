@@ -510,17 +510,7 @@ export async function addContributionToGoal(contributionData: AddContributionDat
   // Allow same account - user can save goal funds in the same account they're paying from
   // The money will be deducted from personal funds and stored as goal funds in the same account
 
-  // Validate that source and destination accounts have the same currency (they must match each other)
-  if (sourceAccount.currency !== destinationAccount.currency) {
-    throw new Error(`Source and destination accounts must have the same currency. Source: ${sourceAccount.currency}, Destination: ${destinationAccount.currency}`);
-  }
-
-  // Validate account currency matches goal currency
-  if (sourceAccount.currency !== goal.currency) {
-    throw new Error(`Account currency (${sourceAccount.currency}) doesn't match goal currency (${goal.currency})`);
-  }
-
-  // Use account currency (no fallbacks - validated above)
+  // Use contribution currency from payload (settings currency)
   const transactionCurrency = sourceAccount.currency;
 
   // Get the Goal Savings category
@@ -1132,20 +1122,8 @@ export async function withdrawFromGoal(
   // - Destination: Personal fund (where money goes to)
   // They are different fund sources within the same account
 
-  // Validate that source and destination accounts have the same currency (they must match each other)
-  // This ensures the withdrawal transaction can be processed correctly
-  if (sourceAccount.currency !== destAccount.currency) {
-    throw new Error(`Source and destination accounts must have the same currency. Source: ${sourceAccount.currency}, Destination: ${destAccount.currency}`);
-  }
-
-  // Validate source account currency matches goal currency
-  // Source account must match goal currency since that's where the goal fund is stored
-  if (sourceAccount.currency !== goal.currency) {
-    throw new Error(`Source account currency (${sourceAccount.currency}) doesn't match goal currency (${goal.currency}). The goal fund is stored in an account with currency ${goal.currency}.`);
-  }
-  
-  // Use currency from the accounts (they both have the same currency after validation above)
-  const transactionCurrency = sourceAccount.currency;
+  // Use settings/onboarding currency (no cross-currency validation)
+  const transactionCurrency = sourceAccount.currency || goal.currency;
 
   // Check if goal fund exists in source account and has sufficient balance
   // NOTE: Goal funds are stored with reference_id = goal_id (from receive_to_account_bucket RPC)
@@ -1529,11 +1507,6 @@ export async function transferGoalFunds(
 
   if (toError || !toAccount) {
     throw new Error(`Destination account not found: ${toError?.message}`);
-  }
-
-  // Validate currencies match
-  if (fromAccount.currency !== goal.currency || toAccount.currency !== goal.currency) {
-    throw new Error('Account currencies must match goal currency');
   }
 
   // Note: Same account is allowed - transferring goal funds within the same account

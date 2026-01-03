@@ -50,6 +50,22 @@ export async function calculateMonthlyTargetForGoal(goalId: string): Promise<num
 }
 
 /**
+ * Generate a short period string from start and end dates (max 10 chars for DB constraint)
+ */
+function generateBudgetPeriodString(startDate: string, endDate: string, recurrencePattern?: string): string {
+  const start = new Date(startDate);
+
+  // If it's a recurring budget, use short frequency code
+  if (recurrencePattern && recurrencePattern !== 'custom') {
+    const freqCode = recurrencePattern.substring(0, 3).toUpperCase(); // MON, WEK, YER
+    return `${freqCode}-${start.getMonth() + 1}/${start.getFullYear()}`;
+  }
+
+  // For one-time budgets, use short date format: MM/YY
+  return `${start.getMonth() + 1}/${start.getFullYear()}`;
+}
+
+/**
  * Create a new budget
  */
 export async function createBudget(budgetData: {
@@ -59,7 +75,7 @@ export async function createBudget(budgetData: {
   currency: string;
   created_by: string;
   budget_type: 'monthly' | 'category' | 'goal_based' | 'smart' | 'custom';
-  budget_mode?: 'spend_cap' | 'save_target';
+  budget_mode?: 'spend_cap' | 'save';
   start_date: string;
   end_date: string;
   recurrence_pattern?: 'monthly' | 'weekly' | 'yearly' | 'custom' | null;
@@ -77,7 +93,7 @@ export async function createBudget(budgetData: {
     const goalSubtype = budgetData.metadata?.goal_subtype;
     if (goalSubtype === 'A') {
       // Subtype A: Saving Target Mode - track contributions
-      budgetMode = 'save_target';
+      budgetMode = 'save';
     } else {
       // Subtype B or C: Under Budget Saving or Category-Linked - track expenses
       budgetMode = 'spend_cap';
@@ -102,6 +118,7 @@ export async function createBudget(budgetData: {
       budget_mode: budgetMode || 'spend_cap',
       start_date: budgetData.start_date,
       end_date: budgetData.end_date,
+      period: generateBudgetPeriodString(budgetData.start_date, budgetData.end_date, budgetData.recurrence_pattern),
       recurrence_pattern: budgetData.recurrence_pattern || null,
       rollover_enabled: budgetData.rollover_enabled,
       category_id: budgetData.category_id || null,
@@ -158,7 +175,7 @@ export async function updateBudget(
     end_date: string;
     recurrence_pattern: 'monthly' | 'weekly' | 'yearly' | 'custom' | null;
     rollover_enabled: boolean;
-    budget_mode: 'spend_cap' | 'save_target';
+    budget_mode: 'spend_cap' | 'save';
     category_id: string | null;
     goal_id: string | null;
     account_ids: string[];
@@ -182,6 +199,23 @@ export async function updateBudget(
   if (updates.category_id !== undefined) updateData.category_id = updates.category_id;
   if (updates.goal_id !== undefined) updateData.goal_id = updates.goal_id;
   if (updates.alert_settings !== undefined) updateData.alert_settings = updates.alert_settings;
+
+  // Update period if start_date or end_date changed
+  if (updates.start_date !== undefined || updates.end_date !== undefined) {
+    // Get current budget to determine the dates to use for period calculation
+    const { data: currentBudget } = await supabase
+      .from('budgets')
+      .select('start_date, end_date')
+      .eq('id', budgetId)
+      .single();
+
+    if (currentBudget) {
+      const startDate = updates.start_date !== undefined ? updates.start_date : currentBudget.start_date;
+      const endDate = updates.end_date !== undefined ? updates.end_date : currentBudget.end_date;
+      const recurrencePattern = updates.recurrence_pattern !== undefined ? updates.recurrence_pattern : currentBudget.recurrence_pattern;
+      updateData.period = generateBudgetPeriodString(startDate, endDate, recurrencePattern);
+    }
+  }
 
   const { data: budget, error } = await supabase
     .from('budgets')
@@ -285,8 +319,8 @@ export async function updateGoalProgressFromBudget(budgetId: string): Promise<vo
     return; // Not a goal-based budget or goal not found
   }
 
-  // For goal-based budgets with save_target mode, update goal progress
-  if (budget.budget_mode === 'save_target') {
+  // For goal-based budgets with save mode, update goal progress
+  if (budget.budget_mode === 'save') {
     const { data: goal } = await supabase
       .from('goals')
       .select('current_amount, target_amount')

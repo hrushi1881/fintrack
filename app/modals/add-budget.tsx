@@ -101,10 +101,13 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
   const [formData, setFormData] = useState({
     name: '',
     amount: '',
-    budgetMode: 'spend_cap' as 'spend_cap' | 'save_target', // NEW: Mode selection
+    budgetMode: 'spend_cap' as 'spend_cap' | 'save', // NEW: Mode selection
     startDate: new Date().toISOString().split('T')[0],
-    endDate: '',
     recurrencePattern: 'monthly' as 'monthly' | 'weekly' | 'yearly' | 'custom',
+    customFrequency: {
+      interval: 1,
+      unit: 'month' as 'day' | 'week' | 'month' | 'year',
+    },
     recurringBudget: false,
     categoryId: '',
     goalId: '',
@@ -117,7 +120,6 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
   });
 
   const [showDatePicker, setShowDatePicker] = useState(false);
-  const [datePickerType, setDatePickerType] = useState<'start' | 'end'>('start');
   const [loading, setLoading] = useState(false);
   const [categories, setCategories] = useState<any[]>([]);
 
@@ -157,8 +159,11 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
       amount: '',
       budgetMode: 'spend_cap',
       startDate: new Date().toISOString().split('T')[0],
-      endDate: '',
       recurrencePattern: 'monthly',
+      customFrequency: {
+        interval: 1,
+        unit: 'month',
+      },
       recurringBudget: false,
       categoryId: '',
       goalId: '',
@@ -183,11 +188,7 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
 
   const handleDateSelect = (date: Date) => {
     const dateString = date.toISOString().split('T')[0];
-    if (datePickerType === 'start') {
-      setFormData(prev => ({ ...prev, startDate: dateString }));
-    } else {
-      setFormData(prev => ({ ...prev, endDate: dateString }));
-    }
+    setFormData(prev => ({ ...prev, startDate: dateString }));
     setShowDatePicker(false);
   };
 
@@ -205,6 +206,47 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
 
     setLoading(true);
     try {
+      // Calculate end date based on frequency (for display purposes)
+      let endDate = '';
+      if (formData.recurringBudget) {
+        const start = new Date(formData.startDate);
+        const end = new Date(start);
+
+        switch (formData.recurrencePattern) {
+          case 'weekly':
+            end.setDate(end.getDate() + 7);
+            break;
+          case 'monthly':
+            end.setMonth(end.getMonth() + 1);
+            break;
+          case 'yearly':
+            end.setFullYear(end.getFullYear() + 1);
+            break;
+          case 'custom':
+            switch (formData.customFrequency.unit) {
+              case 'day':
+                end.setDate(end.getDate() + formData.customFrequency.interval);
+                break;
+              case 'week':
+                end.setDate(end.getDate() + (formData.customFrequency.interval * 7));
+                break;
+              case 'month':
+                end.setMonth(end.getMonth() + formData.customFrequency.interval);
+                break;
+              case 'year':
+                end.setFullYear(end.getFullYear() + formData.customFrequency.interval);
+                break;
+            }
+            break;
+        }
+        endDate = end.toISOString().split('T')[0];
+      } else {
+        // For non-recurring budgets, set end date to far future
+        const end = new Date(formData.startDate);
+        end.setFullYear(end.getFullYear() + 10); // 10 years from start
+        endDate = end.toISOString().split('T')[0];
+      }
+
       await createBudget({
         user_id: user.id,
         name: formData.name,
@@ -213,13 +255,14 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
         budget_type: budgetType as any,
         budget_mode: formData.budgetMode, // NEW: Include budget mode
         start_date: formData.startDate,
-        end_date: formData.endDate,
+        end_date: endDate,
         recurrence_pattern: formData.recurringBudget ? formData.recurrencePattern : undefined,
         rollover_enabled: formData.recurringBudget,
         category_id: formData.categoryId || undefined,
         goal_id: formData.goalId || undefined,
         metadata: {
           goal_subtype: formData.goalSubtype || undefined,
+          custom_frequency: formData.recurrencePattern === 'custom' ? formData.customFrequency : undefined,
         },
         alert_settings: {
           thresholds: formData.alertThresholds,
@@ -249,12 +292,15 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
         name: '',
         amount: '',
         startDate: new Date().toISOString().split('T')[0],
-        endDate: '',
+        recurrencePattern: 'monthly',
+        customFrequency: {
+          interval: 1,
+          unit: 'month',
+        },
         categoryId: '',
         goalId: '',
         accountIds: [],
         recurringBudget: false,
-        recurrencePattern: 'monthly',
         budgetMode: 'spend_cap',
         goalSubtype: '',
         alertThresholds: [50, 80, 100],
@@ -379,13 +425,13 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
             <TouchableOpacity
               style={[
                 styles.modeButton,
-                formData.budgetMode === 'save_target' && styles.modeButtonActive,
+                formData.budgetMode === 'save' && styles.modeButtonActive,
               ]}
-              onPress={() => setFormData(prev => ({ ...prev, budgetMode: 'save_target' }))}
+              onPress={() => setFormData(prev => ({ ...prev, budgetMode: 'save' }))}
             >
               <Text style={[
                 styles.modeButtonText,
-                formData.budgetMode === 'save_target' && styles.modeButtonTextActive,
+                formData.budgetMode === 'save' && styles.modeButtonTextActive,
               ]}>
                 Save Target
               </Text>
@@ -404,7 +450,7 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
           <View style={styles.modeInfoContainer}>
             <Text style={styles.modeInfoText}>
               Mode: <Text style={styles.modeInfoValue}>
-                {formData.budgetMode === 'save_target' ? 'Save Target' : 'Spend Cap'}
+                {formData.budgetMode === 'save' ? 'Save Target' : 'Spend Cap'}
               </Text>
             </Text>
             <Text style={styles.helperText}>
@@ -416,7 +462,7 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
 
       {/* Period Control */}
       <View style={styles.formGroup}>
-        <Text style={styles.label}>Period Control</Text>
+        <Text style={styles.label}>Frequency</Text>
         <View style={styles.presetPeriodsContainer}>
           <TouchableOpacity
             style={[
@@ -460,7 +506,63 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
               Yearly
             </Text>
           </TouchableOpacity>
+          <TouchableOpacity
+            style={[
+              styles.presetPeriodButton,
+              formData.recurrencePattern === 'custom' && styles.presetPeriodButtonActive,
+            ]}
+            onPress={() => setFormData(prev => ({ ...prev, recurrencePattern: 'custom' }))}
+          >
+            <Text style={[
+              styles.presetPeriodText,
+              formData.recurrencePattern === 'custom' && styles.presetPeriodTextActive,
+            ]}>
+              Custom
+            </Text>
+          </TouchableOpacity>
         </View>
+
+        {/* Custom Frequency Options */}
+        {formData.recurrencePattern === 'custom' && (
+          <View style={styles.customFrequencyContainer}>
+            <Text style={styles.customFrequencyLabel}>Every</Text>
+            <TextInput
+              style={styles.customFrequencyInput}
+              value={formData.customFrequency.interval.toString()}
+              onChangeText={(text) => {
+                const interval = parseInt(text) || 1;
+                setFormData(prev => ({
+                  ...prev,
+                  customFrequency: { ...prev.customFrequency, interval }
+                }));
+              }}
+              keyboardType="numeric"
+              placeholder="1"
+            />
+            <View style={styles.customFrequencyUnits}>
+              {(['day', 'week', 'month', 'year'] as const).map((unit) => (
+                <TouchableOpacity
+                  key={unit}
+                  style={[
+                    styles.customFrequencyUnit,
+                    formData.customFrequency.unit === unit && styles.customFrequencyUnitActive,
+                  ]}
+                  onPress={() => setFormData(prev => ({
+                    ...prev,
+                    customFrequency: { ...prev.customFrequency, unit }
+                  }))}
+                >
+                  <Text style={[
+                    styles.customFrequencyUnitText,
+                    formData.customFrequency.unit === unit && styles.customFrequencyUnitTextActive,
+                  ]}>
+                    {unit}{formData.customFrequency.interval !== 1 ? 's' : ''}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        )}
         <View style={styles.toggleRow}>
           <Text style={styles.toggleLabel}>Recurring Budget</Text>
           <TouchableOpacity
@@ -480,36 +582,14 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
 
       {/* Date Selection */}
       <View style={styles.formGroup}>
-        <Text style={styles.label}>Budget Period</Text>
-        <View style={styles.dateRow}>
-          <View style={styles.dateInput}>
-            <Text style={styles.dateLabel}>Start Date</Text>
-            <TouchableOpacity
-              style={styles.dateButton}
-              onPress={() => {
-                setDatePickerType('start');
-                setShowDatePicker(true);
-              }}
-            >
-              <Text style={styles.dateText}>{formData.startDate}</Text>
-              <Ionicons name="calendar-outline" size={20} color="#6B7280" />
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.dateInput}>
-            <Text style={styles.dateLabel}>End Date</Text>
-            <TouchableOpacity
-              style={styles.dateButton}
-              onPress={() => {
-                setDatePickerType('end');
-                setShowDatePicker(true);
-              }}
-            >
-              <Text style={styles.dateText}>{formData.endDate || 'Select date'}</Text>
-              <Ionicons name="calendar-outline" size={20} color="#6B7280" />
-            </TouchableOpacity>
-          </View>
-        </View>
+        <Text style={styles.label}>Start Date</Text>
+        <TouchableOpacity
+          style={styles.dateButton}
+          onPress={() => setShowDatePicker(true)}
+        >
+          <Text style={styles.dateText}>{formData.startDate}</Text>
+          <Ionicons name="calendar-outline" size={20} color="#6B7280" />
+        </TouchableOpacity>
       </View>
 
       {/* Budget Scope */}
@@ -600,7 +680,7 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
                 setFormData(prev => ({ 
                   ...prev, 
                   goalSubtype: 'A',
-                  budgetMode: 'save_target' // Auto-set mode for subtype A
+                  budgetMode: 'save' // Auto-set mode for subtype A
                 }));
               }}
             >
@@ -644,7 +724,7 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
           </View>
           {formData.goalSubtype && (
             <Text style={styles.helperText}>
-              Mode automatically set to &quot;{formData.budgetMode === 'save_target' ? 'Save Target' : 'Spend Cap'}&quot; based on selected subtype.
+              Mode automatically set to &quot;{formData.budgetMode === 'save' ? 'Save Target' : 'Spend Cap'}&quot; based on selected subtype.
             </Text>
           )}
         </View>
@@ -769,9 +849,18 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
           </Text>
         </View>
         <View style={styles.summaryRow}>
-          <Text style={styles.summaryLabel}>Period</Text>
+          <Text style={styles.summaryLabel}>Start Date</Text>
+          <Text style={styles.summaryValue}>{formData.startDate}</Text>
+        </View>
+        <View style={styles.summaryRow}>
+          <Text style={styles.summaryLabel}>Frequency</Text>
           <Text style={styles.summaryValue}>
-            {formData.startDate} to {formData.endDate}
+            {formData.recurringBudget
+              ? formData.recurrencePattern === 'custom'
+                ? `Every ${formData.customFrequency.interval} ${formData.customFrequency.unit}${formData.customFrequency.interval !== 1 ? 's' : ''}`
+                : formData.recurrencePattern.charAt(0).toUpperCase() + formData.recurrencePattern.slice(1)
+              : 'One-time'
+            }
           </Text>
         </View>
         <View style={styles.summaryRow}>
@@ -788,13 +877,135 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
     </View>
   );
 
+  const renderStep6 = () => {
+    // Generate preview cycles
+    const generatePreviewCycles = () => {
+      if (!formData.recurringBudget) {
+        return [{
+          period: 'One-time Budget',
+          startDate: formData.startDate,
+          endDate: 'Ongoing',
+          amount: parseFloat(formData.amount) || 0,
+        }];
+      }
+
+      const cycles = [];
+      const startDate = new Date(formData.startDate);
+      const amount = parseFloat(formData.amount) || 0;
+
+      for (let i = 0; i < 6; i++) {
+        const cycleStart = new Date(startDate);
+        const cycleEnd = new Date(startDate);
+
+        // Calculate cycle dates based on frequency
+        switch (formData.recurrencePattern) {
+          case 'weekly':
+            cycleStart.setDate(startDate.getDate() + (i * 7));
+            cycleEnd.setDate(startDate.getDate() + ((i + 1) * 7) - 1);
+            break;
+          case 'monthly':
+            cycleStart.setMonth(startDate.getMonth() + i);
+            cycleEnd.setMonth(startDate.getMonth() + i + 1);
+            cycleEnd.setDate(0); // Last day of month
+            break;
+          case 'yearly':
+            cycleStart.setFullYear(startDate.getFullYear() + i);
+            cycleEnd.setFullYear(startDate.getFullYear() + i + 1);
+            cycleEnd.setDate(0); // Last day of year
+            break;
+          case 'custom':
+            const { interval, unit } = formData.customFrequency;
+            switch (unit) {
+              case 'day':
+                cycleStart.setDate(startDate.getDate() + (i * interval));
+                cycleEnd.setDate(startDate.getDate() + ((i + 1) * interval) - 1);
+                break;
+              case 'week':
+                cycleStart.setDate(startDate.getDate() + (i * interval * 7));
+                cycleEnd.setDate(startDate.getDate() + ((i + 1) * interval * 7) - 1);
+                break;
+              case 'month':
+                cycleStart.setMonth(startDate.getMonth() + (i * interval));
+                cycleEnd.setMonth(startDate.getMonth() + ((i + 1) * interval));
+                cycleEnd.setDate(0);
+                break;
+              case 'year':
+                cycleStart.setFullYear(startDate.getFullYear() + (i * interval));
+                cycleEnd.setFullYear(startDate.getFullYear() + ((i + 1) * interval));
+                cycleEnd.setDate(0);
+                break;
+            }
+            break;
+        }
+
+        const periodName = formData.recurrencePattern === 'custom'
+          ? `Cycle ${i + 1}`
+          : `${formData.recurrencePattern.charAt(0).toUpperCase() + formData.recurrencePattern.slice(1)} ${i + 1}`;
+
+        cycles.push({
+          period: periodName,
+          startDate: cycleStart.toISOString().split('T')[0],
+          endDate: cycleEnd.toISOString().split('T')[0],
+          amount: amount,
+        });
+      }
+
+      return cycles;
+    };
+
+    const previewCycles = generatePreviewCycles();
+
+    return (
+      <View style={styles.stepContainer}>
+        <Text style={styles.stepTitle}>Budget Cycles Preview</Text>
+        <Text style={styles.stepDescription}>
+          {formData.recurringBudget
+            ? 'Here\'s how your recurring budget cycles will look:'
+            : 'This is a one-time budget with no recurring cycles.'
+          }
+        </Text>
+
+        <View style={styles.cyclesPreview}>
+          {previewCycles.slice(0, 4).map((cycle, index) => (
+            <View key={index} style={styles.cycleCard}>
+              <View style={styles.cycleHeader}>
+                <Text style={styles.cyclePeriod}>{cycle.period}</Text>
+                <Text style={styles.cycleAmount}>
+                  {formatCurrencyAmount(cycle.amount, currency)}
+                </Text>
+              </View>
+              <Text style={styles.cycleDates}>
+                {cycle.startDate} to {cycle.endDate}
+              </Text>
+            </View>
+          ))}
+
+          {formData.recurringBudget && previewCycles.length > 4 && (
+            <View style={styles.moreCyclesIndicator}>
+              <Text style={styles.moreCyclesText}>
+                +{previewCycles.length - 4} more cycles...
+              </Text>
+            </View>
+          )}
+        </View>
+
+        <Text style={styles.cyclesNote}>
+          {formData.recurringBudget
+            ? 'Each cycle will automatically renew based on your frequency settings.'
+            : 'This budget will remain active until manually ended.'
+          }
+        </Text>
+      </View>
+    );
+  };
+
   const canProceed = () => {
     switch (step) {
       case 1:
         return budgetType !== '';
       case 2:
-        const basicValidation = formData.name.trim() !== '' && formData.amount !== '' && formData.endDate !== '';
-        
+        const basicValidation = formData.name.trim() !== '' && formData.amount !== '';
+
         // Type-specific validation
         if (budgetType === 'category' && !formData.categoryId) {
           return false;
@@ -804,7 +1015,7 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
             return false;
           }
         }
-        
+
         return basicValidation;
       case 3:
         // Allow proceeding even if no accounts selected (will default to all accounts)
@@ -812,6 +1023,8 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
       case 4:
         return true;
       case 5:
+        return true;
+      case 6:
         return true;
       default:
         return false;
@@ -830,7 +1043,7 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
         </View>
 
         <View style={styles.progressBar}>
-          <View style={[styles.progressFill, { width: `${(step / 5) * 100}%` }]} />
+          <View style={[styles.progressFill, { width: `${(step / 6) * 100}%` }]} />
         </View>
 
         <ScrollView style={styles.content}>
@@ -839,6 +1052,7 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
           {step === 3 && renderStep3()}
           {step === 4 && renderStep4()}
           {step === 5 && renderStep5()}
+          {step === 6 && renderStep6()}
         </ScrollView>
 
         <View style={styles.footer}>
@@ -858,7 +1072,7 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
                 !canProceed() && styles.nextButtonDisabled,
               ]}
               onPress={() => {
-                if (step < 5) {
+                if (step < 6) {
                   setStep(step + 1);
                 } else {
                   handleSubmit();
@@ -870,11 +1084,11 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
                 styles.nextButtonText,
                 !canProceed() && styles.nextButtonTextDisabled,
               ]}>
-                {step === 5 ? (loading ? 'Creating...' : 'Save Budget') : 'Next'}
+                {step === 6 ? (loading ? 'Creating...' : 'Save Budget') : 'Next'}
               </Text>
             </TouchableOpacity>
           </View>
-          {step === 5 && (
+          {step === 6 && (
             <TouchableOpacity
               style={styles.cancelButton}
               onPress={handleClose}
@@ -888,6 +1102,7 @@ const AddBudgetModal: React.FC<AddBudgetModalProps> = ({ visible = true, onClose
           visible={showDatePicker}
           onClose={() => setShowDatePicker(false)}
           onDateSelect={handleDateSelect}
+          title="Select Start Date"
           minDate={new Date()}
         />
       </View>
@@ -1500,6 +1715,113 @@ const styles = StyleSheet.create({
     fontFamily: 'InstrumentSerif-Regular', // Instrument Serif for text
     fontWeight: '400',
     color: '#10B981',
+  },
+  customFrequencyContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 12,
+    padding: 16,
+    backgroundColor: '#F9FAFB',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  customFrequencyLabel: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#000000',
+    marginRight: 12,
+  },
+  customFrequencyInput: {
+    width: 60,
+    textAlign: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    color: '#000000',
+    marginRight: 12,
+  },
+  customFrequencyUnits: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  customFrequencyUnit: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '#F3F4F6',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  customFrequencyUnitActive: {
+    backgroundColor: '#10B981',
+    borderColor: '#10B981',
+  },
+  customFrequencyUnitText: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#6B7280',
+  },
+  customFrequencyUnitTextActive: {
+    color: '#FFFFFF',
+  },
+  cyclesPreview: {
+    marginTop: 20,
+  },
+  cycleCard: {
+    backgroundColor: '#F9FAFB',
+    borderRadius: 8,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  cycleHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  cyclePeriod: {
+    fontSize: 16,
+    fontFamily: 'Poppins-SemiBold',
+    color: '#000000',
+  },
+  cycleAmount: {
+    fontSize: 16,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#10B981',
+  },
+  cycleDates: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#6B7280',
+  },
+  moreCyclesIndicator: {
+    alignItems: 'center',
+    paddingVertical: 12,
+    backgroundColor: '#F3F4F6',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  moreCyclesText: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#6B7280',
+  },
+  cyclesNote: {
+    fontSize: 14,
+    fontFamily: 'InstrumentSerif-Regular',
+    color: '#6B7280',
+    textAlign: 'center',
+    marginTop: 16,
+    lineHeight: 20,
   },
 });
 

@@ -18,7 +18,12 @@ import {
   scheduleCyclePayment as scheduleCyclePaymentUtil,
   setCycleOverride as setCycleOverrideUtil,
   removeCycleOverride as removeCycleOverrideUtil,
+} from '@/utils/cycles';
+import {
+  scheduleCyclePayment as scheduleCyclePaymentSchedulingUtil,
+  setCycleOverride as setCycleOverrideSchedulingUtil,
 } from '@/utils/recurringCycleScheduling';
+import { updateBillFromCycleOverride } from '@/utils/recurringBillGeneration';
 import { ScheduledPayment } from '@/utils/scheduledPayments';
 
 interface UseRecurringTransactionCyclesOptions {
@@ -367,7 +372,6 @@ export const useRecurringTransactionCycles = (
       await setCycleOverrideUtil(recurringTransactionId, cycleNumber, overrideData);
       
       // Update bills if they exist for this cycle
-      const { updateBillFromCycleOverride } = await import('@/utils/recurringBillGeneration');
       try {
         await updateBillFromCycleOverride(
           recurringTransactionId,

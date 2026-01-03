@@ -47,3 +47,27 @@ COMMENT ON COLUMN categories.deleted_at IS 'Timestamp when category was soft-del
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

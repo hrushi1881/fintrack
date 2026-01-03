@@ -103,3 +103,20 @@ export function formatCurrencySymbol(currencyCode: string = DEFAULT_CURRENCY): s
 export function formatCurrencyCode(currencyCode: string = DEFAULT_CURRENCY): string {
   return getCurrencyConfig(currencyCode).code;
 }
+
+/**
+ * Normalize currency string for comparison (trim whitespace, uppercase)
+ * This prevents mismatches due to case differences or whitespace
+ */
+export function normalizeCurrency(currency: string | null | undefined): string {
+  if (!currency) return DEFAULT_CURRENCY;
+  return currency.trim().toUpperCase();
+}
+
+/**
+ * Compare two currencies (case-insensitive, trimmed)
+ * Returns true if currencies match
+ */
+export function currenciesMatch(currency1: string | null | undefined, currency2: string | null | undefined): boolean {
+  return normalizeCurrency(currency1) === normalizeCurrency(currency2);
+}
