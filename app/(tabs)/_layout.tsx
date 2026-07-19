@@ -48,6 +48,7 @@ export default function TabLayout() {
       'bills': 'bills',
       'transactions': 'transactions',
       'overview': 'overview',
+      'monthly-overview': 'overview',
       'activity': 'activity',
       // Legacy routes still accessible but not in main nav
       'all': 'home',
@@ -65,7 +66,7 @@ export default function TabLayout() {
     { id: 'accounts', label: 'ACCOUNTS', icon: 'wallet', route: '/(tabs)/accounts' },
     { id: 'bills', label: 'BILLS', icon: 'receipt', route: '/(tabs)/bills' },
     { id: 'transactions', label: 'TRANSACTIONS', icon: 'list', route: '/(tabs)/transactions' },
-    { id: 'overview', label: 'OVERVIEW', icon: 'stats-chart', route: '/(tabs)/overview' },
+    { id: 'overview', label: 'OVERVIEW', icon: 'stats-chart', route: '/(tabs)/monthly-overview' },
     { id: 'activity', label: 'ACTIVITY', icon: 'add-circle', route: '/(tabs)/activity' },
   ];
 
@@ -75,9 +76,10 @@ export default function TabLayout() {
     { id: 'accounts', label: 'ACCOUNTS', icon: 'wallet', route: '/(tabs)/accounts' },
     { id: 'bills', label: 'BILLS', icon: 'receipt', route: '/(tabs)/bills' },
     { id: 'transactions', label: 'TRANSACTIONS', icon: 'list', route: '/(tabs)/transactions' },
-    { id: 'overview', label: 'OVERVIEW', icon: 'stats-chart', route: '/(tabs)/overview' },
+    { id: 'overview', label: 'OVERVIEW', icon: 'stats-chart', route: '/(tabs)/monthly-overview' },
     { id: 'activity', label: 'ACTIVITY', icon: 'add-circle', route: '/(tabs)/activity' },
     { id: 'analytics', label: 'ANALYTICS', icon: 'bar-chart', route: '/(tabs)/analytics' },
+    { id: 'income', label: 'INCOME', icon: 'cash', route: '/(tabs)/income-overview' },
     { id: 'budgets', label: 'BUDGETS', icon: 'pie-chart', route: '/(tabs)/budgets' },
     { id: 'recurring', label: 'RECURRING', icon: 'repeat', route: '/(tabs)/recurring' },
     { id: 'goals', label: 'GOALS', icon: 'flag', route: '/(tabs)/goals' },
@@ -118,6 +120,12 @@ export default function TabLayout() {
           />
           <Tabs.Screen
             name="overview"
+            options={{
+              href: null,
+            }}
+          />
+          <Tabs.Screen
+            name="monthly-overview"
             options={{
               href: null,
             }}
@@ -190,9 +198,15 @@ export default function TabLayout() {
               href: null,
             }}
           />
-          <Tabs.Screen
-            name="recurring"
-            options={{
+      <Tabs.Screen
+        name="recurring"
+        options={{
+              href: null,
+        }}
+      />
+      <Tabs.Screen
+        name="income-overview"
+        options={{
               href: null,
         }}
       />

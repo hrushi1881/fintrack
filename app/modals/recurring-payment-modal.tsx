@@ -29,8 +29,11 @@ import {
   createScheduledPayment,
   CreateScheduledPaymentData,
   fetchScheduledPaymentById,
-  markScheduledPaymentPaid,
 } from '@/utils/scheduledPayments';
+import {
+  BucketRef,
+  recordRecurringPayment,
+} from '@/utils/recurringPaymentActions';
 
 type RecurringPaymentModalProps = {
   visible: boolean;
@@ -239,34 +242,31 @@ export default function RecurringPaymentModal({
       Alert.alert('Enter valid amount', 'Amount must be greater than zero.');
       return;
     }
+
+    if (!recurring) {
+      Alert.alert('Missing data', 'Recurring transaction not loaded yet.');
+      return;
+    }
+
     try {
       setSaving(true);
-      // Ensure scheduled exists
-      let schedId = scheduled?.id;
-      if (!schedId) {
-        const payload = buildScheduledPayload();
-        const created = await createScheduledPayment(payload);
-        schedId = created.id;
-      }
-      // Spend
-      const bucketParam = {
+
+      const bucketRef: BucketRef = {
         type: selectedFundBucket.type === 'borrowed' ? 'liability' : selectedFundBucket.type,
         id: selectedFundBucket.type !== 'personal' ? selectedFundBucket.id : null,
       };
-      const { data: rpcData, error: rpcError } = await supabase.rpc('spend_from_account_bucket', {
-        p_user_id: user.id,
-        p_account_id: selectedAccountId,
-        p_bucket: bucketParam,
-        p_amount: amountNum,
-        p_category: scheduled?.category_id || recurring?.category_id || null,
-        p_description: description || recurring?.title || 'Recurring payment',
-        p_date: paymentDate.toISOString().split('T')[0],
-        p_currency: recurring?.currency || currency,
-      });
-      if (rpcError) throw rpcError;
-      const transactionId = rpcData as string | null;
 
-      await markScheduledPaymentPaid(schedId, transactionId);
+      await recordRecurringPayment({
+        scheduledPaymentId: scheduled?.id,
+        recurringTransactionId,
+        cycleNumber,
+        accountId: selectedAccountId,
+        bucket: bucketRef,
+        amount: amountNum,
+        date: paymentDate.toISOString().split('T')[0],
+        currency: recurring.currency || currency,
+        description: description || recurring.title || 'Recurring payment',
+      });
 
       await Promise.all([
         refreshAccounts(),

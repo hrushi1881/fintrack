@@ -16,7 +16,7 @@ import { LinearGradient } from 'expo-linear-gradient';
  * Used throughout FinTrack for a modern, luxurious feel
  */
 
-type GlassVariant = 'light' | 'dark' | 'frosted' | 'crystal' | 'mint';
+type GlassVariant = 'light' | 'dark' | 'frosted' | 'crystal' | 'mint' | 'premium' | 'subtle';
 type GlassSize = 'sm' | 'md' | 'lg' | 'xl';
 
 interface LiquidGlassCardProps extends ViewProps {
@@ -84,6 +84,22 @@ const variantConfig = {
     shimmerColor: 'rgba(255, 255, 255, 0.5)',
     tint: 'light' as const,
     blurIntensity: 25,
+  },
+  premium: {
+    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+    borderColor: 'rgba(255, 255, 255, 0.7)',
+    overlayGradient: ['rgba(255, 255, 255, 0.6)', 'rgba(245, 245, 245, 0.3)'],
+    shimmerColor: 'rgba(255, 255, 255, 0.85)',
+    tint: 'light' as const,
+    blurIntensity: 40,
+  },
+  subtle: {
+    backgroundColor: 'rgba(255, 255, 255, 0.5)',
+    borderColor: 'rgba(200, 200, 200, 0.25)',
+    overlayGradient: ['rgba(255, 255, 255, 0.25)', 'rgba(240, 240, 240, 0.1)'],
+    shimmerColor: 'rgba(255, 255, 255, 0.4)',
+    tint: 'light' as const,
+    blurIntensity: 15,
   },
 };
 

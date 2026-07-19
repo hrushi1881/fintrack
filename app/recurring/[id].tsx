@@ -567,6 +567,7 @@ const styles = StyleSheet.create({
     paddingBottom: 100,
   },
   cyclesContainer: {
+    paddingHorizontal: 20,
     paddingBottom: 20,
   },
   emptyState: {

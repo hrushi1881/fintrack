@@ -18,10 +18,6 @@ import {
   scheduleCyclePayment as scheduleCyclePaymentUtil,
   setCycleOverride as setCycleOverrideUtil,
   removeCycleOverride as removeCycleOverrideUtil,
-} from '@/utils/cycles';
-import {
-  scheduleCyclePayment as scheduleCyclePaymentSchedulingUtil,
-  setCycleOverride as setCycleOverrideSchedulingUtil,
 } from '@/utils/recurringCycleScheduling';
 import { updateBillFromCycleOverride } from '@/utils/recurringBillGeneration';
 import { ScheduledPayment } from '@/utils/scheduledPayments';

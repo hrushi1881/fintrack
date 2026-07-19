@@ -428,53 +428,73 @@ export default function TransactionDetailScreen() {
 
   if (loading) {
     return (
-      <Modal visible={true} animationType="slide" presentationStyle="pageSheet">
-        <View style={styles.container}>
-          <StatusBar barStyle="dark-content" />
-          <SafeAreaView style={styles.safeArea}>
-            <View style={styles.loadingContainer}>
-              <LiquidGlassCard variant="frosted" size="lg" elevation="medium">
-                <View style={styles.loadingContent}>
-                  <Ionicons name="hourglass-outline" size={32} color="rgba(0, 0, 0, 0.4)" />
-                  <Text style={styles.loadingText}>Loading transaction...</Text>
-                </View>
-              </LiquidGlassCard>
-            </View>
-          </SafeAreaView>
+      <SafeAreaView style={styles.container}>
+        <StatusBar barStyle="dark-content" />
+        <View style={styles.safeArea}>
+          {/* Header for loading state */}
+          <View style={styles.header}>
+            <Pressable
+              style={({ pressed }) => [styles.headerButton, { opacity: pressed ? 0.7 : 1 }]}
+              onPress={handleBack}
+            >
+              <Ionicons name="chevron-back" size={24} color="#000000" />
+            </Pressable>
+            <Text style={styles.headerTitle}>Transaction</Text>
+            <View style={styles.headerButton} />
+          </View>
+
+          <View style={styles.loadingContainer}>
+            <LiquidGlassCard variant="frosted" size="lg" elevation="medium">
+              <View style={styles.loadingContent}>
+                <Ionicons name="hourglass-outline" size={32} color="rgba(0, 0, 0, 0.4)" />
+                <Text style={styles.loadingText}>Loading transaction...</Text>
+              </View>
+            </LiquidGlassCard>
+          </View>
         </View>
-      </Modal>
+      </SafeAreaView>
     );
   }
 
   if (!transaction) {
     return (
-      <Modal visible={true} animationType="slide" presentationStyle="pageSheet">
-        <View style={styles.container}>
-          <StatusBar barStyle="dark-content" />
-          <SafeAreaView style={styles.safeArea}>
-            <View style={styles.errorContainer}>
-              <LiquidGlassCard variant="light" size="xl" elevation="medium">
-                <View style={styles.errorContent}>
-                  <View style={styles.errorIconContainer}>
-                    <Ionicons name="alert-circle-outline" size={40} color="#EF4444" />
-                  </View>
-                  <Text style={styles.errorTitle}>Transaction Not Found</Text>
-                  <Text style={styles.errorDescription}>
-                    This transaction may have been deleted or doesn't exist.
-                  </Text>
-                  <Pressable 
-                    style={({ pressed }) => [styles.errorButton, { opacity: pressed ? 0.9 : 1 }]}
-                    onPress={handleBack}
-                  >
-                    <Ionicons name="arrow-back" size={18} color="#FFFFFF" />
-                    <Text style={styles.errorButtonText}>Go Back</Text>
-                  </Pressable>
+      <SafeAreaView style={styles.container}>
+        <StatusBar barStyle="dark-content" />
+        <View style={styles.safeArea}>
+          {/* Header for error state */}
+          <View style={styles.header}>
+            <Pressable
+              style={({ pressed }) => [styles.headerButton, { opacity: pressed ? 0.7 : 1 }]}
+              onPress={handleBack}
+            >
+              <Ionicons name="chevron-back" size={24} color="#000000" />
+            </Pressable>
+            <Text style={styles.headerTitle}>Transaction</Text>
+            <View style={styles.headerButton} />
+          </View>
+
+          <View style={styles.errorContainer}>
+            <LiquidGlassCard variant="light" size="xl" elevation="medium">
+              <View style={styles.errorContent}>
+                <View style={styles.errorIconContainer}>
+                  <Ionicons name="alert-circle-outline" size={40} color="#EF4444" />
                 </View>
-              </LiquidGlassCard>
-            </View>
-          </SafeAreaView>
+                <Text style={styles.errorTitle}>Transaction Not Found</Text>
+                <Text style={styles.errorDescription}>
+                  This transaction may have been deleted or doesn't exist.
+                </Text>
+                <Pressable
+                  style={({ pressed }) => [styles.errorButton, { opacity: pressed ? 0.9 : 1 }]}
+                  onPress={handleBack}
+                >
+                  <Ionicons name="arrow-back" size={18} color="#FFFFFF" />
+                  <Text style={styles.errorButtonText}>Go Back</Text>
+                </Pressable>
+              </View>
+            </LiquidGlassCard>
+          </View>
         </View>
-      </Modal>
+      </SafeAreaView>
     );
   }
 
@@ -482,11 +502,10 @@ export default function TransactionDetailScreen() {
   const fundConfig = getFundConfig(fundInfo?.fundType || null);
 
   return (
-    <Modal visible={true} animationType="slide" presentationStyle="pageSheet">
-      <View style={styles.container}>
-        <StatusBar barStyle="dark-content" />
-        <SafeAreaView style={styles.safeArea}>
-          <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
+    <SafeAreaView style={styles.container}>
+      <StatusBar barStyle="dark-content" />
+      <View style={styles.safeArea}>
+        <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
             {/* Header */}
             <View style={styles.header}>
               <Pressable 
@@ -769,19 +788,17 @@ export default function TransactionDetailScreen() {
             {/* Bottom Spacing */}
             <View style={{ height: 40 }} />
           </ScrollView>
-        </SafeAreaView>
-
-        {/* Edit Transaction Modal */}
-        <EditTransactionModal
-          visible={editModalVisible}
-          onClose={() => setEditModalVisible(false)}
-          transaction={transaction}
-          onSuccess={() => {
-            fetchTransactionDetails();
-          }}
-        />
-      </View>
-    </Modal>
+          {/* Edit Transaction Modal */}
+          <EditTransactionModal
+            visible={editModalVisible}
+            onClose={() => setEditModalVisible(false)}
+            transaction={transaction}
+            onSuccess={() => {
+              fetchTransactionDetails();
+            }}
+          />
+        </View>
+      </SafeAreaView>
   );
 }
 

@@ -176,20 +176,12 @@ export default function RecurringTransactionCycles({
 
   return (
     <View style={styles.container}>
-      {/* Header */}
-      <View style={styles.header}>
-        <Text style={styles.title}>Cycles</Text>
-        <Text style={styles.subtitle}>
-          Payment history and upcoming commitments
-        </Text>
-      </View>
-
       {/* Stacked Cycle Snapshots */}
       <View style={{ paddingHorizontal: 16, paddingBottom: 16 }}>
         <Text style={styles.title}>Cycles</Text>
         <Text style={styles.subtitle}>
-          {recurringTransaction?.type === 'income' 
-            ? 'Expected vs received income per cycle.' 
+          {recurringTransaction?.type === 'income'
+            ? 'Expected vs received income per cycle.'
             : 'Target vs paid, bills, and payments per cycle.'}
         </Text>
         <View style={styles.snapshotStack}>
@@ -342,7 +334,7 @@ export default function RecurringTransactionCycles({
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
+    // Removed flex: 1 to prevent layout issues in ScrollView
   },
   centerContainer: {
     flex: 1,

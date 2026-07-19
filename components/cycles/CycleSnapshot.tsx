@@ -211,7 +211,7 @@ export default function CycleSnapshot({
         >
           <View style={styles.heroHeader}>
             <View>
-              <Text style={styles.heroTitle}>Cycle {cycle.cycleNumber ?? ''}</Text>
+              <Text style={styles.heroTitle}>Cycle {String(cycle.cycleNumber ?? '')}</Text>
               <Text style={styles.heroSub}>{formatDateRange(cycle.startDate, cycle.endDate)}</Text>
             </View>
             <View style={[styles.statusPill, needsAttention && styles.statusPillWarning]}>
@@ -279,14 +279,14 @@ export default function CycleSnapshot({
           {/* Progress percentage text */}
           <Text style={styles.progressText}>
             {Math.round(progress * 100)}% {progress >= 1 ? '✓' : 'complete'}
-            {cycle.amountShort && cycle.amountShort > 0 && ` • ${formatCurrency(cycle.amountShort)} remaining`}
+            {cycle.amountShort && cycle.amountShort > 0 ? ` • ${formatCurrency(cycle.amountShort)} remaining` : ''}
           </Text>
 
           <TouchableOpacity style={styles.heroButton} onPress={onViewSchedule} activeOpacity={0.85}>
             <Text style={styles.heroButtonText}>
               {nextBill ? `Pay Next Bill (${formatCurrency(nextBill.totalAmount ?? nextBill.amount)})` : 'Make Payment'}
             </Text>
-            <Ionicons name="chevron-forward" size={16} color={palette.textPrimary} />
+            <Ionicons name="chevron-forward" size={16} color={palette.textPrimary} style={{}} />
           </TouchableOpacity>
           <TouchableOpacity style={styles.secondaryButton} onPress={() => setShowDetails(true)} activeOpacity={0.85}>
             <Text style={styles.secondaryButtonText}>Cycle Details & Rules</Text>
@@ -364,7 +364,7 @@ export default function CycleSnapshot({
 
             {sortedBills.length > 3 && (
               <Text style={styles.billSummary}>
-                {sortedBills.length - 3} more bill{sortedBills.length - 3 === 1 ? '' : 's'}
+                {String(sortedBills.length - 3)} more bill{sortedBills.length - 3 === 1 ? '' : 's'}
               </Text>
             )}
 
@@ -395,7 +395,7 @@ export default function CycleSnapshot({
                 <View style={[styles.billChip, { backgroundColor: chip.bg }]}>
                   <Text style={[styles.billChipText, { color: chip.fg }]}>{chip.label}</Text>
                 </View>
-                {p.cycleNumber ? <Text style={styles.paymentMeta}>Cycle {p.cycleNumber}</Text> : null}
+                {p.cycleNumber ? <Text style={styles.paymentMeta}>Cycle {String(p.cycleNumber)}</Text> : null}
               </View>
             );
           })}
@@ -470,8 +470,8 @@ export default function CycleSnapshot({
                   </View>
                 
                 {/* Rules chips with window explanation */}
-                <View style={styles.chipGroup}>
-                  {cycleRulesDetailed && cycleRulesDetailed.length > 0 && cycleRulesDetailed.slice(0, 6).map((rule, idx) => (
+                <View style={styles.chipGroup} key="cycle-rules-chips">
+                  {cycleRulesDetailed && cycleRulesDetailed.length > 0 ? cycleRulesDetailed.slice(0, 6).map((rule, idx) => (
                     rule && rule.text ? (
                       <View 
                         style={[
@@ -499,7 +499,7 @@ export default function CycleSnapshot({
                         </Text>
                     </View>
                     ) : null
-                  ))}
+                  )) : null}
                 </View>
                 
                 {/* Window status indicator */}
